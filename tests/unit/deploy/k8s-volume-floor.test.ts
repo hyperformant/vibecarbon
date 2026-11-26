@@ -19,6 +19,7 @@ import {
   renderK8sStorageClassPlaceholder,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
+import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
@@ -149,6 +150,24 @@ describe('the volume floor raises a small request at render time', () => {
   it('VultrProvider.K8S_MIN_VOLUME_GI is 10 and the base is 0', () => {
     expect(VultrProvider.K8S_MIN_VOLUME_GI).toBe(10);
     expect(BaseProvider.K8S_MIN_VOLUME_GI).toBe(0);
+  });
+
+  it('ScalewayProvider.K8S_MIN_VOLUME_GI is 5, and a 1Gi claim renders as 5Gi with it', () => {
+    // scaleway-csi passes a claim's bytes through unrounded; the driver and
+    // the SDK floor a volume at 1 GB, the console and docs at 5 GB. Which one
+    // the Block API holds is unconfirmed, so the larger.
+    expect(ScalewayProvider.K8S_MIN_VOLUME_GI).toBe(5);
+    const { 'pvc.yaml': out } = render(
+      { 'pvc.yaml': pvc('1Gi') },
+      { minVolumeGi: ScalewayProvider.K8S_MIN_VOLUME_GI },
+    );
+    expect(out).toBe(pvc('5Gi').replace(PLACEHOLDER, CLASS));
+    // The db's 10Gi stays as it is.
+    const { 'db.yaml': db } = render(
+      { 'db.yaml': pvc('10Gi') },
+      { minVolumeGi: ScalewayProvider.K8S_MIN_VOLUME_GI },
+    );
+    expect(requests(db)).toEqual(['10Gi']);
   });
 });
 

@@ -62,7 +62,16 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-readers.js';
+import {
+  CLOUD_SECRET_READERS,
+  CLOUD_SECRETS_ZONE,
+  type CloudSecretReaders,
+  COMPANION_VALUES,
+  cloudSecretsOf,
+  manifestUrls,
+  OPERATOR_COMPANIONS,
+  stubOperatorCompanions,
+} from '../../_shared/cloud-secret-readers.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import {
@@ -272,9 +281,14 @@ const MASTER_ID = '4242';
 let apiStatus = 200;
 let apiServerId = MASTER_ID;
 let apiThrows: Error | null = null;
-const apiReads: { url: string; bearer: string | null }[] = [];
+const apiReads: { url: string; bearer: string | null; xAuthToken: string | null }[] = [];
 async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> {
-  apiReads.push({ url: String(input), bearer: new Headers(init?.headers).get('authorization') });
+  const headers = new Headers(init?.headers);
+  apiReads.push({
+    url: String(input),
+    bearer: headers.get('authorization'),
+    xAuthToken: headers.get('x-auth-token'),
+  });
   if (apiThrows) throw apiThrows;
   const id = Number(apiServerId);
   // Vultr's error is a string where Hetzner's is an object, so it gets its own.
@@ -294,6 +308,15 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
     headers: { 'content-type': 'application/json' },
   });
 }
+
+// Scaleway's Secret carries the operator's access key and project id beside
+// the token, and its k8sCloudSecrets refuses without them. Stubbed here, as
+// the tests are collected (GITOPS_UNREAD calls it then), and again before each
+// test, since the token checks' afterEach unstubs every env.
+stubOperatorCompanions();
+beforeEach(() => {
+  stubOperatorCompanions();
+});
 
 const K8S_PROVIDERS = k8sCensusProviders('csi');
 const OTHER_PROVIDERS = Object.entries(PROVIDERS).filter(
@@ -321,6 +344,31 @@ const keyAt = (namespace: string, secret: string, key: string) => `${namespace}/
 const byName = (a: { namespace: string; name: string }, b: { namespace: string; name: string }) =>
   `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`);
 
+/**
+ * The keys a provider's readers require, `namespace/secret:key`: each
+ * non-optional ref's key, and for an `(envFrom)` ref, which takes the whole
+ * Secret, the keys its record's `envFromKeys` names. An `(envFrom)` ref with
+ * no entry, or an entry no `(envFrom)` ref names, throws: the record would
+ * say nothing of what the reader needs, or of whom.
+ */
+function requiredKeys({ refs, envFromKeys = {} }: CloudSecretReaders): string[] {
+  const named = new Set<string>();
+  const keys = refs
+    .filter(({ optional }) => !optional)
+    .flatMap(({ namespace, secret, key }) => {
+      if (key !== '(envFrom)') return [keyAt(namespace, secret, key)];
+      const at = `${namespace}/${secret}`;
+      named.add(at);
+      if (!envFromKeys[at])
+        throw new Error(`${at} is read through envFrom, and envFromKeys names none of its keys`);
+      return envFromKeys[at].map((k) => keyAt(namespace, secret, k));
+    });
+  for (const at of Object.keys(envFromKeys)) {
+    if (!named.has(at)) throw new Error(`envFromKeys names ${at}, which no (envFrom) ref reads`);
+  }
+  return [...new Set(keys)].sort();
+}
+
 describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
   it('there are k8s providers to check, each with a record of its readers', () => {
     expect(K8S_PROVIDERS.length).toBeGreaterThan(0);
@@ -338,18 +386,17 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
   );
 
   it.each(K8S_PROVIDERS)(
-    '%s: every key a reader requires and no other, each holding the token',
+    '%s: every key a reader requires and no other, each holding the token or its companion',
     (id, Provider) => {
-      const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
+      const secrets = cloudSecretsOf(Provider, TOKEN);
       const written = secrets.flatMap(({ namespace, name, stringData }) =>
         Object.keys(stringData).map((key) => keyAt(namespace, name, key)),
       );
-      const required = CLOUD_SECRET_READERS[id].refs
-        .filter(({ optional }) => !optional)
-        .map(({ namespace, secret, key }) => keyAt(namespace, secret, key));
-      expect(written.sort()).toEqual([...new Set(required)].sort());
+      expect(written.sort()).toEqual(requiredKeys(CLOUD_SECRET_READERS[id]));
       for (const { stringData } of secrets) {
-        for (const value of Object.values(stringData)) expect(value).toBe(TOKEN);
+        for (const [key, value] of Object.entries(stringData)) {
+          expect(value, key).toBe(COMPANION_VALUES[id]?.[key] ?? TOKEN);
+        }
       }
       // An optional key reads one of these Secrets too, so nothing reads a
       // Secret the CLI does not write.
@@ -360,13 +407,74 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
     },
   );
 
+  it('Scaleway: SCW_SECRET_KEY holds the token, the other three its companions and the zone', () => {
+    expect(cloudSecretsOf(PROVIDERS.scaleway, TOKEN)).toEqual([
+      {
+        namespace: 'kube-system',
+        name: 'scaleway-csi-secret',
+        stringData: {
+          SCW_ACCESS_KEY: OPERATOR_COMPANIONS.SCALEWAY_ACCESS_KEY,
+          SCW_SECRET_KEY: TOKEN,
+          SCW_DEFAULT_PROJECT_ID: OPERATOR_COMPANIONS.SCALEWAY_DEFAULT_PROJECT_ID,
+          SCW_DEFAULT_ZONE: CLOUD_SECRETS_ZONE,
+        },
+      },
+    ]);
+    expect(COMPANION_VALUES.scaleway).toEqual({
+      SCW_ACCESS_KEY: OPERATOR_COMPANIONS.SCALEWAY_ACCESS_KEY,
+      SCW_DEFAULT_PROJECT_ID: OPERATOR_COMPANIONS.SCALEWAY_DEFAULT_PROJECT_ID,
+      SCW_DEFAULT_ZONE: CLOUD_SECRETS_ZONE,
+    });
+  });
+
+  it('Scaleway refuses with no zone or no companions', () => {
+    // An empty SCW_DEFAULT_ZONE leaves the CSI controller without a zone, and
+    // a missing companion without a credential it can use.
+    for (const region of ['', undefined]) {
+      expect(() =>
+        PROVIDERS.scaleway.k8sCloudSecrets({ token: TOKEN, region: region as string }),
+      ).toThrow(/zone/);
+    }
+    // Empty, not undefined: an empty value reads as unset (readOperatorVar),
+    // and stubEnv's delete misses a process.env something replaced.
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    expect(() => cloudSecretsOf(PROVIDERS.scaleway, TOKEN)).toThrow(
+      /^Scaleway needs SCALEWAY_DEFAULT_PROJECT_ID set alongside SCALEWAY_SECRET_KEY/,
+    );
+    vi.stubEnv('SCALEWAY_ACCESS_KEY', '');
+    expect(() => cloudSecretsOf(PROVIDERS.scaleway, TOKEN)).toThrow(
+      /^Scaleway needs SCALEWAY_ACCESS_KEY and SCALEWAY_DEFAULT_PROJECT_ID set/,
+    );
+  });
+
+  it('an envFrom ref expands to its envFromKeys', () => {
+    const ref = { workload: 'deployment/d', namespace: 'ns', secret: 's', key: '(envFrom)' };
+    expect(
+      requiredKeys({
+        manifests: [],
+        refs: [ref, { ...ref, key: 'other', optional: true }, { ...ref, secret: 't', key: 'k' }],
+        envFromKeys: { 'ns/s': ['B', 'A'] },
+      }),
+    ).toEqual(['ns/s:A', 'ns/s:B', 'ns/t:k']);
+  });
+
+  it('an (envFrom) ref without envFromKeys fails the census, and so does an entry no ref names', () => {
+    const ref = { workload: 'deployment/d', namespace: 'ns', secret: 's', key: '(envFrom)' };
+    expect(() => requiredKeys({ manifests: [], refs: [ref] })).toThrow(
+      'ns/s is read through envFrom, and envFromKeys names none of its keys',
+    );
+    expect(() =>
+      requiredKeys({ manifests: [], refs: [{ ...ref, key: 'k' }], envFromKeys: { 'ns/s': ['A'] } }),
+    ).toThrow('envFromKeys names ns/s, which no (envFrom) ref reads');
+  });
+
   it.each(OTHER_PROVIDERS)('%s has no k8s tier, so no cloud Secrets', (_id, Provider) => {
-    expect(Provider.k8sCloudSecrets({ token: TOKEN })).toEqual([]);
+    expect(cloudSecretsOf(Provider, TOKEN)).toEqual([]);
     expect(Provider.K8S_RETIRED_CLOUD_SECRETS).toEqual([]);
   });
 
   it('the base class has none', () => {
-    expect(BaseProvider.k8sCloudSecrets({ token: TOKEN })).toEqual([]);
+    expect(cloudSecretsOf(BaseProvider, TOKEN)).toEqual([]);
     expect(BaseProvider.K8S_RETIRED_CLOUD_SECRETS).toEqual([]);
   });
 
@@ -400,7 +508,7 @@ describe('docs/deploy-hetzner.md says where the token lives, in each mode', () =
 
   it('k8s: every Secret the CLI writes it into, by name, the autoscaler’s too', () => {
     const names = [
-      ...PROVIDERS.hetzner.k8sCloudSecrets({ token: TOKEN }).map(({ name }) => name),
+      ...cloudSecretsOf(PROVIDERS.hetzner, TOKEN).map(({ name }) => name),
       'carbon-autoscaler-config',
     ];
     const flat = prerequisite.replace(/\s+/g, ' ');
@@ -438,7 +546,7 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
   });
 
   it.each(K8S_PROVIDERS)('%s: the old Secrets and keys less the current ones', (id, Provider) => {
-    const written = Provider.k8sCloudSecrets({ token: TOKEN });
+    const written = cloudSecretsOf(Provider, TOKEN);
     // What an earlier vibecarbon made on this provider's clusters: its boot
     // script's Secrets, and the old deploy.yml's, which ran on every provider.
     const made = new Map<
@@ -494,10 +602,11 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
   it.each(K8S_PROVIDERS)('%s: nothing upstream reads a retired one', (id, Provider) => {
     for (const { namespace, secret, key } of CLOUD_SECRET_READERS[id].refs) {
       for (const retired of Provider.K8S_RETIRED_CLOUD_SECRETS) {
+        // An envFrom reader takes every key of its Secret, a retired one too.
         const reads =
           retired.namespace === namespace &&
           retired.name === secret &&
-          (!retired.keys || retired.keys.includes(key));
+          (!retired.keys || key === '(envFrom)' || retired.keys.includes(key));
         expect(reads, `${namespace}/${secret}:${key}`).toBe(false);
       }
     }
@@ -564,6 +673,7 @@ describe('applyCloudSecrets', () => {
       env: { ...process.env, KUBECONFIG },
       ProviderClass: Provider,
       token: token.length > 0 ? token[0] : TOKEN,
+      region: CLOUD_SECRETS_ZONE,
       masterId: MASTER_ID,
       environment: 'prod',
       operatorEnv: 'prod',
@@ -585,7 +695,7 @@ describe('applyCloudSecrets', () => {
    * script left them, with kubectl's last-applied record of `token`.
    */
   const holdAll = (Provider: typeof BaseProvider, token: string, { boot = false } = {}) => {
-    for (const { namespace, name, stringData } of Provider.k8sCloudSecrets({ token })) {
+    for (const { namespace, name, stringData } of cloudSecretsOf(Provider, token)) {
       cluster.set(`${namespace}/${name}`, { ...stringData });
       if (boot) lastApplied.set(`${namespace}/${name}`, { ...stringData });
     }
@@ -644,7 +754,7 @@ describe('applyCloudSecrets', () => {
   ];
   /** One reader per Secret of this provider, beside two workloads that read none of them. */
   const readerPerSecret = (Provider: typeof BaseProvider) => {
-    for (const { namespace, name } of Provider.k8sCloudSecrets({ token: TOKEN })) {
+    for (const { namespace, name } of cloudSecretsOf(Provider, TOKEN)) {
       workloads[namespace] = [...(workloads[namespace] ?? []), envReader(`reads-${name}`, name)];
     }
     for (const ns of Object.keys(workloads)) workloads[ns].push(...nonReaders);
@@ -685,9 +795,7 @@ describe('applyCloudSecrets', () => {
   const GITOPS_UNREAD = K8S_PROVIDERS.filter(([, P]) =>
     legacyGitopsSecrets().every(
       ({ namespace, name }) =>
-        !P.k8sCloudSecrets({ token: TOKEN }).some(
-          (w) => w.namespace === namespace && w.name === name,
-        ),
+        !cloudSecretsOf(P, TOKEN).some((w) => w.namespace === namespace && w.name === name),
     ),
   );
   /** A provider whose token goes into two Secrets in one namespace. */
@@ -723,7 +831,7 @@ describe('applyCloudSecrets', () => {
       expect(env?.KUBECONFIG).toBe(KUBECONFIG);
       const docs = loadAll(String(input));
       expect(docs).toEqual(
-        Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name, stringData }) => ({
+        cloudSecretsOf(Provider, TOKEN).map(({ namespace, name, stringData }) => ({
           apiVersion: 'v1',
           kind: 'Secret',
           metadata: { name, namespace },
@@ -731,6 +839,16 @@ describe('applyCloudSecrets', () => {
           stringData,
         })),
       );
+    },
+  );
+
+  it.each(K8S_PROVIDERS)(
+    "%s: applyCloudSecrets passes the cluster's region",
+    async (_id, Provider) => {
+      const spy = vi.spyOn(Provider, 'k8sCloudSecrets');
+      await apply(Provider);
+      expect(spy).toHaveBeenCalledWith({ token: TOKEN, region: 'fr-par-1' });
+      expect(spy.mock.calls.every(([values]) => values.region === CLOUD_SECRETS_ZONE)).toBe(true);
     },
   );
 
@@ -765,6 +883,7 @@ describe('applyCloudSecrets', () => {
         'Handing your DigitalOcean API token to the cluster (kube-system/digitalocean).',
       linode: 'Handing your Linode API token to the cluster (kube-system/linode).',
       vultr: 'Handing your Vultr API token to the cluster (kube-system/vultr-csi).',
+      scaleway: 'Handing your Scaleway API token to the cluster (kube-system/scaleway-csi-secret).',
     });
   });
 
@@ -809,15 +928,16 @@ describe('applyCloudSecrets', () => {
       digitalocean: 'Failed to get server: The resource you were accessing could not be found.',
       linode: 'Failed to get server: Not found',
       vultr: 'Failed to get server: Invalid instance-id.',
+      scaleway: `Failed to get server: server ${MASTER_ID} not found in any zone`,
     };
     /** The Secrets a refusal says it left as they were, as the provider names them. */
     const secretsOf = (Provider: typeof BaseProvider) =>
-      Provider.k8sCloudSecrets({ token: TOKEN })
+      cloudSecretsOf(Provider, TOKEN)
         .map(({ namespace, name }) => `${namespace}/${name}`)
         .join(' and ');
     /** Each Secret's data as the cluster holds it now. */
     const held = (Provider: typeof BaseProvider) =>
-      Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name }) =>
+      cloudSecretsOf(Provider, TOKEN).map(({ namespace, name }) =>
         cluster.get(`${namespace}/${name}`),
       );
     /** The cluster as an earlier deploy left it, with OLD, and one reader per Secret. */
@@ -825,12 +945,28 @@ describe('applyCloudSecrets', () => {
       holdAll(Provider, OLD);
       readerPerSecret(Provider);
     };
-    /** The read the check made: one, of the master, with the token it checks. */
-    const expectOneRead = (Provider: typeof BaseProvider) => {
-      expect(apiReads).toHaveLength(1);
-      expect(apiReads[0].url.startsWith(`${Provider.API_BASE}/`)).toBe(true);
-      expect(apiReads[0].url.endsWith(`/${MASTER_ID}`)).toBe(true);
-      expect(apiReads[0].bearer).toBe(`Bearer ${TOKEN}`);
+    /**
+     * How many reads the check makes when the API answers `status`: one, the
+     * master's, except on Scaleway, whose getServer finds the master's zone
+     * first, one probe per zone until one answers (_findServerZone). So two
+     * when it answers, one on a 401 (the probe throws), and every zone on a
+     * 403 or 404.
+     */
+    const READS: Record<string, (status: number) => number> = {
+      scaleway: (status) =>
+        status === 200 ? 2 : status === 401 ? 1 : Object.keys(PROVIDERS.scaleway.REGIONS).length,
+    };
+    /** The reads the check made: each of the master's URL, under the provider's own header and the token it checks. */
+    const expectMasterReads = (id: string, Provider: typeof BaseProvider) => {
+      expect(apiReads).toHaveLength(READS[id]?.(apiStatus) ?? 1);
+      const [[header, value]] = Object.entries(new Provider(TOKEN).authHeaders());
+      expect(value).toContain(TOKEN);
+      for (const read of apiReads) {
+        expect(read.url.startsWith(`${Provider.API_BASE}/`)).toBe(true);
+        expect(read.url.endsWith(`/${MASTER_ID}`)).toBe(true);
+        const sent = header.toLowerCase() === 'authorization' ? read.bearer : read.xAuthToken;
+        expect(sent, header).toBe(value);
+      }
     };
     const tokenEnv = (Provider: typeof BaseProvider) => Provider.TOKEN_ENV;
 
@@ -865,7 +1001,7 @@ describe('applyCloudSecrets', () => {
             'and write access (the cluster uses it to add nodes and attach volumes), then ' +
             `deploy prod again.\n${NOT_FOUND[id]}`,
         );
-        expectOneRead(Provider);
+        expectMasterReads(id, Provider);
         expect(held(Provider)).toEqual(before);
         expect(applies()).toEqual([]);
         expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
@@ -877,10 +1013,10 @@ describe('applyCloudSecrets', () => {
 
     it.each(K8S_PROVIDERS)(
       '%s: a first deploy is checked too: a new Secret is a hand-over',
-      async (_id, Provider) => {
+      async (id, Provider) => {
         apiStatus = 404;
         await expect(apply(Provider)).rejects.toThrow("API token can't see prod's cluster");
-        expectOneRead(Provider);
+        expectMasterReads(id, Provider);
         expect(applies()).toEqual([]);
         expect(cluster.size).toBe(0);
       },
@@ -888,12 +1024,14 @@ describe('applyCloudSecrets', () => {
 
     it.each(K8S_PROVIDERS)(
       '%s: a token that sees the master is handed over, after one read',
-      async (_id, Provider) => {
+      async (id, Provider) => {
         rotation(Provider);
         await apply(Provider);
-        expectOneRead(Provider);
+        expectMasterReads(id, Provider);
         for (const data of held(Provider)) {
-          for (const value of Object.values(data ?? {})) expect(value).toBe(TOKEN);
+          for (const [key, value] of Object.entries(data ?? {})) {
+            expect(value, key).toBe(COMPANION_VALUES[id]?.[key] ?? TOKEN);
+          }
         }
         expect(restarts()).toHaveLength(1);
       },
@@ -907,6 +1045,19 @@ describe('applyCloudSecrets', () => {
         await apply(Provider);
         expect(apiReads).toEqual([]);
         expect(applies()).toHaveLength(1);
+      },
+    );
+
+    it.each([401, 403])(
+      'Scaleway: HTTP %i from a zone probe refuses the same way',
+      async (status) => {
+        rotation(PROVIDERS.scaleway);
+        apiStatus = status;
+        await expect(apply(PROVIDERS.scaleway)).rejects.toThrow(
+          `Your Scaleway API token can't see prod's cluster: Scaleway answered HTTP ${status} `,
+        );
+        expectMasterReads('scaleway', PROVIDERS.scaleway);
+        expect(applies()).toEqual([]);
       },
     );
 
@@ -998,6 +1149,7 @@ describe('applyCloudSecrets', () => {
           env: { ...process.env, KUBECONFIG },
           ProviderClass: PROVIDERS.hetzner,
           token,
+          region: CLOUD_SECRETS_ZONE,
           masterId,
           environment: 'prod',
           operatorEnv: 'prod',
@@ -1039,6 +1191,7 @@ describe('applyCloudSecrets', () => {
         env: { ...process.env, KUBECONFIG },
         ProviderClass: PROVIDERS.hetzner,
         token: TOKEN,
+        region: CLOUD_SECRETS_ZONE,
         masterId: MASTER_ID,
         environment: 'prod-standby',
         operatorEnv: 'prod',
@@ -1068,13 +1221,14 @@ describe('applyCloudSecrets', () => {
           env: { ...process.env, KUBECONFIG },
           ProviderClass: Provider,
           token: TOKEN,
+          region: CLOUD_SECRETS_ZONE,
           environment: 'prod',
           operatorEnv: 'prod',
         });
 
       it.each(K8S_PROVIDERS)(
         '%s: reads it from the control-plane node, by its provider prefix',
-        async (_id, Provider) => {
+        async (id, Provider) => {
           nodeIds = `${Provider.PROVIDER_ID_PREFIX}${MASTER_ID}`;
           rotation(Provider);
           await applyUnrecorded(Provider);
@@ -1089,7 +1243,7 @@ describe('applyCloudSecrets', () => {
               'jsonpath={.items[*].spec.providerID}',
             ],
           ]);
-          expectOneRead(Provider);
+          expectMasterReads(id, Provider);
         },
       );
 
@@ -1118,6 +1272,7 @@ describe('applyCloudSecrets', () => {
           env: { ...process.env, KUBECONFIG },
           ProviderClass: PROVIDERS.hetzner,
           token: TOKEN,
+          region: CLOUD_SECRETS_ZONE,
           environment: 'prod-standby',
           operatorEnv: 'prod',
         }).catch((e: Error) => e);
@@ -1164,7 +1319,7 @@ describe('applyCloudSecrets', () => {
         holdAll(Provider, 'vc-sentinel-token-old');
         readerPerSecret(Provider);
         await apply(Provider);
-        const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
+        const secrets = cloudSecretsOf(Provider, TOKEN);
         const namespaces = [...new Set(secrets.map(({ namespace }) => namespace))];
         expect(restarts()).toEqual(
           namespaces.map((ns) => [
@@ -1224,9 +1379,7 @@ describe('applyCloudSecrets', () => {
         expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
         expect(restarts()).toEqual([]);
         expect(logged).toEqual([
-          `Handing your ${Provider.NAME} API token to the cluster (${Provider.k8sCloudSecrets({
-            token: TOKEN,
-          })
+          `Handing your ${Provider.NAME} API token to the cluster (${cloudSecretsOf(Provider, TOKEN)
             .map(({ namespace, name }) => `${namespace}/${name}`)
             .join(', ')}).`,
         ]);
@@ -1639,7 +1792,7 @@ describe('applyCloudSecrets', () => {
         holdLegacyGitops();
         readerPerSecret(Provider);
         await apply(Provider);
-        const written = Provider.k8sCloudSecrets({ token: TOKEN });
+        const written = cloudSecretsOf(Provider, TOKEN);
         const made = [...bootMade(id), ...legacyGitopsSecrets()];
         for (const { namespace, name } of made) {
           const kept = written.find((w) => w.namespace === namespace && w.name === name);
@@ -1653,7 +1806,12 @@ describe('applyCloudSecrets', () => {
     );
 
     it('the old deploy.yml wrote to a cluster that reads none of it on some providers', () => {
-      expect(GITOPS_UNREAD.map(([id]) => id).sort()).toEqual(['digitalocean', 'linode', 'vultr']);
+      expect(GITOPS_UNREAD.map(([id]) => id).sort()).toEqual([
+        'digitalocean',
+        'linode',
+        'scaleway',
+        'vultr',
+      ]);
     });
 
     it.each(GITOPS_UNREAD)(
@@ -1663,9 +1821,7 @@ describe('applyCloudSecrets', () => {
         await apply(Provider);
         expect(cluster.has('kube-system/hcloud')).toBe(false);
         expect(logged).toEqual([
-          `Handing your ${Provider.NAME} API token to the cluster (${Provider.k8sCloudSecrets({
-            token: TOKEN,
-          })
+          `Handing your ${Provider.NAME} API token to the cluster (${cloudSecretsOf(Provider, TOKEN)
             .map(({ namespace, name }) => `${namespace}/${name}`)
             .join(', ')}).`,
           "Removed kube-system/hcloud, an extra copy of your repo's HETZNER_API_TOKEN Actions " +
@@ -1740,7 +1896,7 @@ describe('applyCloudSecrets', () => {
         readerPerSecret(Provider);
         await apply(Provider);
         const legacy = bootMade(id);
-        const written = Provider.k8sCloudSecrets({ token: TOKEN });
+        const written = cloudSecretsOf(Provider, TOKEN);
         for (const { namespace, name } of legacy) {
           const kept = written.find((w) => w.namespace === namespace && w.name === name);
           expect(cluster.get(`${namespace}/${name}`), `${namespace}/${name}`).toEqual(
@@ -2154,7 +2310,7 @@ describe('applyCloudSecrets', () => {
         holdAll(Provider, 'vc-sentinel-token-boot', { boot: true });
         await apply(Provider);
         expect(annotates()).toEqual(
-          Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name }) => [
+          cloudSecretsOf(Provider, TOKEN).map(({ namespace, name }) => [
             'kubectl',
             '-n',
             namespace,
@@ -2181,7 +2337,7 @@ describe('applyCloudSecrets', () => {
       async (_id, Provider) => {
         holdAll(Provider, TOKEN);
         await apply(Provider);
-        const reads = Provider.k8sCloudSecrets({ token: TOKEN }).map(() => 'get');
+        const reads = cloudSecretsOf(Provider, TOKEN).map(() => 'get');
         // A look for each retired Secret, by name, finds nothing and says nothing.
         const looks = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(() => 'get');
         expect(verbs()).toEqual([...reads, ...looks, 'apply']);
@@ -2237,7 +2393,7 @@ describe('applyCloudSecrets', () => {
         await apply(Provider, 'vc-sentinel-token-new');
         const gets = kubectl('secret').filter((argv) => argv[3] === 'get');
         const reads = gets.filter((argv) => argv.at(-1) === 'json');
-        expect(reads.length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
+        expect(reads.length).toBe(cloudSecretsOf(Provider, TOKEN).length);
         // A retired Secret is looked for by name only: no value comes back.
         expect(gets.filter((argv) => argv.at(-1) !== 'json').map((argv) => argv.at(-1))).toEqual(
           Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(() => 'name'),
@@ -2582,7 +2738,7 @@ describe('deployK3s hands the token over on every deploy', () => {
     const { text } = span('cloudSecrets');
     expect(text.replace(/\s+/g, ' ')).toContain(
       'applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken, ' +
-        'masterId: infraOutputs.masterId, environment: options.environment, ' +
+        'region: options.region, masterId: infraOutputs.masterId, environment: options.environment, ' +
         'operatorEnv: options.operatorEnv ?? options.environment, tokenChecks, })',
     );
   });

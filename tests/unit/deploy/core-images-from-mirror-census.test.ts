@@ -15,7 +15,8 @@
  *     services/index.json names, `docker-compose.<addon>*.yml`) and the
  *     dev-only docker-compose.override.yml (local `up`, never on a server);
  *   - carbon/k8s/base/** /*.yaml, minus any add-on directory;
- *   - carbon/cloud-init/**;
+ *   - carbon/cloud-init/**, a committed CSI render as its master installs it
+ *     (sidecars on their mirrors, see EMBEDDED_REWRITES);
  *   - every string literal and template-literal chunk in src/** /*.js
  *     (vite's parseAst, so comments never count).
  *
@@ -42,6 +43,7 @@ import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   CARBON_AUTOSCALER_IMAGE,
+  csiInstallImageRewrites,
   csiSidecarSetImagePlan,
   csiUpstreamImagePins,
   DB_IMAGE,
@@ -59,12 +61,14 @@ import {
   NODE_RUNTIME_IMAGE,
   PRE_CHANNEL_KUBERNETES,
   renderManifestImages,
+  SCALEWAY_CSI_VERSION,
   socatImageRef,
   TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
 } from '../../../src/lib/images.js';
 import { walkAst } from '../../_shared/ast-walk.js';
+import { EMBEDDED_CSI_FILES } from '../../_shared/csi-install-rewrite.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const gitFiles = (...pathspecs: string[]) =>
@@ -91,6 +95,11 @@ const ALLOWLIST: Record<string, string> = {
   [DIAG_NETSHOOT_IMAGE]: 'diagnose-only probe',
   // Runs on the operator's machine (the arm64 binfmt hint), never a server.
   [BINFMT_IMAGE]: 'operator-local binfmt hint',
+  // A CSI driver's own container, in the render the Scaleway master carries.
+  // Every provider's driver image stays upstream by design (CSI_SIDECAR_MIRRORS,
+  // src/lib/images.js); the others are only unseen here because their
+  // manifests are fetched, not committed.
+  [`scaleway/scaleway-csi:${SCALEWAY_CSI_VERSION}`]: 'CSI driver image, upstream by design',
 };
 
 /** This repo's own images: published by our workflows, not mirrors. */
@@ -117,6 +126,23 @@ const K8S_FILES = gitFiles('carbon/k8s/base').filter(
   (f) => /\.ya?ml$/.test(f) && !ADDONS.some((a) => f.startsWith(`carbon/k8s/base/${a}/`)),
 );
 const CLOUD_INIT_FILES = gitFiles('carbon/cloud-init');
+
+/**
+ * A committed CSI render (EMBEDDED_CSI_FILES) is upstream's YAML, as a
+ * fetched manifest is, and its master moves each sidecar onto its mirror
+ * before the apply (csi_fetch_mirrored), so its sites are judged as the master
+ * installs them: by repo path, each upstream ref to its mirror.
+ */
+const EMBEDDED_REWRITES = new Map(
+  Object.entries(EMBEDDED_CSI_FILES).map(([file, provider]) => [
+    file,
+    new Map(csiInstallImageRewrites(provider).map(({ from, to }) => [from, to])),
+  ]),
+);
+const cloudInitSites = (f: string) => {
+  const rewrites = EMBEDDED_REWRITES.get(f);
+  return textSites(f).map((s) => ({ ...s, ref: rewrites?.get(s.ref) ?? s.ref }));
+};
 const SRC_FILES = gitFiles('src').filter((f) => /\.m?js$/.test(f));
 
 /** `image:` values plus every digest-pinned token, comments skipped. */
@@ -243,7 +269,7 @@ const ALL_SITES = [
   ...JS_EVALUATED,
   ...COMPOSE_FILES.flatMap(composeSites),
   ...K8S_FILES.flatMap((f) => textSites(f, fillImages(readRepoFile(f)))),
-  ...CLOUD_INIT_FILES.flatMap((f) => textSites(f)),
+  ...CLOUD_INIT_FILES.flatMap(cloudInitSites),
   ...SRC_FILES.flatMap((f) => jsSites(f)),
 ];
 
@@ -262,6 +288,7 @@ describe('core-path images come from our ghcr mirror', () => {
       ]),
     );
     expect(CLOUD_INIT_FILES.length).toBeGreaterThan(0);
+    expect(CLOUD_INIT_FILES).toEqual(expect.arrayContaining([...EMBEDDED_REWRITES.keys()]));
     expect(SRC_FILES).toContain('src/lib/deploy/compose/ha.js');
     expect(ALL_SITES.length).toBeGreaterThan(15);
   });
@@ -275,6 +302,24 @@ describe('core-path images come from our ghcr mirror', () => {
     expect(dockerHubOffenders(sites)).toEqual([
       `probe.yml:1: core-path image traefik:v3.6.11@sha256:${'a'.repeat(64)} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
     ]);
+  });
+
+  it('a committed CSI render is judged as its master installs it: sidecars on mirrors, the driver upstream', () => {
+    expect(EMBEDDED_REWRITES.size).toBeGreaterThan(0);
+    for (const [file, rewrites] of EMBEDDED_REWRITES) {
+      const raw = textSites(file);
+      const judged = cloudInitSites(file);
+      // Every rewrite has its site, and what is left upstream is the allowlist.
+      expect(new Set(raw.map((s) => s.ref))).toEqual(
+        new Set([...rewrites.keys(), ...raw.map((s) => s.ref).filter((r) => r in ALLOWLIST)]),
+      );
+      expect(judged.filter((s) => !s.ref.startsWith(MIRROR_PREFIX)).map((s) => s.ref)).toEqual(
+        raw.filter((s) => s.ref in ALLOWLIST).map((s) => s.ref),
+      );
+      // Unmapped, the sidecars would be named: the mapping is what passes them.
+      expect(dockerHubOffenders(raw).length).toBeGreaterThan(0);
+      expect(dockerHubOffenders(judged)).toEqual([]);
+    }
   });
 
   it('(c) every mirror ref names a MIRRORED_IMAGES entry on name, tag and digest', () => {

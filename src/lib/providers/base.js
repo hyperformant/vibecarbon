@@ -548,7 +548,9 @@ export class BaseProvider {
    * another copy of the token
    * (tests/unit/deploy/k8s-cloud-secrets.test.ts holds them to a record of
    * those manifests). None on a provider without a k8s tier.
-   * @param {{token: string}} _values - the operator's provider API token
+   * @param {{token: string, region?: string}} _values - the operator's
+   *   provider API token, and the cluster's region as `REGIONS` keys it (a
+   *   zone on Scaleway, whose CSI controller reads it; the rest ignore it)
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */
   static k8sCloudSecrets(_values) {

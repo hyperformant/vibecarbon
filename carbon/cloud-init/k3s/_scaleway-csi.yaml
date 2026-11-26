@@ -1,0 +1,572 @@
+# The CSI driver the Scaleway k8s master installs (scaleway-master-init.sh),
+# carried in its user data compressed (EMBEDDED_CSI_MANIFESTS,
+# src/lib/iac/cloud-init.js). scaleway-csi ships no release manifest, only a
+# Helm chart, so this is the chart's render, committed. Never edit what is
+# below this header: re-render it.
+# Rendered from https://github.com/scaleway/scaleway-csi v0.3.6
+# Chart: https://github.com/scaleway/helm-charts/releases/download/scaleway-csi-0.2.2/scaleway-csi-0.2.2.tgz
+# Chart sha256: aeddcbec4f832a79b3c0888c79c8660af933b18ae3f5fb912dadb93418563661
+# To re-render: download the chart, check its sha256, run the command below
+# and put its output under this header, then re-derive
+# CSI_SIDECAR_MIRRORS.scaleway (src/lib/images.js) and
+# UPSTREAM_CSI_MANIFESTS.scaleway (tests/_shared/csi-install-rewrite.ts).
+# helm template scaleway-csi scaleway-csi-0.2.2.tgz --namespace kube-system --skip-crds --set-json 'storageClasses=[]' --set-json 'volumeSnapshotClasses=[]' --set controller.scaleway.existingSecretName=scaleway-csi-secret --set controller.driver.image.tag=v0.3.6 --set node.driver.image.tag=v0.3.6 --set controller.snapshotter.enabled=false --set controller.snapshotController.enabled=false --set-json 'node.tolerations=[{"operator":"Exists"}]' --set controller.provisioner.image.tag=v6.3.0 --set controller.attacher.image.tag=v4.13.0 --set controller.resizer.image.tag=v2.2.1 --set controller.liveness.image.tag=v2.20.0 --set node.registrar.image.tag=v2.18.0 --set node.liveness.image.tag=v2.20.0
+# It renders no Secret (deployK3s writes scaleway-csi-secret), no
+# StorageClass (the master writes its own), no snapshot parts, and a node
+# plugin that tolerates every taint. Helm names no namespace on the
+# namespaced objects, so the master applies this with -n kube-system.
+---
+# Source: scaleway-csi/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaleway-csi
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: scaleway-csi/templates/controller/rbac/attacher.yaml
+# Sync from https://github.com/kubernetes-csi/external-attacher/blob/master/deploy/kubernetes/rbac.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-attacher
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+# Source: scaleway-csi/templates/controller/rbac/provisioner.yaml
+# Sync from https://github.com/kubernetes-csi/external-provisioner/blob/master/deploy/kubernetes/rbac.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-provisioner
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: scaleway-csi/templates/controller/rbac/resizer.yaml
+# Sync from https://github.com/kubernetes-csi/external-resizer/blob/master/deploy/kubernetes/rbac.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-resizer
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattributesclasses"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: scaleway-csi/templates/controller/rbac/attacher.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-attacher
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: scaleway-csi-attacher
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/controller/rbac/provisioner.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-provisioner
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: scaleway-csi-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/controller/rbac/resizer.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-resizer
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: scaleway-csi-resizer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/controller/rbac/attacher.yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-attacher
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "watch", "list", "delete", "update", "create"]
+---
+# Source: scaleway-csi/templates/controller/rbac/provisioner.yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-provisioner
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "watch", "list", "delete", "update", "create"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csistoragecapacities"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get"]
+---
+# Source: scaleway-csi/templates/controller/rbac/resizer.yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-resizer
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "watch", "list", "delete", "update", "create"]
+---
+# Source: scaleway-csi/templates/controller/rbac/attacher.yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-attacher
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: scaleway-csi-attacher
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/controller/rbac/provisioner.yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-provisioner
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+roleRef:
+  kind: Role
+  name: scaleway-csi-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/controller/rbac/resizer.yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scaleway-csi-resizer
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+subjects:
+  - kind: ServiceAccount
+    name: scaleway-csi
+roleRef:
+  kind: Role
+  name: scaleway-csi-resizer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: scaleway-csi/templates/node/daemonset.yaml
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: scaleway-csi-node
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scaleway-csi
+      app.kubernetes.io/instance: scaleway-csi
+      app: scaleway-csi-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scaleway-csi
+        app.kubernetes.io/instance: scaleway-csi
+        app: scaleway-csi-node
+    spec:
+      securityContext:
+        {}
+      serviceAccount: scaleway-csi
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
+      containers:
+        - name: scaleway-csi-plugin
+          image: "scaleway/scaleway-csi:v0.3.6"
+          imagePullPolicy: IfNotPresent
+          args :
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--v=4"
+            - "--mode=node"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+          securityContext:
+            privileged: true
+          resources:
+            {}
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 2
+            failureThreshold: 5
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: "Bidirectional"
+            - name: device-dir
+              mountPath: /dev
+        - name: csi-node-driver-registrar
+          image: "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--v=2"
+            - "--csi-address=$(CSI_ADDRESS)"
+            - "--kubelet-registration-path=$(KUBELET_REGISTRATION_PATH)"
+          env:
+            - name: CSI_ADDRESS
+              value: /csi/csi.sock
+            - name: KUBELET_REGISTRATION_PATH
+              value: /var/lib/kubelet/plugins/csi.scaleway.com/csi.sock
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            {}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi/
+            - name: registration-dir
+              mountPath: /registration/
+        - name: liveness-probe
+          image: "registry.k8s.io/sig-storage/livenessprobe:v2.20.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--csi-address=$(CSI_ADDRESS)"
+          env:
+            - name: CSI_ADDRESS
+              value: /csi/csi.sock
+          resources:
+            {}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: DirectoryOrCreate
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.scaleway.com
+            type: DirectoryOrCreate
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: device-dir
+          hostPath:
+            path: /dev
+---
+# Source: scaleway-csi/templates/controller/deployment.yaml
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: scaleway-csi-controller
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scaleway-csi
+      app.kubernetes.io/instance: scaleway-csi
+      app: scaleway-csi-controller
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scaleway-csi
+        app.kubernetes.io/instance: scaleway-csi
+        app: scaleway-csi-controller
+    spec:
+      securityContext:
+        {}
+      priorityClassName: system-cluster-critical
+      serviceAccount: scaleway-csi
+      containers:
+        - name: scaleway-csi-plugin
+          image: "scaleway/scaleway-csi:v0.3.6"
+          imagePullPolicy: IfNotPresent
+          args :
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--mode=controller"
+            - "--v=4"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+          envFrom:
+            - secretRef:
+                name: scaleway-csi-secret
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          resources:
+            {}
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 2
+            failureThreshold: 5
+        - name: csi-provisioner
+          image: "registry.k8s.io/sig-storage/csi-provisioner:v6.3.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--v=5"
+            - "--csi-address=$(CSI_ADDRESS)"
+            - "--leader-election"
+            - "--feature-gates=Topology=true"
+            - "--default-fstype=ext4"
+          env:
+            - name: CSI_ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          resources:
+            {}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+        - name: csi-attacher
+          image: "registry.k8s.io/sig-storage/csi-attacher:v4.13.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--v=5"
+            - "--csi-address=$(CSI_ADDRESS)"
+            - "--leader-election"
+            - "--reconcile-sync=10m"
+          env:
+            - name: CSI_ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          resources:
+            {}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+        - name: csi-resizer
+          image: "registry.k8s.io/sig-storage/csi-resizer:v2.2.1"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--v=5"
+            - "--csi-address=$(CSI_ADDRESS)"
+            - "--leader-election"
+          env:
+            - name: CSI_ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          resources:
+            {}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+        - name: liveness-probe
+          image: "registry.k8s.io/sig-storage/livenessprobe:v2.20.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--csi-address=$(CSI_ADDRESS)"
+          env:
+            - name: CSI_ADDRESS
+              value: /csi/csi.sock
+          resources:
+            {}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+---
+# Source: scaleway-csi/templates/csidriver.yaml
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.scaleway.com
+  labels:
+    helm.sh/chart: scaleway-csi-0.2.2
+    app.kubernetes.io/name: scaleway-csi
+    app.kubernetes.io/instance: scaleway-csi
+    app.kubernetes.io/version: "v0.3.4"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  attachRequired: true
+  podInfoOnMount: true

@@ -151,18 +151,18 @@ export const EXPECTED: Record<
     s3RegionEnv: 'SCALEWAY_STORAGE_REGION',
     defaultComposeType: 'BASIC3-X2C-4G',
     defaultK8sNodeType: 'BASIC3-X2C-4G',
-    // Compose-only (2026-08 expansion PR 3): empty asset identity except
-    // the storage-class literal (scaleway-csi's default class,
-    // `sbs-default`), which the literal-guard census requires distinct +
-    // resident in scaleway.js.
+    // scaleway-csi v0.3.6, rendered from its Helm chart: a Deployment
+    // controller and a DaemonSet node plugin, each labelled with a bare
+    // `app=` key. No CCM: k3s's embedded cloud controller runs instead. The
+    // StorageClass is our own, which the master's boot script writes.
     k8sAssets: {
-      csiNodeDaemonSet: '',
-      csiControllerSelector: '',
+      csiNodeDaemonSet: 'daemonset/scaleway-csi-node',
+      csiControllerSelector: 'app=scaleway-csi-controller',
       ccmDeployment: '',
       ccmSelector: '',
       networkEnvVar: '',
     },
-    k8sStorageClass: 'sbs-default',
+    k8sStorageClass: 'scaleway-block-vibecarbon',
     // The compose image (scaleway-k8s.js reads K8S_IMAGE).
     k8sImage: 'ubuntu_resolute',
   },

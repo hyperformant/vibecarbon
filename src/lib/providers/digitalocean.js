@@ -491,12 +491,10 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
-      '../iac/cloud-init.js'
-    );
+    const { loadCloudInit, masterAddedVars, renderScript } = await import('../iac/cloud-init.js');
     return renderScript(loadCloudInit('do-master-init.sh'), {
       ...vars,
-      ...csiImageRewriteVars('digitalocean'),
+      ...masterAddedVars('digitalocean'),
     });
   }
 

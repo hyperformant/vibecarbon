@@ -150,6 +150,71 @@ fi
 
 _m x
 
+# The ready marker (end of script) is written AFTER the CSI driver and the
+# StorageClass are in place. The CSI controller reads its credentials from
+# Secret kube-system/scaleway-csi-secret (envFrom), which deployK3s applies
+# from the operator's machine once the apiserver serves (applyCloudSecrets),
+# before the app install, so the secret key never rides in this user data and
+# no volume is asked for before the driver can make one. Each step below
+# retries (the API server can be briefly unavailable) and stops the boot when
+# its tries run out: a cluster that cannot provision or mount a volume must
+# never report ready.
+
+# @include _csi-image-mirror.sh
+
+# scaleway-csi ships only a Helm chart, so its render is committed
+# (_scaleway-csi.yaml, whose header says how to re-render it) and carried
+# here compressed: nothing is downloaded, so a chart release never changes
+# what this node installs.
+printf '%s' "${scaleway_csi_manifest}" | base64 -d | gunzip > /root/scaleway-csi.upstream.yaml \
+  || { echo "FATAL: the embedded CSI manifest does not decode" >&2; exit 1; }
+
+# Install the Scaleway CSI driver (v0.3.6) from that render, on our mirrors
+# (csi_fetch_mirrored). Helm names no namespace on the namespaced objects, so
+# the apply does. Its node plugin already tolerates every taint (the render's
+# values), so it runs on the db node too and needs no patch.
+CSI_INSTALL_OK=false
+for i in 1 2 3; do
+  if csi_fetch_mirrored file:///root/scaleway-csi.upstream.yaml /root/csi-driver.yaml \
+    && kubectl apply -n kube-system -f /root/csi-driver.yaml; then
+    CSI_INSTALL_OK=true
+    break
+  fi
+  echo "CSI driver install attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$CSI_INSTALL_OK" != "true" ]; then
+  echo "FATAL: could not install the Scaleway CSI driver after 3 attempts -- no volume could be provisioned" >&2
+  exit 1
+fi
+
+# Our own StorageClass: bound in the zone and on the node the pod lands on,
+# Delete reclaim, expandable. No parameters: the driver's default type, block
+# storage at 5,000 IOPS. Scaleway's CSI volumes carry no tags.
+SC_APPLIED=false
+for i in 1 2 3; do
+  if kubectl apply -f - << SCEOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: scaleway-block-vibecarbon
+provisioner: csi.scaleway.com
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+SCEOF
+  then
+    SC_APPLIED=true
+    break
+  fi
+  echo "StorageClass apply attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$SC_APPLIED" != "true" ]; then
+  echo "FATAL: could not apply the scaleway-block-vibecarbon StorageClass after 3 attempts" >&2
+  exit 1
+fi
+
 echo "k3s master installation complete!"
 
 # Final marker: vibecarbon's deployK3s waiter polls for /tmp/k3s-ready

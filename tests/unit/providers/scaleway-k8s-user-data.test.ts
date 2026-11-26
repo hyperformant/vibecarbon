@@ -2,15 +2,20 @@
  * ScalewayProvider.getK8s{Master,Worker,Db}UserData render the
  * carbon/cloud-init/k3s/scaleway-{master,worker}-init.sh templates; the db
  * node loads the worker script as the db role. Mirrors
- * vultr-k8s-user-data.test.ts. The master installs no CSI driver yet (Part C
- * Task 3 adds it, and its image rewrites, between `_m x` and `_m e`).
+ * vultr-k8s-user-data.test.ts. The master installs scaleway-csi from the
+ * render it carries (EMBEDDED_CSI_MANIFESTS), and its own StorageClass,
+ * between `_m x` and `_m e`.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
+import { loadCloudInit, masterAddedVars } from '../../../src/lib/iac/cloud-init.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { PUBLIC_NIC, scalewayHost } from '../../_shared/scaleway-host.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // Full-length values: a 64-character join token, a full k3s version and the
 // longest private address the program's 10.128.0.0/10 range gives.
@@ -43,13 +48,18 @@ describe('ScalewayProvider k8s user-data statics', () => {
       role === 'db'
         ? loadCloudInit('scaleway-worker-init.sh', { role: 'db' })
         : loadCloudInit(`scaleway-${role}-init.sh`);
-    expect(templatePlaceholders(raw)).toEqual(Object.keys(vars).sort());
+    // The master's static adds the CSI install's image rewrites and the
+    // embedded CSI manifest itself.
+    const added = role === 'master' ? Object.keys(masterAddedVars('scaleway')) : [];
+    expect(templatePlaceholders(raw)).toEqual([...Object.keys(vars), ...added].sort());
   });
 
   it('master takes the token and version; worker and db add master_ip', () => {
     expect(templatePlaceholders(loadCloudInit('scaleway-master-init.sh'))).toEqual([
+      'csi_image_rewrites',
       'k3s_token',
       'k3s_version',
+      'scaleway_csi_manifest',
     ]);
     for (const raw of [
       loadCloudInit('scaleway-worker-init.sh'),
@@ -125,8 +135,101 @@ describe('ScalewayProvider k8s user-data statics', () => {
     expect(commandsOf(rendered)).not.toMatch(/--token\b/);
     expect(rendered).not.toContain('create secret');
     expect(rendered.indexOf('_m e\n')).toBeLessThan(rendered.indexOf('touch /tmp/k3s-ready'));
-    // No CSI driver yet: Part C Task 3 adds it between `_m x` and `_m e`.
-    expect(commandsOf(rendered)).not.toMatch(/csi/i);
+  });
+
+  it('master: the CSI driver from the render it carries, then our StorageClass, before the ready marker', async () => {
+    const rendered = await ScalewayProvider.getK8sMasterUserData(masterVars);
+    const at = (text: string) => {
+      const i = rendered.indexOf(text);
+      expect(i, text).toBeGreaterThan(-1);
+      return i;
+    };
+    const rewrite = at('csi_fetch_mirrored() {');
+    const decode = at(
+      `printf '%s' "${masterAddedVars('scaleway').scaleway_csi_manifest}" | base64 -d | gunzip > /root/scaleway-csi.upstream.yaml \\\n` +
+        '  || { echo "FATAL: the embedded CSI manifest does not decode" >&2; exit 1; }\n',
+    );
+    // helm names no namespace on a namespaced object, so the apply does.
+    const driver = at(
+      '  if csi_fetch_mirrored file:///root/scaleway-csi.upstream.yaml /root/csi-driver.yaml \\\n' +
+        '    && kubectl apply -n kube-system -f /root/csi-driver.yaml; then\n',
+    );
+    const sc = at('kind: StorageClass');
+    const order = [at('_m x\n'), rewrite, decode, driver, sc, at('_m e\n')];
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    const heredoc = rendered.slice(
+      rendered.indexOf('<< SCEOF\n') + 9,
+      rendered.indexOf('\nSCEOF\n'),
+    );
+    // No parameters: the driver's default, 5,000 IOPS block storage.
+    expect(load(heredoc)).toEqual({
+      apiVersion: 'storage.k8s.io/v1',
+      kind: 'StorageClass',
+      metadata: { name: ScalewayProvider.K8S_STORAGE_CLASS },
+      provisioner: 'csi.scaleway.com',
+      reclaimPolicy: 'Delete',
+      allowVolumeExpansion: true,
+      volumeBindingMode: 'WaitForFirstConsumer',
+    });
+    // Each step stops the boot when its tries run out: a cluster with no
+    // driver must never report ready.
+    for (const what of [
+      'install the Scaleway CSI driver after 3 attempts',
+      `apply the ${ScalewayProvider.K8S_STORAGE_CLASS} StorageClass after 3 attempts`,
+    ]) {
+      expect(rendered).toContain(`FATAL: could not ${what}`);
+    }
+    // The render needs no snapshot CRDs, no toleration patch (its node
+    // plugin tolerates every taint) and no Secret from the boot.
+    const commands = commandsOf(rendered);
+    expect(commands).not.toMatch(/snapshot/i);
+    expect(commands).not.toContain('kubectl patch');
+    expect(commands).not.toMatch(/kubectl (create|apply)[^\n]*secret/i);
+  });
+
+  describe('master: the embedded manifest decode', () => {
+    /** The decode statement, run as the boot runs it, writing into a temp dir. */
+    const decode = async (corrupt = false) => {
+      const rendered = await ScalewayProvider.getK8sMasterUserData(masterVars);
+      const decodes = rendered.indexOf('| base64 -d | gunzip > /root/scaleway-csi.upstream.yaml');
+      expect(decodes).toBeGreaterThan(-1);
+      const start = rendered.lastIndexOf('\n', decodes) + 1;
+      const end = rendered.indexOf('exit 1; }\n', start) + 'exit 1; }'.length;
+      const dir = createTempDir('vc-scaleway-csi-decode-');
+      try {
+        let statement = rendered.slice(start, end).replace('/root/', `${dir}/`);
+        if (corrupt) statement = statement.replace(/"[A-Za-z0-9+/=]+"/, '"bm90IGd6aXA="');
+        const result = spawnSync('bash', ['-c', `set -euo pipefail\n${statement}\necho decoded`], {
+          encoding: 'utf8',
+          env: { PATH: '/usr/bin:/bin' },
+          timeout: 20_000,
+        });
+        const out = join(dir, 'scaleway-csi.upstream.yaml');
+        return { ...result, written: existsSync(out) ? readFileSync(out, 'utf8') : null };
+      } finally {
+        cleanupTempDir(dir);
+      }
+    };
+
+    it('writes the committed render', async () => {
+      const { status, stdout, stderr, written } = await decode();
+      expect(status, stderr).toBe(0);
+      expect(stdout).toBe('decoded\n');
+      expect(written).toBe(readRepoFile('carbon/cloud-init/k3s/_scaleway-csi.yaml'));
+    });
+
+    it('stops the boot on a value that does not decode', async () => {
+      const { status, stdout, stderr } = await decode(true);
+      expect(status).toBe(1);
+      expect(stdout).toBe('');
+      expect(stderr).toContain('FATAL: the embedded CSI manifest does not decode');
+    });
+  });
+
+  it('worker and db install no CSI driver', async () => {
+    for (const fn of [ScalewayProvider.getK8sWorkerUserData, ScalewayProvider.getK8sDbUserData]) {
+      expect(commandsOf(await fn(agentVars))).not.toMatch(/csi/i);
+    }
   });
 
   it('worker and db join as the k3s-agent unit', async () => {
@@ -219,13 +322,15 @@ describe('ScalewayProvider k8s user-data statics', () => {
     });
   });
 
-  it('both templates, the include and the db render are pure ASCII', async () => {
+  it('both templates, the includes, the CSI render and the renders are pure ASCII', async () => {
     const texts = [
       'scaleway-master-init.sh',
       'scaleway-worker-init.sh',
       '_scaleway-metadata.sh',
+      '_scaleway-csi.yaml',
     ].map((f) => readRepoFile(`carbon/cloud-init/k3s/${f}`));
     texts.push(await ScalewayProvider.getK8sDbUserData(agentVars));
+    texts.push(await ScalewayProvider.getK8sMasterUserData(masterVars));
     for (const text of texts) {
       expect([...text].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
     }

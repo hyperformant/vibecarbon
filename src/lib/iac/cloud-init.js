@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { csiInstallImageRewrites } from '../images.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -199,8 +200,8 @@ export function loadCloudInit(name, { role = 'worker' } = {}) {
  * The `${csi_image_rewrites}` value a k3s master template's CSI install reads
  * (_csi-image-mirror.sh): one "<upstream ref> <mirror ref>" pair per line,
  * from csiInstallImageRewrites (src/lib/images.js). Each provider's
- * getK8sMasterUserData adds it to the vars it renders with, so no caller of
- * that static has it to pass, and none can leave it out.
+ * getK8sMasterUserData adds it to the vars it renders with (masterAddedVars),
+ * so no caller of that static has it to pass, and none can leave it out.
  *
  * Throws for a provider with no rewrite: its master would install a CSI
  * driver whose sidecars pull from registry.k8s.io, and the template's own
@@ -215,6 +216,60 @@ export function csiImageRewriteVars(providerId) {
     throw new Error(`cloud-init: provider "${providerId}" has no CSI image rewrites`);
   }
   return { csi_image_rewrites: rewrites.map(({ from, to }) => `${from} ${to}`).join('\n') };
+}
+
+/**
+ * The CSI manifests a k3s master carries in its user data, by provider: a
+ * driver that publishes no release manifest, only a Helm chart, has the
+ * chart's render committed beside the boot scripts (`file`, its header says
+ * how to re-render it). The master decodes `var` to `path` and installs it
+ * from there through csi_fetch_mirrored, as every other master installs its
+ * driver's manifest from a URL. Nothing is fetched at boot, so a chart
+ * release can never change what a node installs.
+ *
+ * @type {Readonly<Record<string, Readonly<{ var: string, file: string, path: string }>>>}
+ */
+export const EMBEDDED_CSI_MANIFESTS = Object.freeze({
+  scaleway: Object.freeze({
+    var: 'scaleway_csi_manifest',
+    file: '_scaleway-csi.yaml',
+    path: '/root/scaleway-csi.upstream.yaml',
+  }),
+});
+
+/** @type {Map<string, Record<string, string>>} */
+const embeddedVarsCache = new Map();
+
+/**
+ * The embedded CSI manifest's var for a provider's master: the committed
+ * file, gzip -9, base64, so it fits in user data. Empty for a provider that
+ * fetches its manifest.
+ *
+ * @param {string} providerId
+ * @returns {Record<string, string>}
+ */
+function embeddedManifestVars(providerId) {
+  const embedded = EMBEDDED_CSI_MANIFESTS[providerId];
+  if (!embedded) return {};
+  let vars = embeddedVarsCache.get(providerId);
+  if (!vars) {
+    const gz = gzipSync(readFileSync(join(CLOUD_INIT_DIR, embedded.file)), { level: 9 });
+    vars = { [embedded.var]: gz.toString('base64') };
+    embeddedVarsCache.set(providerId, vars);
+  }
+  return vars;
+}
+
+/**
+ * What a provider's getK8sMasterUserData adds to its caller's vars: the CSI
+ * install's image rewrites (csiImageRewriteVars) and, for a driver the
+ * master carries, its manifest (EMBEDDED_CSI_MANIFESTS).
+ *
+ * @param {string} providerId
+ * @returns {Record<string, string>}
+ */
+export function masterAddedVars(providerId) {
+  return { ...csiImageRewriteVars(providerId), ...embeddedManifestVars(providerId) };
 }
 
 /**

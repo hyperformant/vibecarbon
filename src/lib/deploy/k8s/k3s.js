@@ -2770,18 +2770,22 @@ function assertTokenSeesThisCluster({
  * already passed for this cluster; applyK3sManifests reuses what this one
  * records, so a deploy reads the master once.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, tokenChecks?: Set<string>}} args
+ * `region` is the cluster's, as `REGIONS` keys it (a zone on Scaleway, whose
+ * CSI controller takes it as its default zone).
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, region?: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, tokenChecks?: Set<string>}} args
  */
 export async function applyCloudSecrets({
   env,
   ProviderClass,
   token,
+  region,
   masterId,
   environment,
   operatorEnv,
   tokenChecks,
 }) {
-  const secrets = ProviderClass.k8sCloudSecrets({ token });
+  const secrets = ProviderClass.k8sCloudSecrets({ token, region });
   if (secrets.length === 0) return;
   if (typeof token !== 'string' || token === '') {
     throw new Error(
@@ -6692,6 +6696,7 @@ async function deployK3sSteps(options, inFlight) {
         env: kubeEnv,
         ProviderClass: Provider,
         token: options.apiToken,
+        region: options.region,
         masterId: infraOutputs.masterId,
         environment: options.environment,
         operatorEnv: options.operatorEnv ?? options.environment,

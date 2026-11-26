@@ -55,8 +55,11 @@ import { renderScript } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import {
   CLOUD_SECRET_READERS,
+  CLOUD_SECRETS_ZONE,
+  cloudSecretsOf,
   manifestUrls,
   type SecretRef,
+  stubOperatorCompanions,
 } from '../../_shared/cloud-secret-readers.js';
 import { dockerRunner, dockerTierSkip, sleepSync } from '../../_shared/docker-sync.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
@@ -66,6 +69,7 @@ import {
   NO_LEGACY_BOOT_SECRETS,
 } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const SKIPPED = dockerTierSkip('k8s-cloud-secrets-takeover', 'Docker, kubectl and GitHub');
@@ -210,14 +214,26 @@ describe.skipIf(SKIPPED)(
       if (dir) cleanupTempDir(dir);
     });
 
-    // applyCloudSecrets says what it hands over and restarts.
+    // applyCloudSecrets says what it hands over and restarts. Scaleway's
+    // Secret carries the operator's access key and project id beside the
+    // token (k8sCloudSecrets refuses without them).
     beforeEach(() => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      stubOperatorCompanions();
     });
     afterEach(() => {
       vi.restoreAllMocks();
+      vi.unstubAllEnvs();
     });
+
+    /**
+     * kubectl's -f for a manifest the boot script applies: a URL as it is, a
+     * committed render (EMBEDDED_CSI_MANIFESTS) from the repo, in kube-system
+     * as the master applies it (Helm names no namespace on its objects).
+     */
+    const manifestArgs = (url: string) =>
+      url.startsWith('https://') ? ['-f', url] : ['-n', 'kube-system', '-f', join(REPO_ROOT, url)];
 
     /**
      * Every Secret reference in these workloads' pod templates, as the
@@ -287,7 +303,7 @@ describe.skipIf(SKIPPED)(
         expect(urls.length, 'the boot script applies upstream manifests').toBeGreaterThan(0);
         const before = new Set(workloads().map(id));
         for (const url of urls) {
-          kube(['apply', '-f', url]);
+          kube(['apply', ...manifestArgs(url)]);
           applied.push(url);
           // A later manifest may hold objects of a CRD this one created. By
           // name: `crd --all` fails outright while k3s has registered none
@@ -318,7 +334,7 @@ describe.skipIf(SKIPPED)(
       // csi-controller-attacher-binding, each bound to its own ClusterRole).
       afterAll(() => {
         for (const url of [...applied].reverse()) {
-          kube(['delete', '-f', url, '--ignore-not-found', '--timeout=120s']);
+          kube(['delete', ...manifestArgs(url), '--ignore-not-found', '--timeout=120s']);
         }
       }, LONG);
 
@@ -335,10 +351,11 @@ describe.skipIf(SKIPPED)(
           env: { ...process.env, KUBECONFIG: kubeconfig },
           ProviderClass: Seeing,
           token,
+          region: CLOUD_SECRETS_ZONE,
           masterId: '4242',
           environment: 'test',
         });
-      const expected = (token: string) => Provider.k8sCloudSecrets({ token });
+      const expected = (token: string) => cloudSecretsOf(Provider, token);
       /** Whether the cluster holds a Secret. */
       const holds = (namespace: string, name: string) =>
         kube([

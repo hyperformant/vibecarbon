@@ -150,6 +150,31 @@ const SBS_DELETE_WAIT_MS = 60_000;
 const serversStillTerminating = new Set();
 
 /**
+ * The operator's Scaleway access key and project id: what the Pulumi
+ * provider (buildIacEnv) and the cluster's CSI controller (k8sCloudSecrets)
+ * take with the secret key. The token resolution chain carries only the
+ * secret key, so these ride from process.env (the shell, or the project's
+ * .env.local via bootstrapOperatorEnv). Missing either throws, naming it.
+ * @returns {{accessKey: string, projectId: string}}
+ */
+function scalewayOperatorIds() {
+  const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
+  const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
+  const missing = [];
+  if (!accessKey) missing.push('SCALEWAY_ACCESS_KEY');
+  if (!projectId) missing.push('SCALEWAY_DEFAULT_PROJECT_ID');
+  if (missing.length > 0) {
+    throw new Error(
+      `Scaleway needs ${missing.join(' and ')} set alongside SCALEWAY_SECRET_KEY: Scaleway ` +
+        'takes the access key, secret key and project id together. Set ' +
+        `${missing.join(' and ')} in your shell or the project's .env.local (vibecarbon ` +
+        'configure, then Providers, then Scaleway, collects all three).',
+    );
+  }
+  return { accessKey, projectId };
+}
+
+/**
  * Encode a label key/value pair into a Scaleway tag string — same
  * `key:value` wire encoding as the DO/Linode/Vultr tag-based providers
  * (byte-compatible so the destroy-sweep/listing matchers behave
@@ -330,19 +355,7 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {{SCW_SECRET_KEY: string, SCW_ACCESS_KEY: string, SCW_DEFAULT_PROJECT_ID: string}}
    */
   static buildIacEnv(token) {
-    const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
-    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const missing = [];
-    if (!accessKey) missing.push('SCALEWAY_ACCESS_KEY');
-    if (!projectId) missing.push('SCALEWAY_DEFAULT_PROJECT_ID');
-    if (missing.length > 0) {
-      throw new Error(
-        `Scaleway needs ${missing.join(' and ')} set alongside SCALEWAY_SECRET_KEY — the Pulumi ` +
-          'Scaleway provider requires the full access-key/secret-key/project-id triple. Set ' +
-          `${missing.join(' and ')} in your shell or the project's .env.local (vibecarbon ` +
-          'configure → Providers → Scaleway collects all three).',
-      );
-    }
+    const { accessKey, projectId } = scalewayOperatorIds();
     // EMIT the plugin-native names — this is the operator→plugin
     // translation the sibling providers do via CLI_TOKEN_ENV alone; ours
     // needs a bag because the plugin wants three vars, not one.
@@ -462,9 +475,12 @@ export class ScalewayProvider extends BaseProvider {
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
-   * Empty at the compose-only tier — no CCM/CSI deployed; real values come
-   * from scaleway-cloud-controller-manager / scaleway-csi manifests when
-   * the k8s tier is built (audit headroom record).
+   * Kubernetes cluster-addon asset identity. The CSI names come from
+   * scaleway-csi v0.3.6, rendered from its Helm chart
+   * (carbon/cloud-init/k3s/_scaleway-csi.yaml): a Deployment controller and a
+   * DaemonSet node plugin, both labelled with a bare `app=` key. No CCM:
+   * k3s's embedded cloud controller runs instead, so the CCM entries stay
+   * empty.
    * @type {{
    *   csiNodeDaemonSet: string,
    *   csiControllerSelector: string,
@@ -474,22 +490,89 @@ export class ScalewayProvider extends BaseProvider {
    * }}
    */
   static K8S_ASSETS = {
-    csiNodeDaemonSet: '',
-    csiControllerSelector: '',
+    csiNodeDaemonSet: 'daemonset/scaleway-csi-node',
+    csiControllerSelector: 'app=scaleway-csi-controller',
     ccmDeployment: '',
     ccmSelector: '',
     networkEnvVar: '',
   };
 
   /**
-   * scaleway-csi's default StorageClass (`sbs-default`, provisioner
-   * csi.scaleway.com — audited from Kapsule's default; re-VERIFY against
-   * the standalone Helm chart before the k8s tier ships). Unread while
-   * compose-only; the literal-guard census requires distinctness +
-   * residence here.
+   * The StorageClass the k3s master boot script creates for scaleway-csi:
+   * the driver's default block storage, Delete reclaim, expandable, bound
+   * where the pod lands. The chart's own classes are not rendered. The
+   * literal-guard census requires every registered provider's value to be
+   * distinct and to live in this file.
    * @type {string}
    */
-  static K8S_STORAGE_CLASS = 'sbs-default';
+  static K8S_STORAGE_CLASS = 'scaleway-block-vibecarbon';
+
+  /**
+   * scaleway-csi passes a claim's request through unrounded
+   * (pkg/driver/helpers.go). The driver and the SDK floor a Block volume at
+   * 1 GB (pkg/scaleway/scaleway.go, block_sdk.go), Scaleway's console and
+   * docs at 5 GB; which one the Block API holds a request to is unconfirmed,
+   * so the larger. See BaseProvider.K8S_MIN_VOLUME_GI.
+   * @type {number}
+   */
+  static K8S_MIN_VOLUME_GI = 5;
+
+  /**
+   * The `scaleway-csi-secret` Secret the CSI controller reads whole
+   * (envFrom): the secret key, which is the token, with the operator's
+   * access key and project id (scalewayOperatorIds, as buildIacEnv takes
+   * them) and the cluster's zone as the default the driver works in. Throws
+   * without a zone or either companion: the controller would start without
+   * a credential it can use. See BaseProvider.k8sCloudSecrets.
+   * @param {{token: string, region?: string}} values - region is the
+   *   cluster's zone, as REGIONS keys it
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token, region }) {
+    if (!region) {
+      throw new Error(
+        "Can't hand your Scaleway API token to the cluster: this deploy names no zone for " +
+          'it, and the CSI driver needs one.',
+      );
+    }
+    const { accessKey, projectId } = scalewayOperatorIds();
+    return [
+      {
+        namespace: 'kube-system',
+        name: 'scaleway-csi-secret',
+        stringData: {
+          SCW_ACCESS_KEY: accessKey,
+          SCW_SECRET_KEY: token,
+          SCW_DEFAULT_PROJECT_ID: projectId,
+          SCW_DEFAULT_ZONE: region,
+        },
+      },
+    ];
+  }
+
+  /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret. Nothing on a Scaleway
+   * cluster reads it. No Scaleway boot script ever wrote a cloud Secret, so
+   * there is none of those to retire. See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
+   * scaleway-csi creates a Block volume with a name and nothing else (no
+   * tags), so a detached `pvc-*` volume in the cluster's zone could be any
+   * cluster's: destroy reports one no capture names instead of deleting it
+   * (BaseProvider.ORPHAN_VOLUME_REGION_GUESS).
+   * @type {boolean}
+   */
+  static ORPHAN_VOLUME_REGION_GUESS = false;
 
   /**
    * No fixed range: scaleway-k8s.js derives a /24 per cluster
@@ -569,12 +652,18 @@ export class ScalewayProvider extends BaseProvider {
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   * }} vars - The template's whole var set.
+   * }} vars - The caller's whole share of the template's var set. The
+   *   rest, the CSI install's image rewrites (`csi_image_rewrites`) and the
+   *   CSI manifest it carries (`scaleway_csi_manifest`), is added here
+   *   (masterAddedVars).
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('scaleway-master-init.sh'), vars);
+    const { loadCloudInit, masterAddedVars, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('scaleway-master-init.sh'), {
+      ...vars,
+      ...masterAddedVars('scaleway'),
+    });
   }
 
   /**
@@ -908,26 +997,44 @@ export class ScalewayProvider extends BaseProvider {
   /**
    * Resolve which zone a server UUID lives in (UUIDs are zone-scoped —
    * class header). Probes GET per zone, caching hits for the lifetime of
-   * this provider instance.
+   * this provider instance. A zone that answers 403 or 404 does not have it
+   * (a 403 is a zone the token may not read); any other failure throws at
+   * once, with its HTTP status on the error.
    * @param {string} serverId
-   * @returns {Promise<string|null>} zone, or null when no zone has it
+   * @returns {Promise<{zone: string} | {zone: null, refused: 403|404}>} the
+   *   zone, or none, with 403 when any zone refused and 404 otherwise
    */
-  async _findServerZone(serverId) {
+  async _probeServerZone(serverId) {
     this._zoneCache ??= new Map();
     const cached = this._zoneCache.get(serverId);
-    if (cached) return cached;
+    if (cached) return { zone: cached };
+    /** @type {403|404} */
+    let refused = 404;
     for (const zone of ScalewayProvider._zones()) {
       const res = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
       if (res.ok) {
         this._zoneCache.set(serverId, zone);
-        return zone;
+        return { zone };
       }
-      if (res.status !== 404 && res.status !== 403) {
+      if (res.status === 403) refused = 403;
+      else if (res.status !== 404) {
         const body = await res.text().catch(() => '');
-        throw new Error(`Scaleway API error resolving server ${serverId} (${res.status}): ${body}`);
+        throw Object.assign(
+          new Error(`Scaleway API error resolving server ${serverId} (${res.status}): ${body}`),
+          { status: res.status },
+        );
       }
     }
-    return null;
+    return { zone: null, refused };
+  }
+
+  /**
+   * The zone a server UUID lives in (_probeServerZone).
+   * @param {string} serverId
+   * @returns {Promise<string|null>} zone, or null when no zone has it
+   */
+  async _findServerZone(serverId) {
+    return (await this._probeServerZone(serverId)).zone;
   }
 
   /**
@@ -1241,8 +1348,16 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async getServer(serverId) {
-    const zone = await this._findServerZone(serverId);
-    if (!zone) throw new Error(`Failed to get server: server ${serverId} not found in any zone`);
+    // A server no zone has throws with the probes' status, 404, or 403 when
+    // a zone refused the token: either is a token that can't see the server
+    // (assertTokenSeesCluster), as a failed probe's own status is.
+    const { zone, refused } = await this._probeServerZone(serverId);
+    if (!zone) {
+      throw Object.assign(
+        new Error(`Failed to get server: server ${serverId} not found in any zone`),
+        { status: refused },
+      );
+    }
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));

@@ -4,8 +4,8 @@
  * provider's getK8s<Role>UserData({}) is its template loaded for the role
  * (loadCloudInit: includes resolved, role slots filled) with nothing
  * substituted but what the static adds itself (a master's CSI image
- * rewrites, csiImageRewriteVars), so it equals exactly one file loaded and
- * filled that way. The db node
+ * rewrites and embedded CSI manifest, masterAddedVars), so it equals exactly
+ * one file loaded and filled that way. The db node
  * has no script of its own: it loads its provider's worker script as the db
  * role. The censuses walk this, so a new provider, role or script is checked
  * the day it lands, and a script no provider boots from is one they would
@@ -13,8 +13,7 @@
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { csiImageRewriteVars, loadCloudInit, renderScript } from '../../src/lib/iac/cloud-init.js';
-import { CSI_SIDECAR_MIRRORS } from '../../src/lib/images.js';
+import { loadCloudInit, masterAddedVars, renderScript } from '../../src/lib/iac/cloud-init.js';
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 import { k8sCensusProviders } from './k8s-built-ahead.js';
 
@@ -68,12 +67,7 @@ export async function k8sBootScripts(): Promise<
     const P = PROVIDERS[provider] as unknown as UserDataGetters;
     for (const role of ROLES) {
       const userData = await P[GETTER[role]]({});
-      // A provider built ahead of its CSI part has no image rewrites yet
-      // (csiImageRewriteVars throws), and its master names none.
-      const added =
-        role === 'master' && Object.hasOwn(CSI_SIDECAR_MIRRORS, provider)
-          ? csiImageRewriteVars(provider)
-          : {};
+      const added = role === 'master' ? masterAddedVars(provider) : {};
       const files = bootScriptFiles().filter((file) => {
         const script = loadBootScript(file, role);
         return script !== null && renderScript(script, added) === userData;

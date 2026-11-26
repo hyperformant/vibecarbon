@@ -55,7 +55,8 @@ describe('ScalewayProvider statics', () => {
     // Same operator-vs-plugin convention as every sibling
     // (HETZNER_API_TOKEN→HCLOUD_TOKEN, VULTR_API_TOKEN→VULTR_API_KEY): the
     // operator sets the spelled-out name; the Pulumi plugin reads SCW_*.
-    // buildIacEnv is the only place the SCW_* names appear (asserted below).
+    // buildIacEnv emits the SCW_* names for the plugin, k8sCloudSecrets for
+    // the cluster's CSI controller.
     expect(ScalewayProvider.TOKEN_ENV).toBe('SCALEWAY_SECRET_KEY');
     expect(ScalewayProvider.CLI_TOKEN_ENV).toBe('SCW_SECRET_KEY');
     expect(ScalewayProvider.TOKEN_ENV).not.toBe(ScalewayProvider.CLI_TOKEN_ENV);
@@ -98,6 +99,70 @@ describe('ScalewayProvider statics', () => {
   it('getDefaultStandbyRegion pairs cross-country with matching AZ ordinals', () => {
     expect(ScalewayProvider.getDefaultStandbyRegion('fr-par-1')).toBe('nl-ams-1');
     expect(ScalewayProvider.getDefaultStandbyRegion('nl-ams-2')).toBe('fr-par-2');
+  });
+
+  it('destroy never deletes a detached CSI volume on a region-wide guess: they carry no tags', () => {
+    // scaleway-csi creates Block volumes with a name and nothing else, so
+    // only a captured id says whose one is (BaseProvider.ORPHAN_VOLUME_REGION_GUESS).
+    expect(ScalewayProvider.ORPHAN_VOLUME_REGION_GUESS).toBe(false);
+  });
+});
+
+describe('getServer: a refusal carries its status, for the token check', () => {
+  // assertTokenSeesCluster reads a 401, 403 or 404 as a token that can't see
+  // the master, and anything else as a check that could not run. getServer
+  // finds the zone first, one probe per zone, so the probe's answer is the
+  // refusal's status.
+  const ZONES = Object.keys(ScalewayProvider.REGIONS);
+  const probe = (zone: string) => `/instance/v1/zones/${zone}/servers/srv-1`;
+  const answer = (byZone: Record<string, number>) =>
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const zone = ZONES.find((z) => url.endsWith(probe(z)));
+      const status = zone ? (byZone[zone] ?? 404) : 404;
+      return jsonResp(status === 200 ? { server: { id: 'srv-1' } } : { message: 'nope' }, status);
+    });
+  const urls = () => fetchWithRetryMock.mock.calls.map((c: unknown[]) => String(c[0]));
+
+  it('a master in no zone throws status 404, after every zone', async () => {
+    answer({});
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({
+      status: 404,
+      message: 'Failed to get server: server srv-1 not found in any zone',
+    });
+    expect(urls()).toEqual(ZONES.map((z) => `${ScalewayProvider.API_BASE}${probe(z)}`));
+  });
+
+  it('a zone that answered 403 makes it 403: the token may not read there', async () => {
+    answer({ 'fr-par-2': 403 });
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect(urls()).toHaveLength(ZONES.length);
+  });
+
+  it.each([401, 400, 500])(
+    'a %i from the probe throws with that status, at once',
+    async (status) => {
+      answer({ 'fr-par-1': status });
+      const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({ status });
+      expect((err as Error).message).toContain(`(${status})`);
+      expect(urls()).toEqual([`${ScalewayProvider.API_BASE}${probe('fr-par-1')}`]);
+    },
+  );
+
+  it('a master found in a zone is read there', async () => {
+    answer({ 'nl-ams-1': 200 });
+    const server = await new ScalewayProvider('tok').getServer('srv-1');
+    expect(server).toEqual({ zone: 'nl-ams-1', id: 'srv-1' });
+    // fr-par-1, fr-par-2, then the hit, then the read.
+    expect(urls().map((u) => u.slice(ScalewayProvider.API_BASE.length))).toEqual([
+      probe('fr-par-1'),
+      probe('fr-par-2'),
+      probe('nl-ams-1'),
+      probe('nl-ams-1'),
+    ]);
   });
 });
 

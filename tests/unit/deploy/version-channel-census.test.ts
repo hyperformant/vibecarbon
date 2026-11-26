@@ -26,6 +26,7 @@ import {
   manifestImageValues,
   mirroredImageName,
 } from '../../../src/lib/images.js';
+import { EMBEDDED_CSI_FILES } from '../../_shared/csi-install-rewrite.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const gitFiles = (...pathspecs: string[]) =>
@@ -37,7 +38,12 @@ const gitFiles = (...pathspecs: string[]) =>
     .split('\n')
     .filter((f) => f && existsSync(join(REPO_ROOT, f)));
 
-/** What a server runs: compose under prod, the k8s tree, cloud-init. */
+/**
+ * What a server runs: compose under prod, the k8s tree, cloud-init. A
+ * committed CSI render is upstream's YAML, not a template (EMBEDDED_CSI_FILES):
+ * it can hold no token, and its images are its driver's, which move with the
+ * CLI as every fetched driver manifest's do.
+ */
 const ADDONS = (JSON.parse(readRepoFile('services/index.json')) as Array<{ name: string }>).map(
   (s) => s.name,
 );
@@ -46,7 +52,7 @@ const isAddon = (f: string) =>
 const TEMPLATES = [
   'carbon/docker-compose.prod.yml',
   ...gitFiles('carbon/k8s').filter((f) => /\.ya?ml$/.test(f)),
-  ...gitFiles('carbon/cloud-init'),
+  ...gitFiles('carbon/cloud-init').filter((f) => !(f in EMBEDDED_CSI_FILES)),
 ].filter((f) => !isAddon(f));
 
 /** The env-var form compose takes the set's refs in, by name. */

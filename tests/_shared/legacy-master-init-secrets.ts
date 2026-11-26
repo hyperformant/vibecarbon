@@ -41,4 +41,4 @@ export const LEGACY_MASTER_INIT_SECRETS: Record<string, string> = {
  * came after the CLI took the token over (applyCloudSecrets), so no cluster
  * of theirs holds a boot-made Secret to retire.
  */
-export const NO_LEGACY_BOOT_SECRETS: readonly string[] = ['vultr'];
+export const NO_LEGACY_BOOT_SECRETS: readonly string[] = ['vultr', 'scaleway'];

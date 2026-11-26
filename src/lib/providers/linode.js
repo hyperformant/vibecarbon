@@ -537,12 +537,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
-      '../iac/cloud-init.js'
-    );
+    const { loadCloudInit, masterAddedVars, renderScript } = await import('../iac/cloud-init.js');
     return renderScript(loadCloudInit('linode-master-init.sh'), {
       ...vars,
-      ...csiImageRewriteVars('linode'),
+      ...masterAddedVars('linode'),
     });
   }
 
