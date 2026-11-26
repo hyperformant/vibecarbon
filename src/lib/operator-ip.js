@@ -1,25 +1,29 @@
 /**
- * Operator-IP detection and management for the Hetzner Cloud firewall's
- * SSH (port 22) and Kubernetes API (port 6443) rules.
+ * Operator-IP detection and management for the SSH (port 22) and Kubernetes
+ * API (port 6443) rules of every environment's cloud firewall.
  *
  * Architecture: a project-level list of operator CIDRs persisted in
- * .vibecarbon.json under `operatorCidrs`. Every interactive command that
- * needs SSH or k8s API access calls `ensureOperatorIpAccess` near the top
- * of its run() — if the operator's current public IP isn't already covered
- * by an entry in the list, the helper detects it, appends it, and patches
- * the live Hetzner firewall via the Cloud API. Subsequent commands from
- * the same IP are silent.
+ * .vibecarbon.json under `operatorCidrs`. Every command that needs SSH or
+ * k8s API access calls `ensureOperatorIpAccess` near the top of its run():
+ * it detects the operator's current public IP, saves it to the list if no
+ * entry covers it, and, when the environment's record
+ * (`operatorCidrsPushed`) lacks it, pushes the whole saved list to that
+ * environment's firewall with its own provider's API. Once the record holds
+ * the address, later commands from it push nothing, and within a day of the
+ * entry's `lastUsedAt` they write nothing either (touchCidr).
  *
- * Non-interactive (--yes) flows skip auto-detect and require either an
- * already-populated list or an explicit ALLOWED_SSH_IPS env var, since CI
- * runners have ephemeral IPs that would otherwise pollute the list.
+ * Only a `-y` run under CI skips auto-detect (shouldAutoDetectOperatorIp):
+ * it requires an already-populated list or an explicit ALLOWED_SSH_IPS env
+ * var, since CI runners have ephemeral IPs that would otherwise pollute the
+ * list.
  *
  * Exports:
  *   - detectOperatorIp() — primary + fallback HTTP detector
  *   - cidrFromIp(ip, version) — formats /32 or /128
- *   - loadOperatorCidrs / addCidr / removeCidr / pruneCidrs
+ *   - loadOperatorCidrs / addCidr / touchCidr / removeCidr / pruneCidrs
  *   - findMatchingCidr — checks if an IP is contained by any persisted CIDR
- *   - applyToFirewall — patches the live Hetzner firewall via the Cloud API
+ *   - applyToFirewall — patches one environment's firewalls through its
+ *     provider
  *   - envFirewallSides / providerTokenFor / pushOperatorCidrs — push one
  *     environment's firewalls with its own token and record what it now
  *     allows (`operatorCidrsPushed`)
@@ -28,7 +32,7 @@
  *     stderr, warn-and-continue form (`shell`, `diagnose`, `status`)
  */
 
-import { updateProjectConfig } from './config.js';
+import { readProjectConfigFile, updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
 import { armOperatorIpGuard } from './operator-ip-guard.js';
@@ -180,6 +184,29 @@ export function addCidr(list, cidr, now = new Date()) {
   return [...list, { cidr, addedAt: nowIso, lastUsedAt: nowIso }];
 }
 
+/** How long a refreshed `lastUsedAt` stands before a command writes it again. */
+const LAST_USED_REFRESH_MS = 86_400_000;
+
+/**
+ * addCidr for a command's own address, without rewriting .vibecarbon.json
+ * on every run: an entry whose `lastUsedAt` is under a day old is left as
+ * it is, and the list comes back unchanged, so updateProjectConfig writes
+ * nothing. Projects commit that file, and a status run must not dirty it.
+ * A missing entry (another terminal removed it meanwhile) is re-added, and
+ * an older one refreshed: pruneCidrs works in days, so a day's lag costs
+ * nothing.
+ *
+ * @param {Array<{cidr: string, lastUsedAt?: string}>} list
+ * @param {string} cidr
+ * @param {Date} [now]
+ */
+export function touchCidr(list, cidr, now = new Date()) {
+  const entry = list.find((e) => e.cidr === cidr);
+  const age = now.getTime() - new Date(entry?.lastUsedAt).getTime();
+  if (entry && age >= 0 && age < LAST_USED_REFRESH_MS) return list;
+  return addCidr(list, cidr, now);
+}
+
 export function removeCidr(list, cidr) {
   return list.filter((e) => e.cidr !== cidr);
 }
@@ -227,28 +254,6 @@ export function updateOperatorCidrs(projectConfig, change, cwd) {
 // ============================================================================
 
 /**
- * Patch the SSH (port 22) and Kubernetes API (port 6443) rules on each of
- * the named environments' firewalls to use the given CIDR list as their
- * source_ips. Other rules (HTTP/HTTPS, internal cluster traffic) are left
- * unchanged.
- *
- * environments is an array of full env identifiers — for HA, pass
- * ['<env>-primary', '<env>-standby']; for single, pass ['<env>'].
- *
- * Returns the names of firewalls that were updated. Firewalls that don't
- * exist (env not yet deployed) are skipped silently.
- *
- * Builds a single provider instance from envConfig and patches ALL environments
- * with it — assumes single-provider-per-project; mixed-provider projects must
- * be reworked to build one provider per environment.
- *
- * C9 — the Hetzner wire calls (find-by-name, rule-JSON rewrite, set_rules)
- * moved onto HetznerProvider.applyOperatorCidrs; this function now keeps
- * only the provider-neutral empty-CIDR lockout guard and the
- * `${projectName}-${env}-firewall` naming convention, delegating the actual
- * firewall patch per environment to a provider instance.
- */
-/**
  * The operator firewall's name for one side of an environment.
  *
  * @param {string} projectName
@@ -258,6 +263,27 @@ export function firewallName(projectName, side) {
   return `${projectName}-${side}-firewall`;
 }
 
+/**
+ * Patch the SSH (port 22) and Kubernetes API (port 6443) rules on each of
+ * one environment's firewalls to use the given CIDR list as their sources.
+ * Other rules (HTTP/HTTPS, internal cluster traffic) are left unchanged.
+ * The whole list replaces the sources: an entry missing from it is no
+ * longer let in.
+ *
+ * environments holds that one environment's sides: for HA,
+ * ['<env>-primary', '<env>-standby']; otherwise ['<env>'].
+ *
+ * Returns the names of firewalls that were updated. A firewall the provider
+ * does not find is skipped; callers that must not pass over one compare the
+ * names returned with the ones asked for.
+ *
+ * Builds one provider instance from envConfig, that environment's own
+ * provider, and the token passed must be that provider's: a project can mix
+ * providers, so callers push each environment on its own
+ * (pushOperatorCidrs). The provider's applyOperatorCidrs does the wire calls
+ * (find by name, rewrite the rules); this keeps the provider-neutral
+ * empty-list lockout guard and the `${projectName}-${env}-firewall` naming.
+ */
 export async function applyToFirewall({
   projectName,
   environments,
@@ -396,11 +422,12 @@ export async function pushOperatorCidrs({
  * existed, or never) counts as not.
  *
  * This, not "the record differs from the saved list", is what makes a
- * command push: a command lets its operator in and nothing more. Pushing
- * every difference would turn a routine command into a sync of the local
- * list to every firewall, so a stale checkout would re-open a CIDR someone
- * removed, or drop a teammate's newer one. Removals stay `vibecarbon
- * access`'s job.
+ * command push: a command pushes to let its operator in, never because the
+ * lists differ. Pushing every difference would turn a routine command into a
+ * sync of the local list to every firewall, so a stale checkout would
+ * re-open a CIDR someone removed, or drop a teammate's newer one, on every
+ * run. A push still sends the whole saved list (applyToFirewall), so the
+ * one a command does make carries its checkout's list.
  *
  * @param {{ operatorCidrsPushed?: string[] } | undefined} envConfig
  * @param {string | null} cidr
@@ -414,33 +441,6 @@ function recordAllows(envConfig, cidr) {
 // AUTO-ADD HELPER
 // ============================================================================
 
-/**
- * Ensure the current operator's IP is covered by the project's CIDR list,
- * persisting it if not, and push the list to this environment's firewall
- * when its record (`operatorCidrsPushed`) lacks the operator's CIDR: a new
- * address, or one another environment's command saved and pushed only
- * there (`deploy prod` saved it, so `backup staging` must open staging).
- *
- * Inputs:
- *   projectConfig — loaded .vibecarbon.json (must include projectName and
- *     environments[<environment>] for the apply step to fire)
- *   environment — user-facing env name
- *   isHA — whether to update both '<env>-primary' and '<env>-standby'
- *     firewalls (vs just '<env>')
- *   apiToken — Hetzner Cloud API token (from HETZNER_API_TOKEN — env or the
- *     project's .env.local)
- *   yes — non-interactive mode flag
- *   onMessage — optional callback invoked with a single info string when a
- *     new CIDR is added (caller wires this to its logger)
- *   cwd — the project directory whose .vibecarbon.json is updated
- *
- * Returns { added, cidr, list, fromEnv, pushed }:
- *   added — true if the list was modified this call
- *   cidr — the CIDR that was added (or matched, when added=false)
- *   list — the updated list
- *   fromEnv — true if the list was bootstrapped from ALLOWED_SSH_IPS env var
- *   pushed — true if this call updated a firewall of this environment
- */
 /**
  * Whether to auto-detect the operator's current public IP and ensure it's on
  * the allowlist. Interactive deploys always do. Non-interactive (`-y`) deploys
@@ -459,6 +459,59 @@ export function shouldAutoDetectOperatorIp({ yes, env = process.env }) {
   return !inCI;
 }
 
+/**
+ * A firewall push that threw inside ensureOperatorIpAccess, after the
+ * address was saved. It carries whether the address was new (`added`), so a
+ * gate can tell "this address may not be let in" (new: stop) from "the
+ * firewall could not be refreshed for an address already on the list"
+ * (operator-ip-gate.js warns and goes on). The message is the push's own.
+ */
+export class FirewallPushError extends Error {
+  /**
+   * @param {unknown} cause
+   * @param {{ added: boolean, cidr: string }} o
+   */
+  constructor(cause, { added, cidr }) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'FirewallPushError';
+    this.added = added;
+    this.cidr = cidr;
+  }
+}
+
+/**
+ * Ensure the current operator's IP is covered by the project's CIDR list,
+ * persisting it if not, and push the list to this environment's firewall
+ * when its record (`operatorCidrsPushed`) lacks the operator's CIDR: a new
+ * address, or one another environment's command saved and pushed only
+ * there (`deploy prod` saved it, so `backup staging` must open staging).
+ *
+ * Inputs:
+ *   projectConfig — loaded .vibecarbon.json (must include projectName and
+ *     environments[<environment>] for the apply step to fire)
+ *   environment — user-facing env name
+ *   isHA — whether to update both '<env>-primary' and '<env>-standby'
+ *     firewalls (vs just '<env>')
+ *   apiToken — the environment's own provider API token (resolveProviderToken
+ *     reads it from the shell or the project's .env.local); null pushes nothing
+ *   yes — non-interactive mode flag
+ *   onMessage — optional callback invoked with a single info string when a
+ *     new CIDR is added (caller wires this to its logger)
+ *   cwd — the project directory whose .vibecarbon.json is updated
+ *   fetcher — the detectors' fetch (detectOperatorIp); status passes a quick
+ *     one (quickDetectFetcher)
+ *
+ * Returns { added, cidr, list, fromEnv, pushed, updated, missed }:
+ *   added — true if the list was modified this call
+ *   cidr — the CIDR that was added (or matched, when added=false)
+ *   list — the updated list
+ *   fromEnv — true if the list was bootstrapped from ALLOWED_SSH_IPS env var
+ *   pushed — true if a push updated every firewall of this environment
+ *   updated / missed — the firewall names a push updated, and the ones it
+ *     did not find (both empty when nothing was pushed)
+ *
+ * Throws FirewallPushError when the push throws.
+ */
 export async function ensureOperatorIpAccess({
   projectConfig,
   environment,
@@ -467,6 +520,7 @@ export async function ensureOperatorIpAccess({
   yes = false,
   onMessage,
   cwd,
+  fetcher = fetchWithRetry,
 }) {
   const list = loadOperatorCidrs(projectConfig);
 
@@ -497,7 +551,7 @@ export async function ensureOperatorIpAccess({
   let ip;
   let version;
   try {
-    ({ ip, version } = await detectOperatorIp());
+    ({ ip, version } = await detectOperatorIp({ fetcher }));
   } catch (err) {
     // Under -y with a populated list the operator may already be covered — warn
     // and continue rather than block the deploy on a transient detector failure.
@@ -524,29 +578,45 @@ export async function ensureOperatorIpAccess({
   const added = !match;
   const cidr = match ? match.cidr : cidrFromIp(ip, version);
   if (added && onMessage) onMessage(`Detected your IP: ${cidr}, adding to access list...`);
-  // addCidr appends a new CIDR, or refreshes a matched one's lastUsedAt and
-  // re-adds it if another terminal removed it meanwhile (this operator is
-  // connecting from it right now).
-  const updatedList = persist(projectConfig, (fresh) => addCidr(fresh, cidr), cwd);
+  // touchCidr appends a new CIDR, re-adds a matched one another terminal
+  // removed meanwhile (this operator is connecting from it right now), and
+  // refreshes its lastUsedAt at most once a day, so a routine command leaves
+  // .vibecarbon.json as it was.
+  const updatedList = persist(projectConfig, (fresh) => touchCidr(fresh, cidr), cwd);
 
   // Push when the env is already deployed (its firewall exists) and its
   // record lacks this CIDR. For first-deploy bootstrap, the deploy flow
   // itself creates the firewall with the right CIDRs from the persisted list.
   const envConfig = projectConfig?.environments?.[environment];
-  let pushed = false;
+  let updated = [];
+  let missed = [];
   if (envConfig && apiToken && !recordAllows(envConfig, cidr)) {
-    const updated = await pushOperatorCidrs({
-      projectConfig,
-      environment,
-      sides: isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment],
-      operatorCidrs: updatedList,
-      apiToken,
-      cwd,
-    });
-    pushed = updated.length > 0;
+    const sides = isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment];
+    try {
+      updated = await pushOperatorCidrs({
+        projectConfig,
+        environment,
+        sides,
+        operatorCidrs: updatedList,
+        apiToken,
+        cwd,
+      });
+    } catch (err) {
+      throw new FirewallPushError(err, { added, cidr });
+    }
+    missed = sides
+      .map((side) => firewallName(projectConfig.projectName, side))
+      .filter((name) => !updated.includes(name));
   }
 
-  return { added, cidr, list: updatedList, pushed };
+  return {
+    added,
+    cidr,
+    list: updatedList,
+    pushed: updated.length > 0 && missed.length === 0,
+    updated,
+    missed,
+  };
 }
 
 function persist(projectConfig, change, cwd) {
@@ -578,6 +648,27 @@ export async function ensureOperatorIpAccessWarn({ projectConfig, environment, a
   });
 }
 
+/** Per-detector budget on the status path (quickDetectFetcher). */
+const QUICK_DETECT_TIMEOUT_MS = 5_000;
+
+/**
+ * The detectors' fetch for `status`: one attempt each, cut off after
+ * QUICK_DETECT_TIMEOUT_MS, so an unreachable detector costs status about
+ * 10 s instead of fetchWithRetry's five attempts with backoff per detector
+ * (about 30 s). Status only reads, and a missed detection only warns. A
+ * deploy keeps the full retry: it cannot go on without the address.
+ *
+ * @param {string} url
+ * @param {RequestInit} [init]
+ */
+export function quickDetectFetcher(url, init = {}) {
+  return fetchWithRetry(url, {
+    ...init,
+    maxAttempts: 1,
+    signal: AbortSignal.timeout(QUICK_DETECT_TIMEOUT_MS),
+  });
+}
+
 /**
  * Let the operator's current address through every named environment's
  * firewall before a command reads them remotely (`status`, and through
@@ -591,6 +682,15 @@ export async function ensureOperatorIpAccessWarn({ projectConfig, environment, a
  * enough: a command saves an address project-wide but pushes only its own
  * environment. An environment with no record counts as lacking it. Any other
  * difference is left alone (recordAllows says why).
+ *
+ * The list and the record are read from disk again just before each push:
+ * an `access remove` in another terminal may have pushed and recorded that
+ * environment since this command saved its list, and pushing the older list
+ * would re-open the CIDR it removed.
+ *
+ * An environment whose provider token is missing is named only when the
+ * address is new: status is mostly run without tokens, and an address
+ * already on the list is usually let in already.
  *
  * Under CI (`yes` and CI=true) it does nothing: the runner's address is
  * ephemeral, so the saved list is trusted and nothing is detected, saved or
@@ -607,6 +707,7 @@ export async function ensureOperatorIpAccessWarn({ projectConfig, environment, a
  * @param {boolean} [o.yes] non-interactive (status passes true)
  * @param {string} [o.cwd] the project directory whose .vibecarbon.json is updated
  * @param {(envConfig: object) => string | null | undefined} [o.tokenFor]
+ * @param {boolean} [o.quickDetect] detect within status's budget (quickDetectFetcher)
  * @returns {Promise<void>}
  */
 export async function ensureOperatorIpAccessWarnAll({
@@ -615,6 +716,7 @@ export async function ensureOperatorIpAccessWarnAll({
   yes = true,
   cwd,
   tokenFor = providerTokenFor,
+  quickDetect = false,
 }) {
   if (!projectConfig || environments.length === 0) return;
   if (!shouldAutoDetectOperatorIp({ yes })) return;
@@ -630,6 +732,7 @@ export async function ensureOperatorIpAccessWarnAll({
       yes,
       onMessage: (msg) => console.error(`${c.info('i')} ${msg}`),
       cwd,
+      ...(quickDetect ? { fetcher: quickDetectFetcher } : {}),
     });
   } catch (err) {
     console.error(`${c.warning('!')} Operator-IP check failed: ${err.message}`);
@@ -638,31 +741,43 @@ export async function ensureOperatorIpAccessWarnAll({
   }
 
   // Detection failed (and the saved list was trusted): no CIDR to check for.
-  if (!result.cidr) return;
+  const { cidr } = result;
+  if (!cidr) return;
   for (const environment of environments) {
     const envConfig = projectConfig.environments?.[environment];
-    if (!envConfig || recordAllows(envConfig, result.cidr)) continue;
+    if (!envConfig || recordAllows(envConfig, cidr)) continue;
     const apiToken = tokenFor(envConfig);
     if (!apiToken) {
-      console.error(
-        `${c.warning('!')} Firewall of ${environment} not updated: ${providerFor(envConfig).TOKEN_ENV} is not set.`,
-      );
-      console.error(mayTimeOut);
+      if (result.added) {
+        console.error(
+          `${c.warning('!')} Firewall of ${environment} not updated: ${providerFor(envConfig).TOKEN_ENV} is not set.`,
+        );
+        console.error(mayTimeOut);
+      }
       continue;
     }
     const sides = envFirewallSides(environment, envConfig);
     try {
+      const onDisk = readProjectConfigFile(cwd) ?? projectConfig;
+      if (recordAllows(onDisk.environments?.[environment], cidr)) continue;
+      const list = loadOperatorCidrs(onDisk);
+      if (!list.some((e) => e.cidr === cidr)) {
+        console.error(
+          `${c.warning('!')} Firewall of ${environment} left alone: ${cidr} was taken off the list meanwhile.`,
+        );
+        continue;
+      }
       const updated = await pushOperatorCidrs({
         projectConfig,
         environment,
         sides,
-        operatorCidrs: result.list,
+        operatorCidrs: list,
         apiToken,
         cwd,
       });
       if (updated.length === sides.length) {
         console.error(
-          `${c.success('✓')} Firewall of ${environment} updated: SSH/k8s API now allow ${result.cidr}`,
+          `${c.success('✓')} Firewall of ${environment} updated: SSH/k8s API now allow ${cidr}`,
         );
       } else {
         console.error(

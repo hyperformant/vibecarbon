@@ -1198,7 +1198,7 @@ export async function executeDeployment(args, gatheredConfig) {
   }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch
-  // the live Hetzner firewall. On a fresh first deploy this just appends to
+  // the live firewall through the environment's provider. On a fresh first deploy this just appends to
   // projectConfig.operatorCidrs in memory and on disk — the firewall itself
   // is created later in this function with the correct source_ips because
   // every program-builder call site reads projectConfig.operatorCidrs.
@@ -1225,12 +1225,17 @@ export async function executeDeployment(args, gatheredConfig) {
     accessSpinner.stop('Operator IP access check failed', 1);
     throw err;
   }
+  // A push that found some of the environment's firewalls but not all says
+  // so; one that found none is a redeploy of an environment whose first
+  // deploy stopped before its firewall, which this deploy creates.
   accessSpinner.stop(
-    accessResult.added
-      ? `Operator access list updated (${accessResult.cidr})`
-      : accessResult.pushed
-        ? `Operator firewall updated (${accessResult.cidr})`
-        : 'Operator IP access verified',
+    accessResult.updated?.length > 0 && accessResult.missed?.length > 0
+      ? `Operator firewall partly updated (${accessResult.cidr}): ${accessResult.missed.join(', ')} not found`
+      : accessResult.added
+        ? `Operator access list updated (${accessResult.cidr})`
+        : accessResult.pushed
+          ? `Operator firewall updated (${accessResult.cidr})`
+          : 'Operator IP access verified',
   );
   if (accessResult.added && accessResult.fromEnv) {
     p.log.info(`Bootstrapped operator CIDRs from ALLOWED_SSH_IPS env var: ${accessResult.cidr}`);

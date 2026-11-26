@@ -1766,7 +1766,8 @@ async function main(argv = []) {
   // would show as unavailable with no reason. Only in an interactive
   // terminal outside CI: a status run by cron, a CI job or a pipe (`-json |
   // jq`) never detects, saves or pushes, so it stays a pure read. Messages
-  // go to stderr.
+  // go to stderr. Detection gets status's short budget (quickDetect): an
+  // unreachable detector costs seconds, not half a minute.
   const deployedEnvNames = envEntries
     .filter(([, envConfig]) => envHasServers(envConfig))
     .map(([envName]) => envName);
@@ -1777,6 +1778,7 @@ async function main(argv = []) {
       environments: deployedEnvNames,
       yes: true,
       cwd,
+      quickDetect: true,
     });
   }
 

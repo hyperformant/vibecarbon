@@ -2,7 +2,11 @@
  * The operator-IP gate of the commands that cannot go on without SSH or the
  * k8s API (`backup`, `restore`, `update`, `failover`, both `scale` paths):
  * refresh the allowlist through ensureOperatorIpAccess, say so when the
- * firewall changed, and exit 1 when the check fails.
+ * firewall changed (or changed only in part), and exit 1 when the check
+ * fails. A push that fails for an address already on the list warns and goes
+ * on instead: before records existed, such a command pushed nothing at all,
+ * and a failover must not stop on a firewall API that is down when the
+ * address it comes from is already let in.
  *
  * The other callers of ensureOperatorIpAccess differ on purpose and stay
  * their own: `deploy` runs it under a spinner and throws, `destroy` warns and
@@ -12,7 +16,7 @@
  */
 
 import * as p from '@clack/prompts';
-import { ensureOperatorIpAccess } from './operator-ip.js';
+import { ensureOperatorIpAccess, FirewallPushError } from './operator-ip.js';
 import { providerIdFor, resolveProviderToken } from './providers/index.js';
 
 /**
@@ -45,10 +49,20 @@ export async function requireOperatorIpAccess({
       yes,
       onMessage: (msg) => p.log.info(msg),
     });
-    if (result.added || result.pushed) {
+    if (result.missed?.length > 0) {
+      p.log.warn(
+        `Firewall not fully updated: ${result.missed.join(' and ')} not found, so it may not allow ${result.cidr} yet. Rerun this command once the provider lists it.`,
+      );
+    } else if (result.added || result.pushed) {
       p.log.success(`Firewall updated: ${opened} ${result.cidr}`);
     }
   } catch (err) {
+    if (err instanceof FirewallPushError && !err.added) {
+      p.log.warn(
+        `Firewall not refreshed (${err.message}). Carrying on, since ${err.cidr} was already on the list; if SSH times out, rerun once the provider answers.`,
+      );
+      return;
+    }
     p.log.error(`Operator-IP check failed: ${err.message}`);
     process.exit(1);
   }

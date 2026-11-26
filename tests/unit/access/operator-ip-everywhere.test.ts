@@ -326,7 +326,7 @@ describe('ensureOperatorIpAccessWarnAll', () => {
     expect(errors.join('\n')).toMatch(/staging.*firewall API answered 503/);
   });
 
-  it('an environment with no provider token is named and skipped', async () => {
+  it('an environment with no provider token is named and skipped when the address is new', async () => {
     const projectConfig = writeProject({ prod: prod(), staging: staging() });
     await ensureOperatorIpAccessWarnAll({
       projectConfig,
@@ -338,6 +338,105 @@ describe('ensureOperatorIpAccessWarnAll', () => {
     expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
     expect(errors.join('\n')).toMatch(/staging.*DIGITALOCEAN_API_TOKEN/);
     expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
+  });
+
+  it('a missing provider token for an address already on the list is skipped without a word', async () => {
+    // status is mostly run without tokens: naming every such environment on
+    // every run is noise, and an address on the list is usually let in.
+    const projectConfig = writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, ME]);
+    await ensureOperatorIpAccessWarnAll({
+      projectConfig,
+      environments: ['prod', 'staging'],
+      cwd: dir,
+      tokenFor: (envConfig: { provider?: string }) =>
+        envConfig.provider === 'digitalocean' ? undefined : 'token-hetzner',
+    });
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    expect(errors.join('\n')).not.toMatch(/staging|DIGITALOCEAN_API_TOKEN/);
+  });
+
+  it('a second run within a day leaves .vibecarbon.json byte-identical', async () => {
+    // Projects commit the file: an interactive status must not dirty it.
+    writeProject({ prod: prod(), staging: staging() });
+    const once = () =>
+      ensureOperatorIpAccessWarnAll({
+        projectConfig: loadProjectConfig(dir),
+        environments: ['prod', 'staging'],
+        cwd: dir,
+      });
+    await once(); // adds ME, pushes and records both
+    const after = readFileSync(join(dir, '.vibecarbon.json'), 'utf-8');
+    m.pushes.length = 0;
+    await once();
+    expect(m.pushes).toEqual([]);
+    expect(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).toBe(after);
+  });
+
+  it("refreshes an entry's lastUsedAt once it is a day old, and re-adds one removed meanwhile", async () => {
+    const projectConfig = writeProject(
+      { prod: prod({ operatorCidrsPushed: sorted(TEAMMATE, ME) }) },
+      [TEAMMATE, ME],
+    );
+    await ensureOperatorIpAccessWarnAll({ projectConfig, environments: ['prod'], cwd: dir });
+    const mine = () => onDisk().operatorCidrs.find((e: { cidr: string }) => e.cidr === ME);
+    expect(Date.now() - new Date(mine().lastUsedAt).getTime()).toBeLessThan(60_000);
+    expect(mine().addedAt).toBe('2026-11-01T00:00:00.000Z');
+
+    // Another terminal removed it from the file this command loaded.
+    const cfg = onDisk();
+    cfg.operatorCidrs = cfg.operatorCidrs.filter((e: { cidr: string }) => e.cidr !== ME);
+    writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(cfg));
+    await ensureOperatorIpAccessWarnAll({ projectConfig, environments: ['prod'], cwd: dir });
+    expect(mine()).toBeDefined();
+  });
+
+  it('pushes the list as it is on disk at the push, so an access remove meanwhile is not undone', async () => {
+    // status saved [TEAMMATE, REMOVED, ME]; then, before its pushes, an
+    // `access remove REMOVED` in another terminal wrote the list and pushed
+    // and recorded staging.
+    const projectConfig = writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, REMOVED]);
+    let meanwhile = true;
+    await ensureOperatorIpAccessWarnAll({
+      projectConfig,
+      environments: ['prod', 'staging'],
+      cwd: dir,
+      tokenFor: (envConfig: { provider?: string }) => {
+        if (meanwhile) {
+          meanwhile = false;
+          const cfg = onDisk();
+          expect(cfg.operatorCidrs.map((e: { cidr: string }) => e.cidr)).toEqual([
+            TEAMMATE,
+            REMOVED,
+            ME,
+          ]);
+          cfg.operatorCidrs = cfg.operatorCidrs.filter((e: { cidr: string }) => e.cidr !== REMOVED);
+          cfg.environments.staging.operatorCidrsPushed = sorted(TEAMMATE, ME);
+          writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(cfg));
+        }
+        return `token-${envConfig.provider}`;
+      },
+    });
+    // staging was recorded by the other terminal: not pushed again.
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    for (const push of m.pushes) expect(push.cidrs).toEqual([TEAMMATE, ME]);
+    expect(onDisk().environments.prod.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME));
+  });
+
+  it('leaves an environment alone when its own address was taken off the list meanwhile', async () => {
+    const projectConfig = writeProject({ prod: prod() });
+    await ensureOperatorIpAccessWarnAll({
+      projectConfig,
+      environments: ['prod'],
+      cwd: dir,
+      tokenFor: () => {
+        const cfg = onDisk();
+        cfg.operatorCidrs = cfg.operatorCidrs.filter((e: { cidr: string }) => e.cidr !== ME);
+        writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(cfg));
+        return 'token-hetzner';
+      },
+    });
+    expect(m.pushes).toEqual([]);
+    expect(errors.join('\n')).toContain(`${ME} was taken off the list meanwhile`);
   });
 
   it('writes to stderr only, so -json stdout stays clean', async () => {
@@ -405,6 +504,60 @@ describe('the command gates push their own environment on the same rule', () => 
     expect(m.pushes).toEqual([]);
   });
 
+  it('a second gated command within a day leaves .vibecarbon.json byte-identical', async () => {
+    // The same path serves deploy, the gates and, through WarnAll, shell and diagnose.
+    writeProject({ prod: prod() });
+    const gate = () =>
+      ensureOperatorIpAccess({
+        projectConfig: loadProjectConfig(dir),
+        environment: 'prod',
+        isHA: true,
+        apiToken: 'token-hetzner',
+        cwd: dir,
+      });
+    await gate();
+    const after = readFileSync(join(dir, '.vibecarbon.json'), 'utf-8');
+    const again = await gate();
+    expect(again).toMatchObject({ added: false, pushed: false, updated: [], missed: [] });
+    expect(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).toBe(after);
+  });
+
+  it('a push that finds one HA side of two reports itself as partial, not pushed', async () => {
+    const projectConfig = writeProject({ prod: prod() });
+    m.absent.add('demo-prod-standby-firewall');
+    const result = await ensureOperatorIpAccess({
+      projectConfig,
+      environment: 'prod',
+      isHA: true,
+      apiToken: 'token-hetzner',
+      cwd: dir,
+    });
+    expect(result).toMatchObject({
+      added: true,
+      pushed: false,
+      updated: ['demo-prod-primary-firewall'],
+      missed: ['demo-prod-standby-firewall'],
+    });
+  });
+
+  it('a push that throws carries whether the address was new', async () => {
+    const run = (cidrs: string[]) =>
+      ensureOperatorIpAccess({
+        projectConfig: writeProject({ qa: qa() }, cidrs),
+        environment: 'qa',
+        apiToken: 'token-hetzner',
+        cwd: dir,
+      });
+    m.failing.add('demo-qa-firewall');
+    await expect(run([TEAMMATE])).rejects.toMatchObject({
+      name: 'FirewallPushError',
+      message: 'firewall API answered 503',
+      added: true,
+      cidr: ME,
+    });
+    await expect(run([TEAMMATE, ME])).rejects.toMatchObject({ added: false, cidr: ME });
+  });
+
   it('no source file but operator-ip.js calls applyToFirewall, so no push goes unrecorded', () => {
     const callers = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] }).filter(
       (f) =>
@@ -444,6 +597,47 @@ describe('vibecarbon access', () => {
     const envs = onDisk().environments;
     expect(envs.prod).not.toHaveProperty('operatorCidrsPushed');
     expect(envs.staging.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME));
+  });
+
+  it('add carries on past a failing environment, then exits 1 naming it and the retry', async () => {
+    writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, ME]);
+    m.failing.add('demo-staging-firewall');
+    expect(await access(['add', REMOVED])).toBe(1);
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    const error = logged(m.log.error);
+    expect(error).toContain(
+      `${REMOVED} is in the list, but these firewalls do not allow it yet: staging (firewall API answered 503).`,
+    );
+    expect(error).toContain(`rerun \`vibecarbon access add ${REMOVED}\` to push again`);
+    const disk = onDisk();
+    expect(disk.operatorCidrs.map((e: { cidr: string }) => e.cidr)).toContain(REMOVED);
+    expect(disk.environments.prod.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME, REMOVED));
+    expect(disk.environments.staging).not.toHaveProperty('operatorCidrsPushed');
+  });
+
+  it('prune that fails on an environment exits 1 naming the pruned CIDRs and how to finish', async () => {
+    const fresh = new Date().toISOString();
+    const old = '2026-01-01T00:00:00.000Z';
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'demo',
+        operatorCidrs: [
+          { cidr: ME, addedAt: fresh, lastUsedAt: fresh },
+          { cidr: REMOVED, addedAt: old, lastUsedAt: old },
+        ],
+        environments: { prod: prod(), staging: staging() },
+      }),
+    );
+    m.failing.add('demo-staging-firewall');
+    expect(await access(['prune'])).toBe(1);
+    const error = logged(m.log.error);
+    expect(error).toContain(
+      `Pruned ${REMOVED} from the list, but these firewalls still allow them: staging (firewall API answered 503).`,
+    );
+    expect(error).toContain('run `vibecarbon access remove <cidr>` for each of them to push again');
+    expect(onDisk().operatorCidrs.map((e: { cidr: string }) => e.cidr)).toEqual([ME]);
+    expect(onDisk().environments.prod.operatorCidrsPushed).toEqual([ME]);
   });
 
   it('a rerun of remove for a CIDR already gone pushes the environments that may still allow it', async () => {

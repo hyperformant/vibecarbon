@@ -119,6 +119,8 @@ describe('status and the operator address', () => {
         environments: ['prod'],
         yes: true,
         cwd: dir,
+        // An unreachable detector costs status seconds, not half a minute.
+        quickDetect: true,
       }),
     );
   });
