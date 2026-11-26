@@ -426,6 +426,17 @@ export class BaseProvider {
   static K8S_STORAGE_CLASS = '';
 
   /**
+   * The smallest volume, in GiB, this provider's CSI driver can create. Every
+   * render that resolves `{{K8S_STORAGE_CLASS}}` raises a `storage: <n>Gi`
+   * request below it in the same file to it (renderK8sStorageClassPlaceholder
+   * and renderK8sBase, deploy/k8s/k3s.js), because a claim the provider's API
+   * refuses stays Pending for good. 0: the driver takes any size, rounding a
+   * small request up itself, as Hetzner's and Linode's do.
+   * @type {number}
+   */
+  static K8S_MIN_VOLUME_GI = 0;
+
+  /**
    * Whether this provider's k8s program gives each cluster a floating (or
    * reserved) IP for its ingress, exported as the `floatingIp` output, which
    * deployK3s then requires. Hetzner and Linode do. DigitalOcean does not:

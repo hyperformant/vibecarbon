@@ -22,11 +22,12 @@ import { cleanupTempDir, createTempDir } from './temp-dir.js';
  *   https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml
  *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml
  *   https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml
- * (hetzner and digitalocean fetched 2026-11-05, linode 2026-11-07; all three
- * re-checked 2026-11-19). Keyed workload -> container -> image, exactly as
- * upstream spells them, because both seams address them that way: the
- * install rewrite matches the `image:` value verbatim, and `kubectl set
- * image` addresses containers BY NAME. A rename or retag upstream turns
+ *   https://raw.githubusercontent.com/vultr/vultr-csi/v0.19.1/docs/releases/v0.19.1.yml
+ * (hetzner and digitalocean fetched 2026-11-05, linode 2026-11-07; those three
+ * re-checked 2026-11-19; vultr fetched 2026-11-26). Keyed workload ->
+ * container -> image, exactly as upstream spells them, because both seams
+ * address them that way: the install rewrite matches the `image:` value
+ * verbatim, and `kubectl set image` addresses containers BY NAME. A rename or retag upstream turns
  * either into a miss. If you bump a CSI version, re-derive this fixture from
  * the new manifest; do not hand-edit it.
  */
@@ -83,6 +84,22 @@ export const UPSTREAM_CSI_MANIFESTS = {
       },
     },
   },
+  vultr: {
+    version: 'v0.19.1',
+    workloads: {
+      'statefulset/csi-vultr-controller': {
+        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v3.4.0',
+        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.1.0',
+        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v1.7.0',
+        'csi-snapshotter': 'registry.k8s.io/sig-storage/csi-snapshotter:v8.4.0',
+        'csi-vultr-plugin': 'vultr/vultr-csi:v0.19.1',
+      },
+      'daemonset/csi-vultr-node': {
+        'driver-registrar': 'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.7.0',
+        'csi-vultr-plugin': 'vultr/vultr-csi:v0.19.1',
+      },
+    },
+  },
 } as const;
 
 /** workload (`daemonset/<name>`) -> container -> image */
@@ -97,7 +114,7 @@ const KINDS: Record<string, string> = {
 /**
  * A manifest holding `workloads` in `namespace`: one valid apps/v1 object per
  * workload, its containers named and imaged as given and written the way the
- * three upstream manifests write theirs (block style, a bare `image:` value),
+ * upstream manifests write theirs (block style, a bare `image:` value),
  * after a ServiceAccount that names no image. Deployments and StatefulSets
  * ask for no replicas: what matters is the pod template, not a pod.
  */

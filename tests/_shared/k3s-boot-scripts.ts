@@ -14,7 +14,6 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { csiImageRewriteVars, loadCloudInit, renderScript } from '../../src/lib/iac/cloud-init.js';
-import { csiInstallImageRewrites } from '../../src/lib/images.js';
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 import { k8sCensusProviders } from './k8s-built-ahead.js';
 
@@ -68,12 +67,7 @@ export async function k8sBootScripts(): Promise<
     const P = PROVIDERS[provider] as unknown as UserDataGetters;
     for (const role of ROLES) {
       const userData = await P[GETTER[role]]({});
-      // A provider whose CSI sidecars are not mirrored yet installs no CSI
-      // driver, so its master static adds no rewrites.
-      const added =
-        role === 'master' && csiInstallImageRewrites(provider).length > 0
-          ? csiImageRewriteVars(provider)
-          : {};
+      const added = role === 'master' ? csiImageRewriteVars(provider) : {};
       const files = bootScriptFiles().filter((file) => {
         const script = loadBootScript(file, role);
         return script !== null && renderScript(script, added) === userData;

@@ -6,8 +6,9 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
+import { csiImageRewriteVars, loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
@@ -35,7 +36,9 @@ describe('VultrProvider k8s user-data statics', () => {
       role === 'db'
         ? loadCloudInit('vultr-worker-init.sh', { role: 'db' })
         : loadCloudInit(`vultr-${role}-init.sh`);
-    expect(templatePlaceholders(raw)).toEqual(Object.keys(vars).sort());
+    // The master's static adds the CSI install's image rewrites itself.
+    const added = role === 'master' ? Object.keys(csiImageRewriteVars('vultr')) : [];
+    expect(templatePlaceholders(raw)).toEqual([...Object.keys(vars), ...added].sort());
   });
 
   it.each(roles)('%s: renders with no placeholder left', async (_role, vars, fn) => {
@@ -92,6 +95,59 @@ describe('VultrProvider k8s user-data statics', () => {
     expect(commands.join('\n')).not.toMatch(/--token\b/);
     expect(rendered).not.toContain('create secret');
     expect(rendered.indexOf('_m e\n')).toBeLessThan(rendered.indexOf('touch /tmp/k3s-ready'));
+  });
+
+  it('master: the CSI driver, its node plugin on every node and our StorageClass, before the ready marker', async () => {
+    const rendered = await VultrProvider.getK8sMasterUserData(masterVars);
+    const at = (text: string) => {
+      const i = rendered.indexOf(text);
+      expect(i, text).toBeGreaterThan(-1);
+      return i;
+    };
+    // The release manifest holds VolumeSnapshotClasses, which k3s has no CRD
+    // for: upstream's install docs name these, at the snapshotter's version.
+    const crds = ['volumesnapshotclasses', 'volumesnapshotcontents', 'volumesnapshots'].map(
+      (kind) =>
+        at(
+          `kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_${kind}.yaml`,
+        ),
+    );
+    const established = at('kubectl wait --for=condition=established');
+    const driver = at(
+      'csi_fetch_mirrored https://raw.githubusercontent.com/vultr/vultr-csi/v0.19.1/docs/releases/v0.19.1.yml /root/csi-driver.yaml \\\n    && kubectl apply -f /root/csi-driver.yaml;',
+    );
+    // The node plugin ships with no toleration, so without this it never
+    // runs on the tainted db node, whose claim it mounts.
+    const patch = at(
+      `kubectl patch daemonset csi-vultr-node -n kube-system --type=merge -p \\\n      '{"spec":{"template":{"spec":{"tolerations":[{"operator":"Exists"}]}}}}'`,
+    );
+    const sc = at('kind: StorageClass');
+    const order = [at('_m x\n'), ...crds, established, driver, patch, sc, at('_m e\n')];
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    const heredoc = rendered.slice(
+      rendered.indexOf('<< SCEOF\n') + 9,
+      rendered.indexOf('\nSCEOF\n'),
+    );
+    expect(load(heredoc)).toEqual({
+      apiVersion: 'storage.k8s.io/v1',
+      kind: 'StorageClass',
+      metadata: { name: VultrProvider.K8S_STORAGE_CLASS },
+      provisioner: 'block.csi.vultr.com',
+      reclaimPolicy: 'Delete',
+      allowVolumeExpansion: true,
+      volumeBindingMode: 'WaitForFirstConsumer',
+      parameters: { storage_type: 'block', disk_type: 'nvme' },
+    });
+    // Each step stops the boot when its tries run out: a cluster with no
+    // driver, or a db node it cannot mount on, must never report ready.
+    for (const what of [
+      'the snapshot CRDs',
+      'the Vultr CSI driver',
+      'csi-vultr-node with a universal toleration',
+      `the ${VultrProvider.K8S_STORAGE_CLASS} StorageClass`,
+    ]) {
+      expect(rendered).toMatch(new RegExp(`FATAL: could not (install|patch|apply) ${what}`));
+    }
   });
 
   it('master mirrors its own private IP, agents mirror the master', async () => {

@@ -364,10 +364,15 @@ export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
  * Fetched 2026-11-07:
  *   linode/linode-blockstorage-csi-driver v1.1.5  linode-blockstorage-csi-driver-v1.1.5.yaml
  *   (a release asset, applied by linode-master-init.sh)
+ * Fetched 2026-11-26:
+ *   vultr/vultr-csi v0.19.1  docs/releases/v0.19.1.yml
+ *   (a file in the repo at the tag, not a release asset; applied by
+ *   vultr-master-init.sh)
  */
 export const HETZNER_CSI_VERSION = 'v2.24.1';
 export const DO_CSI_VERSION = 'v4.19.0';
 export const LINODE_CSI_VERSION = 'v1.1.5';
+export const VULTR_CSI_VERSION = 'v0.19.1';
 
 /**
  * Per-provider map of the CSI workloads cloud-init applies from upstream YAML,
@@ -515,6 +520,48 @@ export const CSI_SIDECAR_MIRRORS = {
           repo: 'sig-storage/csi-node-driver-registrar',
           tag: 'v2.16.0',
           digest: 'sha256:aeecba5b171b50558bab359fdb8e28b9da185f666cef35cd87ac9784e51956c5',
+        },
+      },
+    },
+  ],
+  // vultr/vultr-csi v0.19.1: four sidecars on the controller StatefulSet (a
+  // snapshotter, no livenessprobe) and the registrar on the node DaemonSet,
+  // named `driver-registrar` there. Its tags run well behind the other
+  // drivers', so each is a new tag of an existing package. The driver
+  // container (docker.io/vultr/vultr-csi) is not mirrored, as with the others.
+  vultr: [
+    {
+      workload: 'statefulset/csi-vultr-controller',
+      containers: {
+        'csi-provisioner': {
+          repo: 'sig-storage/csi-provisioner',
+          tag: 'v3.4.0',
+          digest: 'sha256:7f0d080e35ac455c52956e451b8d230c1eca1a8e0d943fdb657df4e093d03d0f',
+        },
+        'csi-attacher': {
+          repo: 'sig-storage/csi-attacher',
+          tag: 'v4.1.0',
+          digest: 'sha256:b98eb657dfc0ff4ccf3d69a8d68a752b71f25cf04a7277cd272f5dedea6f72c8',
+        },
+        'csi-resizer': {
+          repo: 'sig-storage/csi-resizer',
+          tag: 'v1.7.0',
+          digest: 'sha256:b00685aa6512da6488e824a11fbb40e1689cf0803dde02e7b5eaad1d95597d90',
+        },
+        'csi-snapshotter': {
+          repo: 'sig-storage/csi-snapshotter',
+          tag: 'v8.4.0',
+          digest: 'sha256:d72c79ae3db2e77480833daea1a50638b319b6d14564f9e425ffa74595139a19',
+        },
+      },
+    },
+    {
+      workload: 'daemonset/csi-vultr-node',
+      containers: {
+        'driver-registrar': {
+          repo: 'sig-storage/csi-node-driver-registrar',
+          tag: 'v2.7.0',
+          digest: 'sha256:8e89f0ddbd0f8586b3803ca1084e5b2cb562f874dd990adff26f19ca0265e932',
         },
       },
     },
@@ -907,7 +954,7 @@ function csiImageSites(providerId) {
  * csiInstallImageRewrites already runs every ref here, so the plan changes
  * nothing there; it moves a cluster built before that rewrite.
  *
- * @param {string|undefined} providerId - 'hetzner' | 'digitalocean' | 'linode'
+ * @param {string|undefined} providerId - 'hetzner' | 'digitalocean' | 'linode' | 'vultr'
  * @returns {Array<{workload: string, setImageArgs: string[]}>}
  */
 export function csiSidecarSetImagePlan(providerId) {

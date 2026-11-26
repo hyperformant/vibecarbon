@@ -147,6 +147,117 @@ fi
 
 _m x
 
+# The ready marker (end of script) is written AFTER the CSI driver and the
+# StorageClass are in place. The CSI controller reads the Vultr API key from
+# Secret kube-system/vultr-csi (key `api-key`), which deployK3s applies from
+# the operator's machine once the apiserver serves (applyCloudSecrets), before
+# the app install, so the key never rides in this user data and no volume is
+# asked for before the driver can make one. Each step below retries (GitHub
+# or the API server can be briefly unavailable) and stops the boot when its
+# tries run out: a cluster that cannot provision or mount a volume must never
+# report ready.
+
+# @include _csi-image-mirror.sh
+
+# The driver's manifest holds two VolumeSnapshotClasses, and k3s ships no
+# snapshot CRDs, so without these its apply fails every time. They are the
+# ones upstream's install docs name, at the snapshotter sidecar's version. No
+# snapshot controller: nothing here takes a VolumeSnapshot. CRDs run no pod,
+# so they name no image to mirror.
+CSI_CRDS_OK=false
+for i in 1 2 3; do
+  if kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
+    && kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml \
+    && kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml \
+    && kubectl wait --for=condition=established --timeout=60s \
+      crd/volumesnapshotclasses.snapshot.storage.k8s.io \
+      crd/volumesnapshotcontents.snapshot.storage.k8s.io \
+      crd/volumesnapshots.snapshot.storage.k8s.io; then
+    CSI_CRDS_OK=true
+    break
+  fi
+  echo "Snapshot CRD install attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$CSI_CRDS_OK" != "true" ]; then
+  echo "FATAL: could not install the snapshot CRDs after 3 attempts -- the Vultr CSI driver's manifest cannot apply without them" >&2
+  exit 1
+fi
+
+# Install the Vultr CSI driver (v0.19.1; its images are pinned inside the
+# manifest, a file in the driver's repo at the tag), on our mirrors
+# (csi_fetch_mirrored).
+CSI_INSTALL_OK=false
+for i in 1 2 3; do
+  if csi_fetch_mirrored https://raw.githubusercontent.com/vultr/vultr-csi/v0.19.1/docs/releases/v0.19.1.yml /root/csi-driver.yaml \
+    && kubectl apply -f /root/csi-driver.yaml; then
+    CSI_INSTALL_OK=true
+    break
+  fi
+  echo "CSI driver install attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$CSI_INSTALL_OK" != "true" ]; then
+  echo "FATAL: could not install the Vultr CSI driver after 3 attempts -- no volume could be provisioned" >&2
+  exit 1
+fi
+
+# csi-vultr-node, the node plugin, ships with no tolerations, so it never
+# runs on the db node (tainted dedicated=db:NoSchedule at join). That node's
+# CSINode then never gets the driver's `region` topology key, and the db's
+# volume, whose PV requires it, can never attach there: the db pod waits
+# Pending for good. A single bare {operator: Exists} tolerates every taint.
+# Applied as a patch, not baked into a copy of the manifest, so a version
+# bump still pulls upstream's file unchanged. `--type=merge` replaces the
+# tolerations list whole, which is safe while upstream ships none: re-check
+# on a bump.
+CSI_NODE_TOLERATION_OK=false
+for i in 1 2 3; do
+  if kubectl patch daemonset csi-vultr-node -n kube-system --type=merge -p \
+      '{"spec":{"template":{"spec":{"tolerations":[{"operator":"Exists"}]}}}}'; then
+    CSI_NODE_TOLERATION_OK=true
+    break
+  fi
+  echo "csi-vultr-node toleration patch attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$CSI_NODE_TOLERATION_OK" != "true" ]; then
+  echo "FATAL: could not patch csi-vultr-node with a universal toleration after 3 attempts -- the db pod (and any pod on a tainted dedicated node) would wait Pending for good with a volume node affinity conflict" >&2
+  kubectl get daemonset csi-vultr-node -n kube-system -o wide 2>&1 || true
+  exit 1
+fi
+
+# Our own StorageClass: the driver's classes bind a volume before its pod is
+# scheduled. NVMe block storage (sold in every region k8s runs in; HDD is
+# not), Delete reclaim, expandable, bound in the region and on the node the
+# pod lands on. Vultr block volumes take no tags.
+SC_APPLIED=false
+for i in 1 2 3; do
+  if kubectl apply -f - << SCEOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: vultr-block-storage-vibecarbon
+provisioner: block.csi.vultr.com
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  storage_type: "block"
+  disk_type: "nvme"
+SCEOF
+  then
+    SC_APPLIED=true
+    break
+  fi
+  echo "StorageClass apply attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+if [ "$SC_APPLIED" != "true" ]; then
+  echo "FATAL: could not apply the vultr-block-storage-vibecarbon StorageClass after 3 attempts" >&2
+  exit 1
+fi
+
 echo "k3s master installation complete!"
 
 # Final marker: vibecarbon's deployK3s waiter polls for /tmp/k3s-ready

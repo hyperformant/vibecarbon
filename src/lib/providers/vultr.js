@@ -307,9 +307,10 @@ export class VultrProvider extends BaseProvider {
   static WAIT_FOR_SERVER_TIMEOUT_MS = 600_000;
 
   /**
-   * Empty at the compose-only tier — no CCM/CSI deployed; real values come
-   * from vultr-cloud-controller-manager / vultr-csi manifests when the k8s
-   * tier is built (audit headroom record).
+   * Kubernetes cluster-addon asset identity. The CSI names come from
+   * vultr-csi v0.19.1: a StatefulSet controller and a DaemonSet node
+   * plugin, both labelled with a bare `app=` key. No CCM: k3s's embedded
+   * cloud controller runs instead, so the CCM entries stay empty.
    * @type {{
    *   csiNodeDaemonSet: string,
    *   csiControllerSelector: string,
@@ -319,21 +320,56 @@ export class VultrProvider extends BaseProvider {
    * }}
    */
   static K8S_ASSETS = {
-    csiNodeDaemonSet: '',
-    csiControllerSelector: '',
+    csiNodeDaemonSet: 'daemonset/csi-vultr-node',
+    csiControllerSelector: 'app=csi-vultr-controller',
     ccmDeployment: '',
     ccmSelector: '',
     networkEnvVar: '',
   };
 
   /**
-   * vultr-csi's DEFAULT StorageClass (verified 2026-08-08 against the
-   * driver's docs/kubernetes manifests: `vultr-block-storage` is default,
-   * Delete policy; `-retain` also installed). Unread while compose-only;
-   * the literal-guard census requires distinctness + residence here.
+   * The StorageClass the k3s master boot script creates for vultr-csi: NVMe
+   * block storage, Delete reclaim, expandable, bound where the pod lands.
+   * The driver's own classes (`vultr-block-storage` and five more) carry no
+   * default annotation and bind at once. The literal-guard census requires
+   * every registered provider's value to be distinct and to live in this
+   * file.
    * @type {string}
    */
-  static K8S_STORAGE_CLASS = 'vultr-block-storage';
+  static K8S_STORAGE_CLASS = 'vultr-block-storage-vibecarbon';
+
+  /**
+   * Vultr's NVMe block volumes start at 10 GB (POST /v2/blocks), and
+   * vultr-csi passes a claim's request through unrounded, so a smaller claim
+   * never binds. See BaseProvider.K8S_MIN_VOLUME_GI.
+   * @type {number}
+   */
+  static K8S_MIN_VOLUME_GI = 10;
+
+  /**
+   * The `vultr-csi` Secret (key `api-key`) the CSI controller reads. See
+   * BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'vultr-csi', stringData: { 'api-key': token } }];
+  }
+
+  /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret. Nothing on a Vultr
+   * cluster reads it. No Vultr boot script ever wrote a cloud Secret, so
+   * there is none of those to retire. See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
 
   /**
    * No fixed range: vultr-k8s.js derives a /24 per cluster
@@ -361,17 +397,25 @@ export class VultrProvider extends BaseProvider {
 
   /**
    * Render the k3s master boot script. No API token: deployK3s hands the
-   * CSI driver's credential to the cluster itself (applyCloudSecrets). No
-   * project tag either: Vultr block volumes take no tags.
+   * CSI driver's credential to the cluster itself (applyCloudSecrets,
+   * k8sCloudSecrets). No project tag either: Vultr block volumes take no
+   * tags.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   * }} vars - The caller's whole share of the template's var set.
+   * }} vars - The caller's whole share of the template's var set. The
+   *   rest, the CSI install's image rewrites (`csi_image_rewrites`), is
+   *   added here, from src/lib/images.js.
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('vultr-master-init.sh'), vars);
+    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
+      '../iac/cloud-init.js'
+    );
+    return renderScript(loadCloudInit('vultr-master-init.sh'), {
+      ...vars,
+      ...csiImageRewriteVars('vultr'),
+    });
   }
 
   /**

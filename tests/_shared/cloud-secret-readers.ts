@@ -97,6 +97,25 @@ export const CLOUD_SECRET_READERS: Record<string, { manifests: string[]; refs: S
       },
     ],
   },
+  // Recorded 2026-11-26. The release manifest holds two VolumeSnapshotClasses,
+  // so the snapshot CRDs upstream's install docs name are applied first; they
+  // run no pod and read no Secret.
+  vultr: {
+    manifests: [
+      'https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml',
+      'https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml',
+      'https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml',
+      'https://raw.githubusercontent.com/vultr/vultr-csi/v0.19.1/docs/releases/v0.19.1.yml',
+    ],
+    refs: [
+      {
+        workload: 'statefulset/csi-vultr-controller',
+        namespace: 'kube-system',
+        secret: 'vultr-csi',
+        key: 'api-key',
+      },
+    ],
+  },
 };
 
 /**

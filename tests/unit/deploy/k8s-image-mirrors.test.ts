@@ -78,6 +78,7 @@ import {
   TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
+  VULTR_CSI_VERSION,
 } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
@@ -254,6 +255,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       'carbon/cloud-init/k3s/linode-master-init.sh',
       /linode-blockstorage-csi-driver\/releases\/download\/(v[\d.]+)\//,
     ],
+    ['vultr', 'carbon/cloud-init/k3s/vultr-master-init.sh', /vultr-csi\/(v[\d.]+)\//],
   ] as const)(
     '%s: the version in cloud-init matches the version the tags were derived from',
     (provider, initScript, pattern) => {
@@ -267,6 +269,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
         hetzner: HETZNER_CSI_VERSION,
         digitalocean: DO_CSI_VERSION,
         linode: LINODE_CSI_VERSION,
+        vultr: VULTR_CSI_VERSION,
       }[provider];
       expect(pinned, `no CSI version found in ${initScript}`).toBeDefined();
       expect(pinned).toBe(expected);
@@ -334,7 +337,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     expect(initScript).toContain('deployment/hcloud-csi-controller');
   });
 
-  it.each(['hetzner', 'digitalocean', 'linode'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode', 'vultr'] as const)(
     '%s: re-pins EVERY registry.k8s.io container upstream ships, and no other',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<
@@ -354,7 +357,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     },
   );
 
-  it.each(['hetzner', 'digitalocean', 'linode'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode', 'vultr'] as const)(
     '%s: each re-pin carries upstream’s exact tag (same bits, different host)',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<
@@ -498,6 +501,7 @@ const CSI_REPO: Record<string, string> = {
   hetzner: 'hetznercloud/csi-driver',
   digitalocean: 'digitalocean/csi-digitalocean',
   linode: 'linode/linode-blockstorage-csi-driver',
+  vultr: 'vultr/vultr-csi',
 };
 
 describe('cloud-init starts every CSI container on the ref the deploy re-pin sets', () => {
