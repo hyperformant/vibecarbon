@@ -356,6 +356,8 @@ export function sshKubectlArgv(ip, sshKeyPath, kubectlArgv) {
  * @param {number} [options.timeout=120000]
  * @param {boolean} [options.silent=true]
  * @param {string} [options.input] - stdin piped to the remote command
+ * @param {boolean} [options.secret] - stdout holds a secret: a failure never
+ *   echoes it or carries it (runCommandAsync)
  * @param {boolean} [options.transportRetry=true] - retry a never-started
  *   transport failure on the shared 5s/15s ladder (see below). Callers that
  *   already impose their own hard per-call bound (e.g. status's
@@ -380,6 +382,7 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
     input,
     transportRetry = true,
     signal,
+    secret,
   } = options;
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('sshRun requires a non-empty argv array');
@@ -394,6 +397,7 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
       returnOutput: true,
       input,
       ...(signal && { signal }),
+      ...(secret && { secret: true }),
     });
   const out = await (transportRetry ? runWithTransportRetry(run) : run());
   return typeof out === 'string' ? out.trim() : '';

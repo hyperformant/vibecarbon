@@ -587,10 +587,13 @@ if ! printf '%s\\n' ${shEscape(authB64)} | grep -qF -f - "$cfg"; then
   exit 1
 fi
 `;
+  // The login is on stdin and the script prints nothing, but every command on
+  // the login file runs as a secret read (secret-read-census.test.ts).
   await sshRunAsync(ip, sshKeyPath, `/bin/bash -s`, {
     silent: true,
     timeout: 30_000,
     input: script,
+    secret: true,
   });
 }
 

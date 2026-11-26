@@ -661,8 +661,11 @@ const KUBECTL_ON_MASTER_TIMEOUT_MS = 300_000;
  * (see applyKustomization). Retries, classification and failure text are the
  * same either way: ssh hands back kubectl's exit code and stderr.
  *
+ * `secret`: the output holds a Secret's data, so a failure neither echoes
+ * it under CI or DEBUG nor carries it (runCommandAsync's `secret`).
+ *
  * @param {string[]} args kubectl argv
- * @param {{env?: NodeJS.ProcessEnv, input?: string, captureStdout?: boolean, description?: string, on?: {ip: string, sshKeyPath: string}}} options
+ * @param {{env?: NodeJS.ProcessEnv, input?: string, captureStdout?: boolean, description?: string, on?: {ip: string, sshKeyPath: string}, secret?: boolean}} options
  * @returns {Promise<string>} stdout (always returned; empty when nothing was emitted)
  */
 export async function runKubectlWithRetry(
@@ -677,6 +680,7 @@ export async function runKubectlWithRetry(
     signal,
     on,
     timeout,
+    secret = false,
   } = {},
 ) {
   const RETRY_DELAYS_MS = delaysMs ?? [2000, 4000];
@@ -691,6 +695,7 @@ export async function runKubectlWithRetry(
                 input,
                 timeout: timeout ?? KUBECTL_ON_MASTER_TIMEOUT_MS,
                 ...(signal && { signal }),
+                ...(secret && { secret: true }),
               })
             : runCommandAsync(['kubectl', ...args], {
                 env,
@@ -698,12 +703,14 @@ export async function runKubectlWithRetry(
                 silent: true,
                 ...(timeout && { timeout }),
                 ...(signal && { signal }),
+                ...(secret && { secret: true }),
               }));
           // Stream captured stdout through to the operator's terminal so the
           // success path looks identical to the legacy `stdio: 'inherit'` shape.
           // captureStdout suppresses stdout streaming because the caller wants
-          // the bytes (e.g. `kubectl get -o jsonpath`).
-          if (!captureStdout && out) process.stdout.write(out);
+          // the bytes (e.g. `kubectl get -o jsonpath`); a secret read never
+          // streams.
+          if (!captureStdout && !secret && out) process.stdout.write(out);
           return out;
         } catch (err) {
           if (!captureStdout && err.stdout) process.stdout.write(err.stdout);
@@ -1984,6 +1991,7 @@ export async function readSecretFingerprints({ env, namespace, name, keys }) {
     {
       env,
       captureStdout: true,
+      secret: true,
       description: `read Secret ${namespace}/${name}`,
     },
   );
@@ -4179,7 +4187,12 @@ async function readRestoreMarker(env) {
       '-o',
       'jsonpath={.data}',
     ],
-    { env, captureStdout: true, description: 'assertRestoreMarkerState: read the restore marker' },
+    {
+      env,
+      captureStdout: true,
+      secret: true,
+      description: 'assertRestoreMarkerState: read the restore marker',
+    },
   );
   const text = String(out ?? '').trim();
   const data = text ? JSON.parse(text) : {};

@@ -189,6 +189,7 @@ function getGHCRToken() {
       cleanEnv: true,
       silent: true,
       returnOutput: true,
+      secret: true,
     })
       ?.toString()
       .trim();

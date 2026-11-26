@@ -2082,10 +2082,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // (compose/ghcr-login.js), resolved once, here: before the DNS warm-up, the
   // pending-server repair or any Pulumi up, so a refusal (no terminal and no
   // GHCR_PULL_TOKEN, a token with more than read:packages) stops the deploy
-  // with nothing outside this machine changed. The token a recorded server
+  // before any server is created or provisioned. The token a recorded server
   // holds is read first and reused when it still passes, so a redeploy does
   // not ask (compose-ha: both sides, primary first, less a side a failover
-  // retired, which this deploy rebuilds). The owner and repo are the ones
+  // retired, which this deploy rebuilds). A recorded server that cannot be
+  // read is warned about and skipped (serverStores), so GHCR_PULL_TOKEN still
+  // gets a deploy past one that is down. The owner and repo are the ones
   // ensureCIImageReady read from the GitHub remote. Local and direct builds
   // pull nothing from ghcr: null, and the ghcr-login step removes any login a
   // server holds. The operator's gh token never reaches a server.

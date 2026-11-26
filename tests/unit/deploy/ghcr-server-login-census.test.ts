@@ -142,6 +142,21 @@ describe('a server logs in to ghcr.io only through ensureGhcrLoginOn', () => {
   it('dockerLoginOnServer is never imported under another name', () => {
     expect(aliasesOf('dockerLoginOnServer')).toEqual([]);
   });
+
+  it('every ensureGhcrLoginOn call hands it the resolved credential, ghcrPull', () => {
+    // The deploy step, the compose-ha fan and scale: each passes the one
+    // value resolveGhcrPull returned (or null for a local build), by name.
+    const calls = callsOf('ensureGhcrLoginOn');
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of calls) {
+      const pull = call.node.arguments[2];
+      expect(
+        pull?.type === 'Identifier' && pull.name,
+        `${call.key} hands ensureGhcrLoginOn something other than ghcrPull`,
+      ).toBe('ghcrPull');
+    }
+    expect(aliasesOf('ensureGhcrLoginOn')).toEqual([]);
+  });
 });
 
 describe('the gh token stays on this machine', () => {
@@ -182,19 +197,47 @@ describe('the gh token stays on this machine', () => {
   });
 
   it('`gh auth token` is run only inside getGHCRToken', () => {
+    const literals = (nodes: Node[]) =>
+      nodes.map((e: Node) => (e?.type === 'Literal' ? e.value : null));
     const runs: string[] = [];
     for (const { path, ast } of FILES) {
       walkAst(ast, (n, ancestors) => {
-        const argv =
-          n.type === 'ArrayExpression' &&
-          n.elements.slice(0, 3).map((e: Node) => (e?.type === 'Literal' ? e.value : null));
+        // runCommand(['gh', 'auth', 'token']), and a string that spells it.
+        const argv = n.type === 'ArrayExpression' && literals(n.elements.slice(0, 3));
+        // execFileSync('gh', ['auth', 'token']): the program, then its argv.
+        const fileArgv =
+          n.type === 'CallExpression' &&
+          n.arguments[0]?.type === 'Literal' &&
+          n.arguments[0].value === 'gh' &&
+          n.arguments[1]?.type === 'ArrayExpression' &&
+          literals(n.arguments[1].elements.slice(0, 2));
         const spelled =
           (Array.isArray(argv) && argv.join(' ') === 'gh auth token') ||
+          (Array.isArray(fileArgv) && fileArgv.join(' ') === 'auth token') ||
           (n.type === 'Literal' && typeof n.value === 'string' && /^gh auth token\b/.test(n.value));
         if (spelled) runs.push(enclosing(path, ancestors).key);
       });
     }
     expect(runs).toEqual([GH_TOKEN_READER]);
+  });
+
+  it('nothing asks gh to print its token another way (--show-token)', () => {
+    // `gh auth status --show-token` prints the same token in its status lines.
+    const shown: string[] = [];
+    for (const { path, ast } of FILES) {
+      walkAst(ast, (n, ancestors) => {
+        const text =
+          n.type === 'Literal' && typeof n.value === 'string'
+            ? n.value
+            : n.type === 'TemplateElement'
+              ? (n.value?.cooked ?? '')
+              : '';
+        if (/--show-token\b/.test(text)) {
+          shown.push(enclosing(path, ancestors).key);
+        }
+      });
+    }
+    expect(shown).toEqual([]);
   });
 
   it('no src file calls getGHCRCredentials', () => {

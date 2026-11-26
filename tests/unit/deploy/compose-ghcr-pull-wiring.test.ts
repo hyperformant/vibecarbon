@@ -387,6 +387,25 @@ describe('the stores a redeploy reads a stored token from', () => {
     expect(resolveArgs().stores).toEqual(["on prod-primary's server", "on prod-standby's server"]);
     expect(run.pulls.haSetupServerFiles).toBe(PULL);
   });
+
+  it('a side a failover retired is not a store: this deploy rebuilds it', async () => {
+    withDeployKey();
+    // A failover since the last deploy swapped the roles: the standby entry
+    // is the old primary, which the deploy reconverges.
+    const warm = gathered('compose-ha', {
+      envConfig: {
+        deployedAt: '2026-11-20T00:00:00Z',
+        lastFailover: '2026-11-25T00:00:00Z',
+        servers: [
+          { name: 'shop-prod-primary', id: '7', ip: '203.0.113.5', role: 'primary' },
+          { name: 'shop-prod-standby', id: '8', ip: '203.0.113.6', role: 'standby' },
+        ],
+      },
+    });
+    await executeDeployment({ yes: true }, warm as never).catch(() => {});
+    expect(ghcr.resolveGhcrPull).toHaveBeenCalledTimes(1);
+    expect(resolveArgs().stores).toEqual(["on prod-primary's server"]);
+  });
 });
 
 describe.each([

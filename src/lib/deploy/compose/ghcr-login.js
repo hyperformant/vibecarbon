@@ -13,10 +13,12 @@
  *
  * The token reaches a server only through dockerLoginOnServer's script, on
  * ssh's stdin. It is never in an argv, a local file, a log or an error. A
- * read brings the login file back on ssh's stdout, captured and never
- * printed.
+ * read brings back only the ghcr.io entry's login, never the file (Docker
+ * Hub's pair stays on the server), on ssh's stdout as a secret read: a
+ * failure neither echoes it nor carries it (runCommandAsync's `secret`).
  */
 
+import * as p from '@clack/prompts';
 import { shEscape } from '../../shell.js';
 import { dockerLoginOnServer, sshRunAsync } from './index.js';
 
@@ -28,7 +30,7 @@ export const COMPOSE_KEPT_AS = "on the server in docker's login file";
 
 /** The same, in the words a refused token is told with (ghcr-pull.js TokenWhere). */
 export const COMPOSE_WHERE = {
-  lives: "on the server in docker's login file",
+  lives: COMPOSE_KEPT_AS,
   readers: 'anyone with root on the server',
   puller: 'the server',
 };
@@ -46,15 +48,59 @@ export function ghcrImagePackage(image) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
-/** The ghcr.io pair in a docker login file's text, or null when there is none to read. */
-function ghcrPairIn(text) {
-  let auth;
-  try {
-    auth = JSON.parse(String(text ?? ''))?.auths?.[GHCR]?.auth;
-  } catch {
-    return null;
-  }
-  if (typeof auth !== 'string' || !auth) return null;
+/** A string as a python literal: JSON's escapes are python's too. */
+const py = (value) => JSON.stringify(String(value));
+
+/**
+ * The python that prints a docker login file's ghcr.io login (base64 of
+ * `user:token`) and nothing else: no line at all for no file, no entry, or a
+ * body docker could not read either. Run with `python3 -I`, the program on
+ * stdin.
+ *
+ * @param {string} cfgPath
+ * @returns {string}
+ */
+export function ghcrLoginReadPython(cfgPath) {
+  return `import json
+cfg_path = ${py(cfgPath)}
+host = ${py(GHCR)}
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = None
+auths = cfg.get('auths') if isinstance(cfg, dict) else None
+entry = auths.get(host) if isinstance(auths, dict) else None
+auth = entry.get('auth') if isinstance(entry, dict) else None
+if isinstance(auth, str) and auth:
+    print(auth)
+`;
+}
+
+/**
+ * The script a read sends on ssh's stdin: ghcrLoginReadPython over the file.
+ * A server with no python3 prints nothing, so its login reads as none and a
+ * token is written again (dockerLoginOnServer handles that server).
+ *
+ * @param {string} [cfgPath]
+ * @returns {string}
+ */
+export function ghcrLoginReadScript(cfgPath = DOCKER_CONFIG) {
+  return `cfg=${shEscape(cfgPath)}
+if [ ! -s "$cfg" ] || ! command -v python3 >/dev/null 2>&1; then exit 0; fi
+python3 -I - <<'PY'
+${ghcrLoginReadPython(cfgPath)}PY
+`;
+}
+
+/** The pair in a login read's output, or null when there is none to read. */
+function ghcrPairIn(out) {
+  const auth = String(out ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!auth) return null;
   const pair = Buffer.from(auth, 'base64').toString('utf-8');
   const colon = pair.indexOf(':');
   const username = pair.slice(0, colon);
@@ -66,35 +112,62 @@ function ghcrPairIn(text) {
 /**
  * The ghcr.io pair a server's docker login file holds, or null when there is
  * no file, no ghcr.io entry, or a body docker could not read either. A server
- * ssh cannot reach throws. `|| true` makes a missing file an empty answer, so
- * the command never fails while holding the file (runCommandAsync echoes a
- * failed command's output under CI or DEBUG).
+ * ssh cannot reach throws. Only that entry's login leaves the server, on a
+ * secret read.
  *
  * @param {string} ip
  * @param {string} sshKeyPath
+ * @param {{ retries?: number }} [options] - sshRunAsync's transport attempts
  * @returns {Promise<{ username: string, token: string } | null>}
  */
-export async function readGhcrLoginOnServer(ip, sshKeyPath) {
-  const out = await sshRunAsync(ip, sshKeyPath, `cat ${DOCKER_CONFIG} 2>/dev/null || true`, {
+export async function readGhcrLoginOnServer(ip, sshKeyPath, { retries } = {}) {
+  const out = await sshRunAsync(ip, sshKeyPath, '/bin/bash -s', {
     timeout: 30_000,
+    input: ghcrLoginReadScript(),
+    secret: true,
+    ...(retries !== undefined && { retries }),
   });
   return ghcrPairIn(out);
+}
+
+/** The line of a failed read that says why: ssh's own, else the error's first. */
+function whyUnread(err) {
+  const lines = (text) =>
+    String(text ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  return (lines(err?.stderr)[0] ?? lines(err?.message)[0] ?? 'no answer').slice(0, 200);
 }
 
 /**
  * Servers as places a pull token may be stored, each read over ssh with the
  * environment's key, in order. `name` is how the operator knows the server
- * (`prod`, `prod-standby`); the store is `on <name>'s server`.
+ * (`prod`, `prod-standby`); the store is `on <name>'s server`. A server that
+ * cannot be read is warned about and holds nothing to reuse.
  *
  * @param {Array<{ name: string, ip: string }>} servers
  * @param {string} sshKeyPath
  * @returns {import('../ghcr-pull.js').PullStore[]}
  */
 export function serverStores(servers, sshKeyPath) {
-  return servers.map(({ name, ip }) => ({
-    name: `on ${name}'s server`,
-    read: () => readGhcrLoginOnServer(ip, sshKeyPath),
-  }));
+  return servers.map(({ name, ip }) => {
+    const store = `on ${name}'s server`;
+    return {
+      name: store,
+      // One attempt: a server that does not answer has no token to offer, and
+      // the resolve goes on to the next store or GHCR_PULL_TOKEN. Its own
+      // deploy step reaches it, or fails, later.
+      read: async () => {
+        try {
+          return await readGhcrLoginOnServer(ip, sshKeyPath, { retries: 1 });
+        } catch (err) {
+          p.log.warn(`could not read the token ${store} (${whyUnread(err)}), so it is not reused.`);
+          return null;
+        }
+      },
+    };
+  });
 }
 
 /**
@@ -119,17 +192,56 @@ export function namedComposeServers(environment, entries) {
 }
 
 /**
- * Drop the ghcr.io entry from a server's docker login file, the way
- * dockerLoginOnServer merges one in: python3 reads the JSON, deletes that one
- * key, and writes the rest of the same object back. Prints `removed`, or
- * `absent` when there was no entry (no file, no ghcr.io key, or a body docker
- * could not read either, which is left as it is). cloud-init runs on python3,
- * so a server has it; one that does not, and holds an entry, fails loudly
- * rather than keep it.
+ * The python that drops the ghcr.io entry from a docker login file, the way
+ * dockerLoginOnServer merges one in: it reads the JSON, deletes that one key,
+ * and writes the rest of the same object back into the same file, whose mode
+ * stays as it was. Prints `removed`, or `absent` when there was no entry (no
+ * file, no ghcr.io key). A body it cannot read as JSON that still names
+ * ghcr.io fails loudly rather than keep a login it cannot see. Run with
+ * `python3 -I`, the program on stdin.
+ *
+ * @param {string} cfgPath
+ * @returns {string}
  */
-const REMOVE_GHCR_LOGIN = `
-set -e
-cfg=${DOCKER_CONFIG}
+export function ghcrLoginRemovalPython(cfgPath) {
+  return `import json, sys
+cfg_path = ${py(cfgPath)}
+host = ${py(GHCR)}
+try:
+    with open(cfg_path) as f:
+        text = f.read()
+except FileNotFoundError:
+    print('absent')
+    sys.exit(0)
+try:
+    cfg = json.loads(text)
+except ValueError:
+    if '"' + host + '"' in text:
+        sys.exit(cfg_path + ' is not json docker can read but names ' + host + ', so its login could not be removed')
+    print('absent')
+    sys.exit(0)
+auths = cfg.get('auths') if isinstance(cfg, dict) else None
+if isinstance(auths, dict) and host in auths:
+    del auths[host]
+    with open(cfg_path, 'w') as f:
+        json.dump(cfg, f)
+    print('removed')
+else:
+    print('absent')
+`;
+}
+
+/**
+ * The script a removal sends on ssh's stdin: ghcrLoginRemovalPython over the
+ * file. cloud-init runs on python3, so a server has it; one that does not,
+ * and whose file names ghcr.io, fails loudly rather than keep the login.
+ *
+ * @param {string} [cfgPath]
+ * @returns {string}
+ */
+export function ghcrLoginRemovalScript(cfgPath = DOCKER_CONFIG) {
+  return `set -e
+cfg=${shEscape(cfgPath)}
 if [ ! -s "$cfg" ]; then echo absent; exit 0; fi
 if ! command -v python3 >/dev/null 2>&1; then
   if grep -qF '"${GHCR}"' "$cfg"; then
@@ -139,29 +251,18 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo absent
   exit 0
 fi
-HOST=${shEscape(GHCR)} python3 -I - <<'PY'
-import json, os
-cfg_path = '${DOCKER_CONFIG}'
-try:
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-except Exception:
-    cfg = None
-auths = cfg.get('auths') if isinstance(cfg, dict) else None
-if isinstance(auths, dict) and os.environ['HOST'] in auths:
-    del auths[os.environ['HOST']]
-    with open(cfg_path, 'w') as f:
-        json.dump(cfg, f)
-    print('removed')
-else:
-    print('absent')
-PY
+python3 -I - <<'PY'
+${ghcrLoginRemovalPython(cfgPath)}PY
 `;
+}
 
 async function removeGhcrLogin(ip, sshKeyPath) {
+  // A secret read like every command on the login file (secret-read-census):
+  // it prints only `removed` or `absent`.
   const out = await sshRunAsync(ip, sshKeyPath, '/bin/bash -s', {
     timeout: 30_000,
-    input: REMOVE_GHCR_LOGIN,
+    input: ghcrLoginRemovalScript(),
+    secret: true,
   });
   const said = String(out ?? '')
     .trim()

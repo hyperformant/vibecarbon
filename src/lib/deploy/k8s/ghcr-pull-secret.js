@@ -161,7 +161,12 @@ export async function readGhcrPullSecret({ env }) {
       '-o',
       'jsonpath={.data.\\.dockerconfigjson}',
     ],
-    { env, captureStdout: true, description: `read Secret ${NAMESPACE}/${GHCR_PULL_SECRET}` },
+    {
+      env,
+      captureStdout: true,
+      secret: true,
+      description: `read Secret ${NAMESPACE}/${GHCR_PULL_SECRET}`,
+    },
   );
   const data = String(out ?? '').trim();
   if (!data) return null;

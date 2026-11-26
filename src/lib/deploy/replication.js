@@ -1013,15 +1013,20 @@ export function assertReplicationStreamingOrDegraded({
  * @returns {Promise<string|null>}
  */
 export async function getReplPasswordFromSecret(ip, sshKeyPath) {
-  const b64 = await sshKubectl(ip, sshKeyPath, [
-    'get',
-    'secret',
-    'vibecarbon-infra-secrets',
-    '-n',
-    'vibecarbon',
-    '-o',
-    'jsonpath={.data.REPL_PASSWORD}',
-  ]);
+  const b64 = await sshKubectl(
+    ip,
+    sshKeyPath,
+    [
+      'get',
+      'secret',
+      'vibecarbon-infra-secrets',
+      '-n',
+      'vibecarbon',
+      '-o',
+      'jsonpath={.data.REPL_PASSWORD}',
+    ],
+    { secret: true },
+  );
   const trimmed = (typeof b64 === 'string' ? b64 : '').trim();
   if (!trimmed) return null;
   try {

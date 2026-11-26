@@ -131,8 +131,13 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     dockerLoginOnServer: async () => {},
     setupComposeBackupCron: async () => {},
     configureStandbyReplication: async () => {},
-    sshRunAsync: async (ip: string, _k: string, cmd: string) => {
-      if (cmd.startsWith('cat /root/.docker/config.json')) return h.state.loginFiles[ip] ?? '';
+    sshRunAsync: async (ip: string, _k: string, cmd: string, opts: { input?: string } = {}) => {
+      // The login read (ghcr-login.js) prints the ghcr.io entry's login alone.
+      if (cmd === '/bin/bash -s' && opts.input?.includes('print(auth)')) {
+        h.events.push(`ghcrRead:${ip}`);
+        const file = h.state.loginFiles[ip];
+        return file ? `${JSON.parse(file).auths?.['ghcr.io']?.auth ?? ''}\n` : '';
+      }
       if (cmd.includes('docker pull ')) h.events.push(`basePull:${ip}`);
       return cmd.includes('compose-backup.sh') ? 'VC_CRON_REMOVED' : '';
     },
@@ -239,6 +244,11 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       const role = roleWriteOf(argv as string[]);
       if (role) return `WALG_ROLE_FILE=${role}`;
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
+        return `APP_IMAGE=${h.state.appImage}\n`;
+      }
+      // The preflight's read of the one APP_IMAGE line.
+      if (argv[0] === 'sed' && String(argv.at(-1)).endsWith('/.env')) {
+        h.events.push(`appImageRead:${ip}`);
         return `APP_IMAGE=${h.state.appImage}\n`;
       }
       const script = argv[2] ?? '';
@@ -485,19 +495,73 @@ describe('compose scale: the new server ghcr.io login', () => {
     expect(h.password).not.toHaveBeenCalled();
   });
 
-  it('a push image with no usable token on the replaced server refuses, saying what to export', async () => {
+  it('a push image with no usable token on the replaced server refuses before any server is built', async () => {
     reset();
     vi.stubEnv('GHCR_PULL_TOKEN', '');
     h.state.appImage = 'ghcr.io/acme/shop:abc';
+    const ctx = makeCtx();
     try {
-      await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
         /export GHCR_PULL_TOKEN as a classic token with only read:packages/,
       );
     } finally {
       vi.unstubAllEnvs();
     }
-    // Nothing was logged in, and the new server never started its stack.
+    // The preflight refused: no server was created, so none is left to delete.
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
     expect(h.ghcrLogins).toEqual([]);
-    expect(h.events).not.toContain('up:9.9.9.9');
+    expect(h.events).toEqual(['appImageRead:1.1.1.1', 'ghcrRead:1.1.1.1']);
+  });
+
+  it('a compose-ha scale refuses the same way, with both sides read and no server built', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    const ctx = makeCtx({ tier: 'compose-ha' });
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        /export GHCR_PULL_TOKEN as a classic token with only read:packages/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
+    expect(h.ghcrLogins).toEqual([]);
+    // The one resolve read both old servers' logins, then refused: the
+    // standby's APP_IMAGE was never needed.
+    expect(h.events).toEqual(['appImageRead:1.1.1.1', 'ghcrRead:1.1.1.1', 'ghcrRead:2.2.2.2']);
+  });
+
+  it("a compose-ha scale resolves once, before building, and both new servers get the primary's token", async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: { 'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') } },
+    });
+    const ctx = makeCtx({ tier: 'compose-ha' });
+    const created = (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer;
+    const readsBeforeCreate: string[] = [];
+    created.mockImplementation(async () => {
+      readsBeforeCreate.push(...h.events.filter((e) => e.startsWith('ghcrRead:')));
+      return { id: 'new-id' };
+    });
+    try {
+      // Whatever the arms prove afterwards, both replacements are logged in first.
+      await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // One resolve: the primary's login passed, so the standby's was never read.
+    expect(h.events.filter((e) => e.startsWith('ghcrRead:'))).toEqual(['ghcrRead:1.1.1.1']);
+    expect(readsBeforeCreate[0]).toBe('ghcrRead:1.1.1.1');
+    const pull = { mode: 'token', username: 'octo', token: TOKEN };
+    expect(h.ghcrLogins.length).toBeGreaterThanOrEqual(1);
+    expect(h.ghcrLogins.every((l) => JSON.stringify(l.pull) === JSON.stringify(pull))).toBe(true);
+    expect(h.password).not.toHaveBeenCalled();
   });
 });

@@ -670,13 +670,18 @@ export async function readOldAppEnv(
 ) {
   let text;
   try {
-    text = await run(ip, sshKeyPath, [
-      'sh',
-      '-c',
-      `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
-      'sh',
-      `/opt/${projectName}/app.env`,
-    ]);
+    text = await run(
+      ip,
+      sshKeyPath,
+      [
+        'sh',
+        '-c',
+        `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
+        'sh',
+        `/opt/${projectName}/app.env`,
+      ],
+      { secret: true },
+    );
   } catch (err) {
     throw new Error(
       `could not read app.env on the old server ${ip} (${err.message}), so scale stopped rather than give the new app the account-wide storage key. Run scale again once the old server answers.`,
@@ -1127,10 +1132,11 @@ function sharedAppImageBuild(ctx, tag, build) {
  * The pull credential a compose scale's new server logs in to ghcr.io with:
  * null unless compose pulls the app image from ghcr.io (an image this
  * machine sends, or the new server builds, needs none); else resolveGhcrPull
- * with the servers being replaced as its stores, read while they still run,
- * so a token they hold that still passes is reused and nothing is asked.
- * Resolved once per package per scale run, on ctx: a compose-ha scale of both
- * nodes asks at most once.
+ * with the servers being replaced as its stores, so a token they hold that
+ * still passes is reused and nothing is asked. Resolved once per package per
+ * scale run, on ctx: a compose-ha scale of both nodes asks at most once.
+ * scaleServers calls it in its preflight (scalePullPreflight), before any
+ * server is built.
  *
  * @param {{ ghcrPulls?: Map<string, Promise<unknown>>, projectName: string,
  *   environment: string, sshKeyPath: string, targetServers: object[] }} ctx
@@ -1163,6 +1169,58 @@ function scaleGhcrPull(ctx, imagePlan, appImage) {
 }
 
 /**
+ * The APP_IMAGE an old server's .env names ('' when it names none): that one
+ * line, never the file. The old server must answer, as its .env replay later
+ * needs it to; one that does not stops the scale here, before any server is
+ * built.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @returns {Promise<string>}
+ */
+async function readOldAppImage(ip, sshKeyPath, projectName) {
+  let line;
+  try {
+    line = await sshRun(
+      ip,
+      sshKeyPath,
+      ['sed', '-n', '/^APP_IMAGE=/{p;q}', `/opt/${projectName}/.env`],
+      { secret: true },
+    );
+  } catch (err) {
+    throw new Error(
+      `could not read APP_IMAGE from .env on the old server ${ip} (${errorFirstLine(err)}), so scale stopped before building a new server. run scale again once the old server answers.`,
+    );
+  }
+  return parseDotenv(String(line ?? '')).APP_IMAGE || '';
+}
+
+/**
+ * Each target's ghcr.io pull credential (scaleGhcrPull), resolved in the
+ * preflight: the stores are the old servers, read while they run; a refusal
+ * (no token to reuse, no GHCR_PULL_TOKEN, no terminal) leaves no new server
+ * to delete; and an ask happens before any arm's spinner starts.
+ *
+ * @param {object} ctx - scaleServers' ctx
+ * @returns {Promise<Map<object, import('./lib/deploy/ghcr-pull.js').GhcrPull | null>>}
+ *   keyed by the targetServers entry
+ */
+async function scalePullPreflight(ctx) {
+  const pulls = new Map();
+  for (const server of ctx.targetServers) {
+    const appImage = await readOldAppImage(server.ip, ctx.sshKeyPath, ctx.projectName);
+    const imagePlan = replacementImagePlan(appImage, {
+      localDocker: checkDependency('docker'),
+      recorded: ctx.envConfig?.imageBuild,
+      forceDirect: !!ctx.forceDirectBuild,
+    });
+    pulls.set(server, await scaleGhcrPull(ctx, imagePlan, appImage));
+  }
+  return pulls;
+}
+
+/**
  * How a compose scale replacement gets the app image the old server ran:
  * 'delta' (built on this machine and sent by layer delta, as a deploy does),
  * 'remote-build' (the new server builds it: `-direct`, a deploy recorded in
@@ -1189,10 +1247,17 @@ export function replacementImagePlan(appImage, { localDocker, recorded, forceDir
  *
  * `backupS3` (the primary arm only, from the preflight) restores the saved TLS
  * certificate into the new server's acme.json before its stack starts, so it
- * serves HTTPS as soon as DNS moves (restoreReplacementTls).
+ * serves HTTPS as soon as DNS moves (restoreReplacementTls). `ghcrPull` is
+ * the server's pull credential from the preflight (scalePullPreflight).
  * @returns {Promise<string>} the new server's public IP
  */
-async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 = null } = {}) {
+async function prepareReplacementServer(
+  ctx,
+  server,
+  newServerId,
+  s,
+  { backupS3 = null, ghcrPull = null } = {},
+) {
   const { tier, provider, Provider, projectName, environment, sshKeyPath, domain, services } = ctx;
   // 3. Wait for the server to come online, THEN resolve its IP off the
   // object waitForServer resolves with — not off createServer's return.
@@ -1264,7 +1329,9 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   let oldAppEnv = null;
   s.start('Reading current server configuration...');
   try {
-    const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
+    const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`], {
+      secret: true,
+    });
     s.stop('Current server configuration read');
     // renderBundle re-encodes every override and throws on a value the
     // portable grammar refuses (a hand-edited server value with a tab,
@@ -1348,12 +1415,11 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
 
   // 4b. Registry logins. Docker Hub (optional) avoids the per-IP pull limit
   // on shared provider IPs. ghcr.io only when compose pulls the app image
-  // from there, with the pull credential (scaleGhcrPull): the old server's
-  // read:packages token when it still passes, so nothing is asked. An image
-  // this machine sends or the new server builds pulls nothing from ghcr, so
-  // the new server gets no ghcr.io login at all. A refusal (no token to reuse
-  // and no GHCR_PULL_TOKEN on a run with no terminal) stops this server's
-  // scale, and the caller deletes the new server.
+  // from there, with the pull credential the preflight resolved
+  // (scalePullPreflight): the old server's read:packages token when it still
+  // passes, so nothing is asked. An image this machine sends or the new
+  // server builds pulls nothing from ghcr, so the new server gets no ghcr.io
+  // login at all.
   const dockerHubCreds = resolveDockerHubCreds();
   if (dockerHubCreds) {
     s.start('Authenticating with Docker Hub...');
@@ -1362,7 +1428,6 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     );
     s.stop('Docker Hub authenticated');
   }
-  const ghcrPull = await scaleGhcrPull(ctx, imagePlan, oldAppImage);
   if (ghcrPull?.mode === 'token') s.start('Logging the new server in to ghcr.io...');
   await perfAsync('scale.ghcrLogin', () => ensureGhcrLoginOn(newIp, sshKeyPath, ghcrPull));
   if (ghcrPull?.mode === 'token') s.stop('Logged in to ghcr.io with the pull token');
@@ -1592,6 +1657,10 @@ async function scaleServers(ctx) {
     }
   }
 
+  // The ghcr.io pull credential, before any server is built too: a refusal
+  // leaves nothing to delete (scalePullPreflight).
+  const pullFor = await scalePullPreflight(ctx);
+
   // The writers the fence stops: the app and the enabled primary-only add-ons.
   const addonNames = enabledAddonNames({
     ...envConfig,
@@ -1621,7 +1690,10 @@ async function scaleServers(ctx) {
     // The post-flip steps done, for the resume message.
     const progress = [];
     try {
-      newIp = await prepareReplacementServer(ctx, server, newServerId, s, { backupS3 });
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s, {
+        backupS3,
+        ghcrPull: pullFor.get(server) ?? null,
+      });
 
       // 7. Fence writes on the old server: writers stopped, database
       //    read-only, WAL switched and archived through the fence. From here
@@ -1867,7 +1939,9 @@ async function scaleServers(ctx) {
     let newIp;
     let primary;
     try {
-      newIp = await prepareReplacementServer(ctx, server, newServerId, s);
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s, {
+        ghcrPull: pullFor.get(server) ?? null,
+      });
       // The primary it reseeds from: the new one once the primary arm serves,
       // else the live one.
       primary = primaryReady
@@ -2753,7 +2827,7 @@ async function repatchClusterAutoscaler({
           '-o',
           `jsonpath={.data.${key}}`,
         ]),
-        { silent: true },
+        { silent: true, secret: true },
       );
     const configB64Raw = readSecretKey('config\\.json');
     const tokenB64Raw = readSecretKey('token');
