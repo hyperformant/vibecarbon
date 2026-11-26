@@ -33,11 +33,13 @@ import {
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 const EU_LOCATIONS = ['nbg1', 'hel1', 'fsn1'] as const;
+/** Where the matrix puts a primary: EU, and not hel1, where Hetzner refuses new buckets. */
+const PRIMARY_LOCATIONS = ['nbg1', 'fsn1'] as const;
 const WORKFLOW_PATH = join(REPO_ROOT, '.github', 'workflows', 'e2e-us-perf.yml');
 
 describe('capacityPreferences.hetzner (cost guard)', () => {
-  it('lists only EU locations — no ash/hil (US) and no sin (CPX/CCX-only, price uplift)', () => {
-    expect(testConfig.e2e.capacityPreferences.hetzner.regions).toEqual(EU_LOCATIONS);
+  it('lists nbg1 and fsn1 only — no ash/hil (US), no sin (price uplift), no hel1 (no new buckets)', () => {
+    expect(testConfig.e2e.capacityPreferences.hetzner.regions).toEqual(PRIMARY_LOCATIONS);
   });
 
   it('never scales an EU default onto the legacy cpx*1 generation', () => {
@@ -69,11 +71,12 @@ describe('capacityPreferences.hetzner (cost guard)', () => {
       const opts = { loadCatalog: async () => true };
       for (const mode of ['compose', 'k8s'] as const) {
         const r = await resolveCapacity(prefs, 't', { ...opts, mode });
-        expect(EU_LOCATIONS).toContain(r.region);
+        expect(PRIMARY_LOCATIONS).toContain(r.region);
       }
       for (const mode of ['compose-ha', 'k8s-ha'] as const) {
         const { primary, standby } = await resolveCapacityPair(prefs, 't', { ...opts, mode });
-        expect(EU_LOCATIONS).toContain(primary.region);
+        expect(PRIMARY_LOCATIONS).toContain(primary.region);
+        // The standby is the customer's default pick, which may be hel1.
         expect(EU_LOCATIONS).toContain(standby.region);
       }
     } finally {
