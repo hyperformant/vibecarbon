@@ -248,6 +248,16 @@ export function updateOperatorCidrs(projectConfig, change, cwd) {
  * `${projectName}-${env}-firewall` naming convention, delegating the actual
  * firewall patch per environment to a provider instance.
  */
+/**
+ * The operator firewall's name for one side of an environment.
+ *
+ * @param {string} projectName
+ * @param {string} side the environment, or `<env>-primary` / `<env>-standby`
+ */
+export function firewallName(projectName, side) {
+  return `${projectName}-${side}-firewall`;
+}
+
 export async function applyToFirewall({
   projectName,
   environments,
@@ -269,7 +279,7 @@ export async function applyToFirewall({
   const provider = new Provider(apiToken);
   const updated = [];
   for (const env of environments) {
-    const fwName = `${projectName}-${env}-firewall`;
+    const fwName = firewallName(projectName, env);
     const wasUpdated = await provider.applyOperatorCidrs({ firewallName: fwName, cidrs });
     if (wasUpdated) updated.push(fwName);
   }

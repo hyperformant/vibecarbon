@@ -27,6 +27,8 @@ const m = vi.hoisted(() => ({
   /** Firewall names the provider does not find. */
   absent: new Set<string>(),
   fetch: vi.fn(),
+  /** The operator's provider tokens, by provider id. */
+  token: vi.fn(),
   log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
@@ -56,7 +58,7 @@ vi.mock('../../../src/lib/providers/index.js', async (importOriginal) => {
   return {
     ...original,
     providerFor: (envConfig: { provider?: string }) => classes[envConfig?.provider ?? 'hetzner'],
-    resolveProviderToken: (id: string) => `token-${id}`,
+    resolveProviderToken: (id: string) => m.token(id),
   };
 });
 
@@ -162,6 +164,8 @@ beforeEach(() => {
   m.failing.clear();
   m.absent.clear();
   m.fetch.mockReset();
+  m.token.mockReset();
+  m.token.mockImplementation((id: string) => `token-${id}`);
   m.fetch.mockResolvedValue({ ok: true, status: 200, text: async () => '203.0.113.7' });
   for (const fn of Object.values(m.log)) fn.mockClear();
   // Auto-detect, as on an operator's machine (the unit tier runs with CI=true).
@@ -474,5 +478,54 @@ describe('vibecarbon access', () => {
     expect(await access(['remove', REMOVED])).toBeNull();
     expect(m.pushes).toEqual([]);
     expect(logged(m.log.warn)).toContain(`${REMOVED} is not in the list, nothing to remove.`);
+  });
+
+  it('remove where the provider finds only one side of an HA environment exits 1 naming the side', async () => {
+    const record = sorted(TEAMMATE, ME, REMOVED);
+    writeProject(
+      {
+        prod: prod({ operatorCidrsPushed: record }),
+        staging: staging({ operatorCidrsPushed: record }),
+      },
+      [TEAMMATE, ME, REMOVED],
+    );
+    m.absent.add('demo-prod-standby-firewall');
+    expect(await access(['remove', REMOVED])).toBe(1);
+    // The found side and the other environment are still pushed.
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-staging-firewall']);
+    const error = logged(m.log.error);
+    expect(error).toContain(`Removed ${REMOVED} from the list, but these firewalls still allow it`);
+    expect(error).toMatch(/prod \(.*demo-prod-standby-firewall.*\)/);
+    expect(error).not.toContain('staging');
+    expect(error).toContain(`rerun \`vibecarbon access remove ${REMOVED}\``);
+    const envs = onDisk().environments;
+    // prod's record still holds the CIDR, so the rerun pushes prod again.
+    expect(envs.prod.operatorCidrsPushed).toEqual(record);
+    expect(envs.staging.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME));
+  });
+
+  it("remove with one environment's token missing exits 1 naming it and the variable, and changes nothing", async () => {
+    writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, ME, REMOVED]);
+    m.token.mockImplementation((id: string) => (id === 'digitalocean' ? undefined : `token-${id}`));
+    expect(await access(['remove', REMOVED])).toBe(1);
+    expect(logged(m.log.error)).toMatch(/staging.*DIGITALOCEAN_API_TOKEN/);
+    // Refused before the list changed: the CIDR is still listed, nothing was pushed.
+    expect(onDisk().operatorCidrs.map((e: { cidr: string }) => e.cidr)).toContain(REMOVED);
+    expect(m.pushes).toEqual([]);
+  });
+
+  it('a token gone by the time of the push is a failure too, naming the environment and the variable', async () => {
+    writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, ME, REMOVED]);
+    // There for the check before the list changes, gone for the push.
+    let lookups = 0;
+    m.token.mockImplementation((id: string) =>
+      id === 'digitalocean' && lookups++ > 0 ? undefined : `token-${id}`,
+    );
+    expect(await access(['remove', REMOVED])).toBe(1);
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    const error = logged(m.log.error);
+    expect(error).toContain(`Removed ${REMOVED} from the list, but these firewalls still allow it`);
+    expect(error).toMatch(/staging \(.*DIGITALOCEAN_API_TOKEN.*\)/);
+    expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
   });
 });

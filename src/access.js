@@ -29,6 +29,7 @@ import {
   cidrFromIp,
   detectOperatorIp,
   envFirewallSides,
+  firewallName,
   loadOperatorCidrs,
   providerTokenFor,
   pruneCidrs,
@@ -131,6 +132,12 @@ function formatRelative(isoDate, now) {
  * rest: an `access remove` that stopped there would leave the CIDR open on
  * every environment after it.
  *
+ * Anything short of every side updated is a failure: a push that throws
+ * (a missing token among them, which applyToFirewall refuses), and a side
+ * the provider did not find, since its lookup answers "not found" for an API
+ * error too. Counted as done, either would let `access remove` exit 0 while
+ * a firewall still admits the CIDR.
+ *
  * @param {object} projectConfig
  * @param {Array<{cidr: string}>} list
  * @param {{ start: Function, stop: Function } | undefined} spinner
@@ -159,15 +166,25 @@ async function pushToFirewalls(
   let updated = 0;
   const failed = [];
   for (const [environment, cfg] of envs) {
+    const sides = envFirewallSides(environment, cfg);
     try {
       const done = await pushOperatorCidrs({
         projectConfig,
         environment,
-        sides: envFirewallSides(environment, cfg),
+        sides,
         operatorCidrs: list,
         apiToken: providerTokenFor(cfg),
       });
       updated += done.length;
+      const missed = sides
+        .map((side) => firewallName(projectConfig.projectName, side))
+        .filter((name) => !done.includes(name));
+      if (missed.length > 0) {
+        failed.push({
+          name: environment,
+          reason: `${providerFor(cfg).NAME} did not find ${missed.join(' or ')}`,
+        });
+      }
     } catch (err) {
       failed.push({ name: environment, reason: err?.message || String(err) });
     }
