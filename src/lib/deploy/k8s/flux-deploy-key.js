@@ -239,9 +239,11 @@ export async function rotateFluxDeployKey({
   const removed = [];
   const failed = [];
   let keys = [];
+  let listed = true;
   try {
     keys = await listDeployKeys({ owner, repo });
   } catch (err) {
+    listed = false;
     failed.push(why(err));
   }
   for (const key of keys) {
@@ -254,9 +256,12 @@ export async function rotateFluxDeployKey({
     }
   }
   if (failed.length > 0) {
+    const what = listed
+      ? `an old "${title}" key on ${owner}/${repo} was not removed`
+      : `the deploy keys on ${owner}/${repo} could not be listed, so any old "${title}" key is still there`;
     warn(
-      `flux has its new deploy key, but an old "${title}" key on ${owner}/${repo} was not ` +
-        `removed (${[...new Set(failed)].join('; ')}). an old key opens nothing, since its private ` +
+      `flux has its new deploy key, but ${what} ` +
+        `(${[...new Set(failed)].join('; ')}). an old key opens nothing, since its private ` +
         'half was never kept, and the next configure cicd removes it. to remove it now, find its ' +
         'id with gh repo deploy-key list',
     );

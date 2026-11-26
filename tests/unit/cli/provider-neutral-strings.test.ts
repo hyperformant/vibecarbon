@@ -98,6 +98,7 @@ describe('destroy.js SPEC — teardown bullets derive from Provider.NAME (sancti
     expect(said).toContain('"vibecarbon flux <cluster>" deploy key');
     expect(said).not.toMatch(/makes no GitHub environment/);
     expect(DESTROY_SPEC.description).toMatch(/\n {2}gh repo deploy-key list(\n|$)/);
+    expect(DESTROY_SPEC.description).toMatch(/\n {2}gh repo deploy-key delete <id>(\n|$)/);
   });
 });
 

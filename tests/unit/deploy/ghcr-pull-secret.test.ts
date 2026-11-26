@@ -798,14 +798,29 @@ describe('the app image Flux rolls to is built before the handover', () => {
     for (const [pull, opts] of [
       [PRIVATE, { manifest: { anonymous: 200, token: 404 } }],
       [PUBLIC, { manifest: { anonymous: 404, token: 200 } }],
-      // Anonymous, a package not published is a 401.
-      [PUBLIC, { manifest: { anonymous: 401, token: 200 } }],
-      [PUBLIC, { anonymous: { token: 401, tags: 401 } }],
     ] as const) {
       const err = await check(pull, opts)
         .run()
         .catch((e) => e);
       expect(err?.message, JSON.stringify(opts)).toBe(NOT_BUILT);
+    }
+  });
+
+  it('a public package that turns down an anonymous pull now has turned private, not gone unbuilt', async () => {
+    // Public mode is resolved only after an anonymous pull of the package
+    // worked, so a later refusal is a visibility change.
+    for (const opts of [
+      { manifest: { anonymous: 401, token: 200 } },
+      { anonymous: { token: 401, tags: 401 } },
+    ] as const) {
+      const err = await check(PUBLIC, opts)
+        .run()
+        .catch((e) => e);
+      expect(err?.message, JSON.stringify(opts)).toBe(
+        'ghcr.io no longer lets anyone pull ghcr.io/acme/shop, so it may have turned private since ' +
+          'this run began, and prod-standby was not handed to flux. a rerun asks for a pull token ' +
+          'if it needs one: vibecarbon configure cicd prod',
+      );
     }
   });
 

@@ -441,6 +441,11 @@ describe('rotateFluxDeployKey', () => {
     const said = String(warn.mock.calls[0][0]);
     expect(said).toContain('"vibecarbon flux prod"');
     expect(said).toContain('HTTP 502: Bad Gateway');
+    // The list never answered, so it cannot say a key was left.
+    expect(said).toContain(
+      'the deploy keys on acme/shop could not be listed, so any old "vibecarbon flux prod" key is still there',
+    );
+    expect(said).not.toContain('was not removed');
     expect(said).toMatch(/gh repo deploy-key list$/);
   });
 
@@ -469,6 +474,7 @@ describe('rotateFluxDeployKey', () => {
     const said = String(warn.mock.calls[0][0]);
     expect(said).toContain('"vibecarbon flux prod"');
     expect(said).toContain('HTTP 500: Internal Server Error');
+    expect(said).toContain('an old "vibecarbon flux prod" key on acme/shop was not removed');
     expect(said).toMatch(/gh repo deploy-key list$/);
     expect(said).not.toMatch(/PRIVATE KEY/);
   });

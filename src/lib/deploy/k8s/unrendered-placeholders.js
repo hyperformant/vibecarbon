@@ -56,7 +56,7 @@ export function fluxHttpsSource(projectDir) {
   const path = join(projectDir, FLUX_CLUSTER_FILE);
   if (!existsSync(path)) return null;
   const m = readFileSync(path, 'utf-8').match(
-    /^\s*url:\s*["']?(https:\/\/github\.com\/([^\s"']+?))(?:\.git)?\/?["']?\s*$/m,
+    /^\s*url:\s*["']?(https:\/\/github\.com\/([^\s"'#]+?))(?:\.git)?\/?["']?\s*(?:#.*)?$/m,
   );
   return m ? { url: m[1], ssh: `ssh://git@github.com/${m[2]}` } : null;
 }

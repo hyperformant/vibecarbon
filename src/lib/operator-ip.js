@@ -512,7 +512,8 @@ export class FirewallPushError extends Error {
  *   cidr — the CIDR that was added (or matched, when added=false)
  *   list — the updated list
  *   fromEnv — true if the list was bootstrapped from ALLOWED_SSH_IPS env var
- *   pushed — true if a push updated every firewall of this environment
+ *   pushed — true if a push updated every firewall it was given: every side
+ *     of this environment, or only the `sides` asked for
  *   updated / missed — the firewall names a push updated, and the ones it
  *     did not find (both empty when nothing was pushed)
  *

@@ -326,7 +326,17 @@ export async function assertAppImageBuilt({
           })
         ).status;
   if (status === 200) return;
-  if (status === 404 || (anonymous && (status === null || status === 401))) {
+  if (anonymous && (status === null || status === 401)) {
+    // Public mode means an anonymous pull of this package worked earlier in
+    // this run, so a refusal now is the package turning private, not a
+    // missing build.
+    throw new Error(
+      `ghcr.io no longer lets anyone pull ${image}, so it may have turned private since this run ` +
+        `began, and ${envName} was not handed to flux. a rerun asks for a pull token if it needs ` +
+        `one: vibecarbon configure cicd ${env}`,
+    );
+  }
+  if (status === 404) {
     throw new Error(
       `your app image ${ref} is not built yet, so flux would roll the app to an image that does ` +
         'not exist. commit and push .github/workflows to main, wait for its first build in the ' +
