@@ -6,13 +6,14 @@
  * connects to it.
  *
  * Install Flux once (installFluxIfAbsent), apply the root GitRepository and
- * Kustomization (applyFluxRoot), then nudge both and wait for the first sync
- * (awaitFluxReconcile). Every step is idempotent, so a rerun of `configure
- * cicd <env>` walks them again safely.
+ * Kustomization (applyFluxRoot), then have each reconcile and wait until it
+ * has (awaitFluxReconcile). Every step is idempotent, so a rerun of
+ * `configure cicd <env>` walks them again safely.
  */
 
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { kubectlErrorHaystack, runKubectlWithRetry } from './k3s.js';
+import { runKubectlWithRetry } from './k3s.js';
 import { FLUX_CLUSTER_FILE } from './unrendered-placeholders.js';
 
 /** The Flux release the deploy workflow installed; bump it deliberately. */
@@ -44,23 +45,29 @@ const FLUX_CONTROLLERS = [
 ];
 
 /**
- * Install Flux unless its source-controller is already there. Only a NotFound
- * answer counts as missing: an unreachable API or a refused credential
- * fails here, before anything is applied.
+ * Install Flux unless its source-controller is already there. Missing is an
+ * empty answer (`--ignore-not-found`), so a first install prints no NotFound
+ * error; an unreachable API or a refused credential fails here, before
+ * anything is applied.
  *
  * @param {{ env: NodeJS.ProcessEnv }} args - env carries the cluster's KUBECONFIG
  * @returns {Promise<'installed' | 'present'>}
  */
 export async function installFluxIfAbsent({ env }) {
-  try {
-    await runKubectlWithRetry(
-      ['-n', 'flux-system', 'get', 'deployment', 'source-controller', '-o', 'name'],
-      { env, captureStdout: true, description: 'flux: look for source-controller' },
-    );
-    return 'present';
-  } catch (err) {
-    if (!/\bNotFound\b/.test(kubectlErrorHaystack(err))) throw err;
-  }
+  const found = await runKubectlWithRetry(
+    [
+      '-n',
+      'flux-system',
+      'get',
+      'deployment',
+      'source-controller',
+      '--ignore-not-found',
+      '-o',
+      'name',
+    ],
+    { env, captureStdout: true, description: 'flux: look for source-controller' },
+  );
+  if (found.trim()) return 'present';
   await runKubectlWithRetry([...SERVER_SIDE_APPLY, '-f', FLUX_INSTALL_URL], {
     env,
     captureStdout: true,
@@ -95,68 +102,124 @@ export async function applyFluxRoot({ env, projectDir }) {
   });
 }
 
+/** The root objects, in the order they reconcile: the source, then the base. */
+const FLUX_ROOT = [
+  { object: 'gitrepository/vibecarbon', kind: 'GitRepository' },
+  { object: 'kustomization/vibecarbon-base', kind: 'Kustomization' },
+];
+
+/** One object's Ready status, then its message on the lines after. */
+const READY_CONDITION =
+  'jsonpath={.status.conditions[?(@.type=="Ready")].status}{"\\n"}{.status.conditions[?(@.type=="Ready")].message}';
+
 /** Both objects' Ready messages, one `Kind: message` line each. */
 const READY_MESSAGES =
   'jsonpath={range .items[*]}{.kind}: {.status.conditions[?(@.type=="Ready")].message}{"\\n"}{end}';
 
+/** A word the shell reads as one argument, quoted only when it has to be. */
+const shellWord = (word) =>
+  /^[\w./:@-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
+
+/** What the operator runs to see what Flux says, on the right cluster. */
+const lookCloser = (kubeconfigPath) =>
+  `look closer with KUBECONFIG=${shellWord(kubeconfigPath)} kubectl -n flux-system get gitrepository,kustomization`;
+
 /**
- * Ask Flux to fetch and reconcile now rather than at its next interval, then
- * wait for vibecarbon-base to be Ready. A sync that is not Ready in time
- * fails with what the GitRepository and the Kustomization say, which names
- * the cause (a refused clone, a manifest the cluster rejects).
+ * Have the GitRepository fetch now, then the Kustomization apply what it
+ * fetched, and wait until each has done so. Each is annotated with a request
+ * of its own (`reconcile.fluxcd.io/requestedAt`, the time and a random
+ * suffix, fresh on every call), and the wait is for the controller to record
+ * that very request as handled (`.status.lastHandledReconcileAt`). A wait for
+ * Ready alone would pass at once on a rerun: an object an earlier sync left
+ * Ready stays Ready while Flux keeps its last artifact, even when the source
+ * can no longer fetch (a changed URL, a rotated key).
  *
- * @param {{ env: NodeJS.ProcessEnv, envName: string, timeoutSec?: number,
- *   now?: () => Date }} args
+ * Once a request is handled, the object's Ready condition is read once: not
+ * True fails at once with its message. A request not handled within the
+ * budget (one budget for both waits) fails with both objects' Ready messages.
+ * Either failure names the kubectl to look closer, on this cluster.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, envName: string, kubeconfigPath: string,
+ *   timeoutSec?: number, now?: () => Date }} args
  */
 export async function awaitFluxReconcile({
   env,
   envName,
+  kubeconfigPath,
   timeoutSec = 600,
   now = () => new Date(),
 }) {
-  const requested = `reconcile.fluxcd.io/requestedAt=${now().toISOString()}`;
-  for (const object of ['gitrepository/vibecarbon', 'kustomization/vibecarbon-base']) {
-    await runKubectlWithRetry(['-n', 'flux-system', 'annotate', '--overwrite', object, requested], {
-      env,
-      captureStdout: true,
-      description: `flux: ask ${object} to reconcile`,
-    });
-  }
-  try {
+  const deadline = now().getTime() + timeoutSec * 1000;
+  for (const { object, kind } of FLUX_ROOT) {
+    const request = `${now().toISOString()}-${randomBytes(4).toString('hex')}`;
     await runKubectlWithRetry(
       [
         '-n',
         'flux-system',
-        'wait',
-        '--for=condition=Ready',
-        'kustomization/vibecarbon-base',
-        `--timeout=${timeoutSec}s`,
+        'annotate',
+        '--overwrite',
+        object,
+        `reconcile.fluxcd.io/requestedAt=${request}`,
       ],
-      { env, captureStdout: true, description: 'flux: wait for the first sync' },
+      { env, captureStdout: true, description: `flux: ask ${object} to reconcile` },
     );
-  } catch (waitErr) {
-    let said = '';
+    const left = Math.ceil((deadline - now().getTime()) / 1000);
     try {
-      said = await runKubectlWithRetry(
+      if (left <= 0) throw new Error(`no time was left to wait for ${object}`);
+      await runKubectlWithRetry(
         [
           '-n',
           'flux-system',
-          'get',
-          'gitrepository/vibecarbon',
-          'kustomization/vibecarbon-base',
-          '-o',
-          READY_MESSAGES,
+          'wait',
+          `--for=jsonpath={.status.lastHandledReconcileAt}=${request}`,
+          object,
+          `--timeout=${left}s`,
         ],
-        { env, captureStdout: true, description: 'flux: read why it is not Ready' },
+        { env, captureStdout: true, description: `flux: wait for ${object} to reconcile` },
       );
-    } catch {
-      // Unreadable too: the wait's own error is all there is to say.
+    } catch (waitErr) {
+      throw await notFinished({ env, envName, kubeconfigPath, timeoutSec, waitErr });
     }
-    const minutes = Math.round(timeoutSec / 60);
-    throw new Error(
-      `flux did not finish its first sync of ${envName} within ${minutes} minute${minutes === 1 ? '' : 's'}. here is what it says:\n` +
-        `${said.trim() || waitErr.message}\n` +
-        'look closer with kubectl -n flux-system get gitrepository,kustomization',
-    );
+    const [status, ...message] = (
+      await runKubectlWithRetry(['-n', 'flux-system', 'get', object, '-o', READY_CONDITION], {
+        env,
+        captureStdout: true,
+        description: `flux: read ${object}'s Ready`,
+      })
+    ).split('\n');
+    if (status.trim() !== 'True') {
+      const said =
+        message.join('\n').trim() || `not Ready (${status.trim() || 'no Ready condition'})`;
+      throw new Error(
+        `flux tried to sync ${envName} and could not. here is what it says:\n` +
+          `${kind}: ${said}\n${lookCloser(kubeconfigPath)}`,
+      );
+    }
   }
+}
+
+/**
+ * The error for a request not handled in time: both objects' Ready messages
+ * (a Kind with none is left out), or the wait's own error when neither has
+ * one or they cannot be read.
+ */
+async function notFinished({ env, envName, kubeconfigPath, timeoutSec, waitErr }) {
+  let said = '';
+  try {
+    said = await runKubectlWithRetry(
+      ['-n', 'flux-system', 'get', ...FLUX_ROOT.map((r) => r.object), '-o', READY_MESSAGES],
+      { env, captureStdout: true, description: 'flux: read why it is not Ready' },
+    );
+  } catch {
+    // Unreadable too: the wait's own error is all there is to say.
+  }
+  const messages = said
+    .split('\n')
+    .filter((line) => line.trim() && !/^\w+:\s*$/.test(line))
+    .join('\n');
+  const minutes = Math.round(timeoutSec / 60);
+  return new Error(
+    `flux did not finish its first sync of ${envName} within ${minutes} minute${minutes === 1 ? '' : 's'}. here is what it says:\n` +
+      `${messages || waitErr.message}\n${lookCloser(kubeconfigPath)}`,
+  );
 }

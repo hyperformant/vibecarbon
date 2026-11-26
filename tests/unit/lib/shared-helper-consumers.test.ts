@@ -581,10 +581,12 @@ const REGISTRY = [
     helper: 'quietClack',
     definition: 'tests/_shared/clack-fake.ts',
     consumers: [
+      'tests/unit/configure/cicd-operator-ip-gate.test.ts',
       'tests/unit/deploy/compose-ha-bundle-readers.test.ts',
       'tests/unit/deploy/compose-ha-early-tunnel.test.ts',
       'tests/unit/deploy/compose-ha-reconverge.test.ts',
       'tests/unit/deploy/compose-ha-streaming-fastpath.test.ts',
+      'tests/unit/deploy/gitops-handover.test.ts',
       'tests/unit/destroy/failed-stack-second-pass.test.ts',
       'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
       'tests/unit/destroy/unreadable-stack-purge-buckets.test.ts',

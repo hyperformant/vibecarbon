@@ -16,5 +16,5 @@ export async function handOverCluster({ projectDir, envName, kubeconfigPath }) {
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
   await installFluxIfAbsent({ env });
   await applyFluxRoot({ env, projectDir });
-  await awaitFluxReconcile({ env, envName });
+  await awaitFluxReconcile({ env, envName, kubeconfigPath });
 }

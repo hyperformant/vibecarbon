@@ -31,6 +31,7 @@ describe('handOverCluster', () => {
       expect((o.env as NodeJS.ProcessEnv).KUBECONFIG, step).toBe(kubeconfigPath);
     }
     expect(steps[1].o.projectDir).toBe('/project');
-    expect(steps[2].o.envName).toBe('prod-standby');
+    // The sync names the cluster and its kubeconfig in what it prints.
+    expect(steps[2].o).toMatchObject({ envName: 'prod-standby', kubeconfigPath });
   });
 });
