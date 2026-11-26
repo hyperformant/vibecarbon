@@ -1784,6 +1784,38 @@ would strand the existing compose-ha environments.
 
 **Guard:** `tests/unit/docs/unoffered-tier-surface-census.test.ts`.
 
+#### 2026-11-25: Status lets your address through before its remote reads (#590)
+
+`vibecarbon status`, run in a terminal outside CI, lets the operator's address
+through every deployed environment's firewall before its first remote read.
+Each environment records the list its firewall was last pushed
+(`operatorCidrsPushed`), and status and every command that needs SSH push the
+saved list to one whose record lacks the operator's own CIDR.
+`vibecarbon access` pushes each environment with its own provider's token,
+where it used Hetzner's for all of them, and carries on past a failing
+environment.
+
+**Why:** from a new address every SSH read timed out, and remote health showed
+as unavailable with no reason. A command saves an address for the whole
+project but pushes only its own environment, so "already listed" was not
+enough: after `deploy prod` saved an address, `backup staging` from it stayed
+locked out. And an `access remove` that stopped at its first failing
+environment left the CIDR open on every environment after it.
+
+**Do not undo:** making status read-only again brings the unexplained
+"unavailable" back. Pushing only when the address is new leaves every
+environment but the one that saved it closed. Pushing whenever the record
+differs from the saved list turns a routine command into a sync of the local
+list to every firewall: a stale checkout would re-open a CIDR someone removed
+with `access remove`, or drop a teammate's newer one. Refreshing `lastUsedAt`
+on every run, not at most once a day, rewrites the committed
+`.vibecarbon.json` on every status. A status from cron, a CI job or a pipe
+must stay a pure read.
+
+**Guard:** `tests/unit/status/operator-ip-access.test.ts`,
+`tests/unit/status/operator-ip-detect-budget.test.ts` and
+`tests/unit/access/operator-ip-everywhere.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

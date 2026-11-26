@@ -48,6 +48,7 @@ const remote = vi.hoisted(() => ({
 }));
 class ReachedRemote extends Error {}
 vi.mock('../../../src/lib/operator-ip.js', () => ({
+  FirewallPushError: class FirewallPushError extends Error {},
   ensureOperatorIpAccess: async (...a: unknown[]) => {
     remote.operatorIp(...a);
     throw new ReachedRemote('operator-ip');

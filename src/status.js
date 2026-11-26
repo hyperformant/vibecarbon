@@ -1,6 +1,8 @@
 /**
  * Vibecarbon Status Command
- * Shows project and deployment status (read-only, non-interactive)
+ * Shows project and deployment status (it never prompts). Run in a terminal
+ * outside CI, it first lets the operator's current address through the
+ * deployed environments' firewalls, as `shell` and `diagnose` do.
  *
  * Usage:
  *   vibecarbon status                    # Show all status info
@@ -43,6 +45,11 @@ import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
 import { findOrphanStacks, listVibecarbonStacks } from './lib/local-stacks.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
+import {
+  ensureOperatorIpAccessWarnAll,
+  envHasServers,
+  shouldAutoDetectOperatorIp,
+} from './lib/operator-ip.js';
 import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
@@ -67,7 +74,9 @@ const SPEC = {
   name: 'status',
   summary: 'Show project and deployment status',
   description: [
-    'Read-only summary of project + environment health.',
+    'A summary of project and environment health. Run in a terminal outside',
+    'CI, it first lets your current address through the firewall, as `shell`',
+    'and `diagnose` do, so the remote checks can connect.',
     '',
     'MODES',
     '  Run from outside a project:  Shows summary of all registered projects',
@@ -1751,6 +1760,28 @@ async function main(argv = []) {
     envEntries = filtered;
   }
 
+  // Let the operator's current address through every deployed environment's
+  // firewall before the first remote read, as `shell` and `diagnose` do:
+  // from a new address every SSH read would time out, and remote health
+  // would show as unavailable with no reason. Only in an interactive
+  // terminal outside CI: a status run by cron, a CI job or a pipe (`-json |
+  // jq`) never detects, saves or pushes, so it stays a pure read. Messages
+  // go to stderr. Detection gets status's short budget (quickDetect): an
+  // unreachable detector costs seconds, not half a minute.
+  const deployedEnvNames = envEntries
+    .filter(([, envConfig]) => envHasServers(envConfig))
+    .map(([envName]) => envName);
+  const interactive = !!process.stdout.isTTY && shouldAutoDetectOperatorIp({ yes: true });
+  if (interactive && deployedEnvNames.length > 0) {
+    await ensureOperatorIpAccessWarnAll({
+      projectConfig,
+      environments: deployedEnvNames,
+      yes: true,
+      cwd,
+      quickDetect: true,
+    });
+  }
+
   // Gather all data in parallel
   const allData = {
     projectName: projectConfig.projectName,
@@ -1910,10 +1941,9 @@ async function main(argv = []) {
   introCommand('status');
   p.log.info(`Project: ${c.bold(projectConfig.projectName)}`);
 
-  // Operator-IP access (H-2). One-line summary: how many CIDRs are in the
-  // allowlist. We don't auto-detect here — status is a passive read of
-  // local files and HTTP probes; firing api.ipify.org on every status
-  // call would be surprising. Pointer to `vibecarbon access` is enough.
+  // Operator-IP access (H-2). The address was let through above, before the
+  // remote reads, as `shell` and `diagnose` do; this line only summarizes
+  // the allowlist and points at `vibecarbon access`.
   const cidrs = projectConfig.operatorCidrs ?? [];
   if (cidrs.length === 0) {
     p.log.warn(

@@ -2,7 +2,10 @@
  * requireOperatorIpAccess is the one operator-IP gate of backup, restore,
  * update, failover and both scale paths. These pin what each of those
  * commands did when it carried its own copy: skip without a token, say when
- * the firewall changed, exit 1 on a failed check.
+ * the firewall changed, exit 1 on a failed check. Since records, the gate
+ * also pushes an address already on the list (its environment's record
+ * lacks it); a push that fails then warns and goes on, as the gate did when
+ * it pushed nothing for such an address, and a partial push says so.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,12 +13,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   ensureOperatorIpAccess: vi.fn(),
-  log: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
+  log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn() },
   resolveProviderToken: vi.fn(),
 }));
 
 vi.mock('@clack/prompts', () => ({ log: m.log }));
-vi.mock('../../../src/lib/operator-ip.js', () => ({
+vi.mock('../../../src/lib/operator-ip.js', async (importOriginal) => ({
+  FirewallPushError: (await importOriginal<typeof import('../../../src/lib/operator-ip.js')>())
+    .FirewallPushError,
   ensureOperatorIpAccess: m.ensureOperatorIpAccess,
 }));
 vi.mock('../../../src/lib/providers/index.js', () => ({
@@ -23,6 +28,7 @@ vi.mock('../../../src/lib/providers/index.js', () => ({
   resolveProviderToken: m.resolveProviderToken,
 }));
 
+import { FirewallPushError } from '../../../src/lib/operator-ip.js';
 import {
   requireEnvOperatorIpAccess,
   requireOperatorIpAccess,
@@ -86,6 +92,64 @@ describe('requireOperatorIpAccess', () => {
     } finally {
       exit.mockRestore();
     }
+  });
+
+  const pushError = (added: boolean) =>
+    new FirewallPushError(new Error('firewall API answered 503'), {
+      added,
+      cidr: '203.0.113.7/32',
+    });
+
+  it('a push that fails for an address already on the list warns and goes on', async () => {
+    // The first gated command after an upgrade (a failover above all) pushes
+    // from an address the list holds: a firewall API outage must not stop it.
+    m.ensureOperatorIpAccess.mockRejectedValue(pushError(false));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    try {
+      await requireOperatorIpAccess(base);
+      expect(exit).not.toHaveBeenCalled();
+      expect(m.log.error).not.toHaveBeenCalled();
+      expect(String(m.log.warn.mock.calls[0][0])).toMatch(
+        /^Firewall not refreshed \(firewall API answered 503\)\. Carrying on, since 203\.0\.113\.7\/32 was already on the list/,
+      );
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  it('a push that fails for a newly added address still exits 1', async () => {
+    m.ensureOperatorIpAccess.mockRejectedValue(pushError(true));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    try {
+      await expect(requireOperatorIpAccess(base)).rejects.toThrow('exit');
+      expect(m.log.error).toHaveBeenCalledWith(
+        'Operator-IP check failed: firewall API answered 503',
+      );
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  it('a push that found only one HA side says so, not "Firewall updated"', async () => {
+    m.ensureOperatorIpAccess.mockResolvedValue({
+      added: true,
+      cidr: '203.0.113.7/32',
+      pushed: false,
+      updated: ['demo-production-primary-firewall'],
+      missed: ['demo-production-standby-firewall'],
+    });
+    await requireOperatorIpAccess(base);
+    expect(m.log.success).not.toHaveBeenCalled();
+    expect(m.log.warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^Firewall not fully updated: demo-production-standby-firewall not found, so it may not allow 203\.0\.113\.7\/32 yet\./,
+      ),
+    );
   });
 });
 
