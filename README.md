@@ -291,16 +291,16 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | Hetzner Cloud | `compose` | 1m 52s | 16.4s | 4.6s | 2m 32s | 2m 22s | 15.2s | — |
 | | `k8s` | 5m 36s | 15.0s | 25.8s | 1m 34s | 2m 18s | 1m 26s | — |
 | | `k8s-ha` | 3m 29s | 29.6s | 24.3s | 2m 11s | 4m 23s | 1m 20s | 3m 18s |
-| DigitalOcean | `compose` | 1m 57s | 16.6s | 3.9s | 2m 25s | 2m 19s | 28.3s | — |
-| | `k8s` | 3m 0s | 12.4s | 24.0s | 1m 21s | 2m 11s | 1m 22s | — |
-| | `k8s-ha` | 3m 21s | 26.6s | 23.0s | 2m 6s | 5m 53s | 1m 25s | 2m 35s |
+| DigitalOcean | `compose` | 2m 27s | 24.4s | 4.6s | 2m 23s | 2m 20s | 26.4s | — |
+| | `k8s` | 3m 9s | 10.6s | 34.0s | 1m 30s | 2m 20s | 1m 9s | — |
+| | `k8s-ha` | 3m 19s | 21.5s | 45.1s | 1m 53s | 4m 8s | 1m 26s | 2m 58s |
 | Linode | `compose` | 3m 6s | 20.6s | 4.4s | 4m 31s | 3m 34s | 11.8s | — |
 | | `k8s` | 4m 51s | 8.1s | 28.6s | 1m 17s | 9m 22s | 1m 24s | — |
 | | `k8s-ha` | 5m 32s | 21.9s | 12.6s | 2m 18s | 18m 22s | 1m 24s | 3m 22s |
-| Vultr | `compose` | 2m 43s | 18.6s | 6.6s | 4m 3s | 3m 58s | 20.7s | — |
+| Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
 | Scaleway | `compose` | 2m 24s | 19.3s | 4.7s | 2m 6s | 2m 9s | 20.5s | — |
 
-_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `b52eef7` (2026-11-20) · Linode `f7fac70` (2026-11-20) · Vultr `47ae4d9` (2026-11-19) · Scaleway `c82715d` (2026-11-20) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `f7fac70` (2026-11-20) · Vultr `cc553a2` (2026-11-25) · Scaleway `c82715d` (2026-11-20) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
