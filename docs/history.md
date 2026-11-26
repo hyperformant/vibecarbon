@@ -1852,7 +1852,7 @@ stores nothing and removes any ghcr.io login on the server, leaving every other
 registry's login alone. A private image uses a `read:packages`-only token
 already on one of the environment's servers, then `GHCR_PULL_TOKEN`, then one
 ask on a terminal. A headless run with nothing usable refuses before any server
-exists. The server's docker login file holds only that token, and
+exists. The server's docker login file holds only that token for ghcr.io, and
 `ensureGhcrLoginOn` is its only writer. Commands that read a secret run with
 `secret: true`, so the output never reaches a CI or DEBUG log or an error.
 

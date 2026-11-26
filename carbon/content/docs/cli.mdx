@@ -461,7 +461,7 @@ vibecarbon configure cicd <env>
 
 **On Compose.** A deploy in push mode pulls the image on each server, and
 `vibecarbon deploy` and `vibecarbon scale` settle how before they create or
-touch a server. If anyone can pull your app image, nothing is stored, and any
+change a server. If anyone can pull your app image, nothing is stored, and any
 ghcr.io login already on the server is removed (other registries' logins stay).
 Otherwise the server needs the same kind of token as a cluster: a classic token
 with only `read:packages`. The deploy looks, in order, for one already on the
