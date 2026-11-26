@@ -492,7 +492,7 @@ export class BaseProvider {
   /**
    * Whether this provider's k8s program gives each cluster a floating (or
    * reserved) IP for its ingress, exported as the `floatingIp` output, which
-   * deployK3s then requires. Hetzner and Linode do. DigitalOcean does not:
+   * deployK3s then requires. Hetzner, Linode and Vultr do. DigitalOcean does not:
    * its clusters' domains point at the master's own address
    * (clusterIngressIp, lib/deploy/k8s/ingress-ip.js), and a deploy releases
    * the reserved IP a cluster made before that still has on record

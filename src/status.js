@@ -1405,7 +1405,7 @@ export function isHaConfigured(envConfig) {
 
 /**
  * The environment's held IP rows. A floating IP is the cluster's ingress on
- * Hetzner and Linode. On DigitalOcean, whose clusters take traffic at the
+ * Hetzner, Linode and Vultr. On DigitalOcean, whose clusters take traffic at the
  * master's own address, a recorded reserved IP is one a cluster made before
  * 2026-11 still holds until a deploy sees DNS has moved off it and releases
  * it (lib/deploy/k8s/retired-reserved-ip.js). Where the record that holds it

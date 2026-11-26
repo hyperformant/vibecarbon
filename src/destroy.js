@@ -140,7 +140,7 @@ export function planDestroyTargets(envConfig, projectConfig, environment) {
   // servers are removed. See the ownership-filtered delete docs in the DNS backends.
   //
   // k8s DNS records point at the cluster's ingress IP (clusterIngressIp): its
-  // floating/reserved IP on Hetzner and Linode, which is not any server's own
+  // floating/reserved IP on Hetzner, Linode and Vultr, which is not any server's own
   // IP — without folding it in here, every k8s destroy preserved its own DNS
   // record as "unowned" (M3 Task 9f evidence: both Hetzner and DO k8s
   // destroys left the A record behind, hand-deleted afterwards). Single k8s

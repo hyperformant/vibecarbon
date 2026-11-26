@@ -1,7 +1,7 @@
 /**
  * The address a k8s cluster's domain records point at.
  *
- * Hetzner and Linode give each cluster a floating (reserved) IP, which the
+ * Hetzner, Linode and Vultr give each cluster a floating (reserved) IP, which the
  * program outputs as `floatingIp`. A DigitalOcean cluster has none
  * (`K8S_FLOATING_IP = false`): its records point at the master droplet's own
  * public IPv4, as DigitalOcean compose's do. On DigitalOcean a reserved IP
