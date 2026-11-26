@@ -6,7 +6,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { LinodeProvider } from '../../src/lib/providers/linode.js';
-import { cheapestDefaultRegion, cheapestStandbyRegion } from '../../src/lib/sizing.js';
+import { VultrProvider } from '../../src/lib/providers/vultr.js';
+import { cheapestDefaultRegion, cheapestStandbyRegion, regionFits } from '../../src/lib/sizing.js';
 import { seedCatalog } from './helpers/catalog-fixtures.js';
 
 const K8S_ROLES = ['master', 'db', 'worker'];
@@ -56,5 +57,14 @@ describe('cheapestDefaultRegion with blocked regions', () => {
   it('compose roles ignore the rule', () => {
     const free = cheapestDefaultRegion(stub([]), ['compose']);
     expect(cheapestDefaultRegion(stub([free]), ['compose'])).toBe(free);
+  });
+});
+
+describe('regionFits', () => {
+  it('Vultr sjc fits compose roles and not k8s roles', () => {
+    expect(regionFits(VultrProvider, 'sjc', ['compose'])).toBe(true);
+    expect(regionFits(VultrProvider, 'sjc', K8S_ROLES)).toBe(false);
+    expect(regionFits(VultrProvider, 'sjc', ['master', 'db'])).toBe(false);
+    expect(regionFits(VultrProvider, 'lax', K8S_ROLES)).toBe(true);
   });
 });

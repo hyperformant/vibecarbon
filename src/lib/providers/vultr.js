@@ -1,13 +1,13 @@
 /**
  * Vultr Cloud Provider
  *
- * Compose + compose-ha provider (PR 2 of the 2026-08 provider expansion +
- * tier-parity wave 1 — see
- * the vultr-provider-step0-audit plan for the
- * sourced capability audit and live-probe results). The k8s user-data
- * statics render the vultr-*-init.sh boot scripts, and getK8sProgram builds
- * iac/programs/vultr-k8s.js, ahead of the k8s tier being sold
- * (SUPPORTED_TIERS is still compose-only).
+ * All four tiers (PR 2 of the 2026-08 provider expansion, tier-parity wave 1,
+ * and the k8s tiers of the 2026-11 k8s-everywhere work; see the
+ * vultr-provider-step0-audit plan for the sourced capability audit and
+ * live-probe results). The k8s user-data statics render the vultr-*-init.sh
+ * boot scripts, and getK8sProgram builds iac/programs/vultr-k8s.js. The k8s
+ * tiers need NVMe block storage, which one region lacks
+ * (K8S_UNSUPPORTED_REGIONS).
  *
  * Vultr-shape notes (vs the Hetzner/DO/Linode templates):
  * - API v2 uses CURSOR pagination (`meta.links.next` → `&cursor=`), not
@@ -249,8 +249,10 @@ export class VultrProvider extends BaseProvider {
   // vultr-objectstorage.js's key-model doc; the region env below is
   // effectively required alongside them.
   static OBJECT_STORAGE_ENV = ['VULTR_ACCESS_KEY', 'VULTR_SECRET_KEY'];
-  // The providerID scheme Vultr's CCM stamps on nodes — relevant only at
-  // the (unbuilt) k8s tier, pinned now for uniqueness.
+  // The providerID on Vultr k8s nodes (`vultr://<instance-v2-id>`). There is
+  // no Vultr CCM: the k3s boot scripts pre-seed it with the kubelet's
+  // `provider-id` flag, and the autoscaler strips the prefix to find the
+  // instance.
   static PROVIDER_ID_PREFIX = 'vultr://';
   static DEFAULT_REGION = 'ewr';
   static PRICING_URL = 'https://www.vultr.com/pricing/';
@@ -260,13 +262,37 @@ export class VultrProvider extends BaseProvider {
   // vultr-objectstorage.js.
   static S3_REGION_ENV = 'VULTR_STORAGE_REGION';
 
-  // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
-  // the HA surface below was contract-complete since PR 2; effects/compose-ha
-  // is provider-generic). 4-mode headroom (CCM/CSI/block-storage/DNS-flip)
-  // recorded in the audit; the k8s tiers are not yet built or declared.
-  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  // All four tiers. compose-ha came in the 2026-08 tier-parity wave 1 (the
+  // HA surface below was contract-complete since PR 2; effects/compose-ha is
+  // provider-generic), k8s and k8s-ha with the 2026-11 k8s-everywhere work.
+  // The k8s tiers need NVMe block storage, which one region lacks
+  // (K8S_UNSUPPORTED_REGIONS).
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
   static SERVER_RESOURCE_TYPE = 'vultr:index/instance:Instance';
+
+  /**
+   * Regions with no NVMe block storage, which the k8s tiers' database volume
+   * needs (vultr-k8s.js's StorageClass asks for `disk_type: nvme`): sjc sells
+   * only HDD block storage (`block_storage_storage_opt`, public GET
+   * /v2/regions, 2026-11-25). k8s and k8s-ha refuse it (k8sRegionProblem) and
+   * the region lists omit it; compose tiers use it freely.
+   * @type {string[]}
+   */
+  static K8S_UNSUPPORTED_REGIONS = ['sjc'];
+
+  /**
+   * @param {string} region
+   * @returns {string|null}
+   */
+  static k8sRegionProblem(region) {
+    if (!VultrProvider.K8S_UNSUPPORTED_REGIONS.includes(region)) return null;
+    const city = VultrProvider.REGIONS[region]?.split(',')[0] ?? region;
+    return (
+      `Kubernetes on Vultr does not run in ${city} (${region}): Vultr sells no NVMe block ` +
+      "storage there for the cluster's database volume. Use lax, ewr or another region."
+    );
+  }
 
   // Compute regions WITH a co-located Object Storage cluster (same
   // in-region-backup doctrine as the sibling providers; live cluster
@@ -300,12 +326,15 @@ export class VultrProvider extends BaseProvider {
   // Offline fallback catalog — vc2 shared line, live-verified 2026-08-08
   // via the public GET /v2/plans (ram is MB on the wire; stored as GB);
   // `vhf-2c-4gb` (the compose fallback candidate) from the same endpoint on
-  // 2026-10-22.
+  // 2026-10-22; `vhf-1c-2gb` (the k8s db fallback) and `vhf-3c-8gb` (its
+  // scale target) on 2026-11-25.
   static FALLBACK_SERVER_TYPES = {
     'vc2-1c-2gb': { vcpu: 1, ram: 2, disk: 55 },
     'vc2-2c-4gb': { vcpu: 2, ram: 4, disk: 80 },
     'vc2-4c-8gb': { vcpu: 4, ram: 8, disk: 160 },
+    'vhf-1c-2gb': { vcpu: 1, ram: 2, disk: 64 },
     'vhf-2c-4gb': { vcpu: 2, ram: 4, disk: 128 },
+    'vhf-3c-8gb': { vcpu: 3, ram: 8, disk: 256 },
   };
 
   // Live catalog populated by fetchServerTypes(); object map (name → spec).
@@ -322,10 +351,14 @@ export class VultrProvider extends BaseProvider {
   // location's own price (sao, 1.5x, on 2026-10-22). null until a live fetch.
   static _prices = null;
 
-  // Compose candidates (see BaseProvider.ROLE_CANDIDATES): the regular vc2
-  // 4 GB plan, then the high-frequency one as its stock-out fallback.
+  // Role candidates (see BaseProvider.ROLE_CANDIDATES): the regular vc2 plan
+  // at each role's RAM floor, then the high-frequency one as its stock-out
+  // fallback. The k8s master and worker take 4 GB, the db 2 GB.
   static ROLE_CANDIDATES = {
     compose: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    master: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    worker: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    db: ['vc2-1c-2gb', 'vhf-1c-2gb'],
   };
 
   // x86 CPU classes (see BaseProvider.CPU_CLASSES): regular `vc2`, then
@@ -356,7 +389,8 @@ export class VultrProvider extends BaseProvider {
 
   // ── Engine-literal statics ──────────────────────────────────────────────
   static DEFAULT_COMPOSE_TYPE = 'vc2-2c-4gb';
-  // Pinned for EXPECTED-table completeness; unread while compose-only.
+  // The k8s node type a k8s-ha standby falls back to when no type was given
+  // (effects/k8s-ha.js); the master and worker candidates' first.
   static DEFAULT_K8S_NODE_TYPE = 'vc2-2c-4gb';
 
   // No Docker-preinstalled OS on Vultr (Marketplace Docker is an app, not
@@ -636,7 +670,8 @@ export class VultrProvider extends BaseProvider {
   /**
    * The static HA standby pair — conventional pairs, then same-continent,
    * mirroring the sibling providers' contract (contract-tested for every
-   * region even while compose-only).
+   * region). lax pairs with sjc, which the k8s tiers cannot use:
+   * cheapestStandbyRegion gives that pair way to a partner that can.
    * @param {string} primaryRegion
    * @returns {string} the static pair, before prices
    */

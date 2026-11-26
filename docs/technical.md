@@ -521,8 +521,8 @@ Mode support by provider (same facts as the README architecture diagram):
 |---|:---:|:---:|:---:|:---:|:---:|
 | `compose` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `compose-ha` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `k8s` | ✅ | ✅ | ✅ | — | — |
-| `k8s-ha` | ✅ | ✅ | ✅ | — | — |
+| `k8s` | ✅ | ✅ | ✅ | ✅ | — |
+| `k8s-ha` | ✅ | ✅ | ✅ | ✅ | — |
 
 Every cell that ships runs the same CLI, the same lifecycle commands, and the same e2e gate. A dash is a mode not yet built for that provider: requesting it fails at deploy-mode selection with an explicit capability-gate error (`assertTierSupported()` in `src/lib/providers/index.js`).
 
@@ -542,7 +542,7 @@ Kubernetes deployments additionally include:
 | Hetzner Cloud | `compose`, `compose-ha`, `k8s`, `k8s-ha` | [deploy-hetzner.md](./deploy-hetzner.md) |
 | DigitalOcean | `compose`, `compose-ha`, `k8s`, `k8s-ha` | [deploy-digitalocean.md](./deploy-digitalocean.md) |
 | Linode | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
-| Vultr | `compose`, `compose-ha` | No written guide yet |
+| Vultr | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
 | Scaleway | `compose`, `compose-ha` | No written guide yet |
 
 You do not need a written guide to deploy on any of the five. `vibecarbon configure` (Providers) and `vibecarbon deploy` both walk you through creating the API token and the object storage keys for the provider you pick, and the `.env.local.example` in your project lists every credential and its format.

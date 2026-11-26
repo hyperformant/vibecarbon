@@ -24,7 +24,7 @@
  * not get.
  */
 import { getProviderClass } from '../../../src/lib/providers/index.js';
-import { cheapestRoleSet, haRoleSets } from '../../../src/lib/sizing.js';
+import { cheapestRoleSet, haRoleSets, regionFits } from '../../../src/lib/sizing.js';
 import type { DeployMode } from '../scenarios/types.js';
 
 export interface CapacityPreferences {
@@ -218,9 +218,12 @@ function resolved(
 
 /**
  * The first preferred region (not excluded) where the picker places every
- * role of `options.mode` and the scale target is sold. Throws listing what
- * was tried when none fits; preflight catches that and aborts the matrix
- * before any scenario provisions.
+ * role of `options.mode` and the scale target is sold. A k8s mode also skips
+ * a region the provider runs no Kubernetes in (`regionFits`, the rule the
+ * deploy's region gate and standby default apply), so a capacity miss
+ * earlier in the list never lands a k8s scenario in Vultr's sjc. Throws
+ * listing what was tried when none fits; preflight catches that and aborts
+ * the matrix before any scenario provisions.
  */
 export async function resolveCapacity(
   prefs: CapacityPreferences,
@@ -234,12 +237,12 @@ export async function resolveCapacity(
   const roles = primaryRoles(mode);
 
   for (const region of prefs.regions) {
-    if (excluded.has(region)) continue;
+    if (excluded.has(region) || !regionFits(Provider, region, roles)) continue;
     const placed = placeableSet(Provider, prefs, region, roles, scaleKeyRole(mode));
     if (placed) return resolved(region, placed.types, placed.scaleTarget);
   }
 
-  const tried = prefs.regions.filter((r) => !excluded.has(r));
+  const tried = prefs.regions.filter((r) => !excluded.has(r) && regionFits(Provider, r, roles));
   throw new Error(
     `region-resolver: no ${Provider.NAME ?? provider} region can place the default ` +
       `${mode} sizes and their scale target right now. tried regions=[${tried.join(',')}] ` +

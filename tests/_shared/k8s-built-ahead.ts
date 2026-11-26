@@ -9,7 +9,9 @@
  */
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 
-export const K8S_BUILT_AHEAD: readonly string[] = ['vultr'];
+// Empty since Vultr's k8s tiers turned on (2026-11-26). Kept with the
+// mechanism: Scaleway's k8s code lands next, ahead of its tier.
+export const K8S_BUILT_AHEAD: readonly string[] = [];
 
 type Entry = [string, (typeof PROVIDERS)[keyof typeof PROVIDERS]];
 

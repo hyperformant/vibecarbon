@@ -25,9 +25,16 @@ describe('K8S_BUILT_AHEAD', () => {
     const ids = k8sCensusProviders().map(([id]) => id);
     const ahead = Object.keys(PROVIDERS).filter((id) => K8S_BUILT_AHEAD.includes(id));
     expect(ids).toEqual([...sellers, ...ahead]);
-    expect(ids).toEqual(['hetzner', 'digitalocean', 'linode', 'vultr']);
     for (const [id, P] of k8sCensusProviders()) {
       expect(P).toBe(PROVIDERS[id as keyof typeof PROVIDERS]);
     }
+  });
+
+  it('is empty now that Vultr sells k8s, so the censuses walk exactly the sellers', () => {
+    // Vultr left the list the day its k8s tiers turned on; Scaleway joins it
+    // when its k8s code lands ahead of its tier.
+    expect(K8S_BUILT_AHEAD).toEqual([]);
+    expect(sellers).toEqual(['hetzner', 'digitalocean', 'linode', 'vultr']);
+    expect(k8sCensusProviders().map(([id]) => id)).toEqual(sellers);
   });
 });

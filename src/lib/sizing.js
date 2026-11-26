@@ -561,6 +561,9 @@ export function haClassMessage(Provider, sides) {
  * Ties keep `conventional` (the provider's static pair) first, then
  * `REGION_CONTINENT` order. `conventional` stands when no catalog is loaded
  * or no partner qualifies; the deploy wizard then refuses at type resolution.
+ * A conventional pair the roles cannot use (a k8s-less region, as
+ * `regionFits` says) gives way to the first same-continent partner that can,
+ * offline too: Vultr pairs lax with sjc, where its k8s tiers do not run.
  *
  * @param {object} Provider - a provider class
  * @param {string} primaryRegion
@@ -578,7 +581,6 @@ export function cheapestStandbyRegion(
   conventional,
   primaryTypes = {},
 ) {
-  if (!Provider._locationTypes) return conventional;
   const continentOf = Provider.REGION_CONTINENT ?? {};
   const continent = continentOf[primaryRegion];
   const partners = [...new Set([conventional, ...Object.keys(continentOf)])].filter(
@@ -589,10 +591,11 @@ export function cheapestStandbyRegion(
       regionFits(Provider, r, roles),
   );
   // A conventional pair the tier cannot use (a k8s-less region) gives way to
-  // the first partner that can.
+  // the first partner that can, with or without a catalog.
   const fallback = regionFits(Provider, conventional, roles)
     ? conventional
     : (partners[0] ?? conventional);
+  if (!Provider._locationTypes) return fallback;
   return (
     rankStandbyLocations(Provider, partners, roles, primaryTypes, primaryRegion)[0]?.location ??
     fallback
@@ -602,9 +605,16 @@ export function cheapestStandbyRegion(
 /**
  * Whether `region` can host a deploy placing `roles`: a k8s deploy (roles
  * other than `compose`) needs a region the provider runs Kubernetes in
- * (`Provider.k8sRegionProblem`); compose placements fit anywhere.
+ * (`Provider.k8sRegionProblem`); compose placements fit anywhere. The e2e
+ * region resolver (tests/e2e/utils/region-resolver.ts) skips a primary
+ * region by the same rule.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} region
+ * @param {string[]} roles - ['compose'], or k8s roles such as ['master', 'db', 'worker']
+ * @returns {boolean}
  */
-function regionFits(Provider, region, roles) {
+export function regionFits(Provider, region, roles) {
   return roles.includes('compose') || !Provider.k8sRegionProblem?.(region);
 }
 

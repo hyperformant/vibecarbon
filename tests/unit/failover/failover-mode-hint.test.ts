@@ -23,7 +23,7 @@ function hintFor(provider: string): string[] {
 }
 
 describe('logFailoverModeHint', () => {
-  it.each(['hetzner', 'digitalocean', 'linode'])(
+  it.each(['hetzner', 'digitalocean', 'linode', 'vultr'])(
     'points %s at a new k8s-ha environment',
     (provider) => {
       const lines = hintFor(provider);
@@ -32,10 +32,7 @@ describe('logFailoverModeHint', () => {
     },
   );
 
-  it.each([
-    ['vultr', 'Vultr'],
-    ['scaleway', 'Scaleway'],
-  ])('tells %s it has no failover mode yet', (provider, name) => {
+  it.each([['scaleway', 'Scaleway']])('tells %s it has no failover mode yet', (provider, name) => {
     expect(hintFor(provider)).toEqual([
       `${name} has no failover mode yet, so recovery is a new server and a restore.`,
     ]);

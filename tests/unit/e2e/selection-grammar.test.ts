@@ -37,7 +37,15 @@ describe('resolveSelection — defaults', () => {
     ]);
   });
 
-  it('--provider all = every provider defaults, hetzner first (11 total, no compose-ha)', () => {
+  it('--provider vultr = Vultr defaults (the same three)', () => {
+    expect(modes(resolveSelection({ providers: ['vultr'] }))).toEqual([
+      'vultr/compose',
+      'vultr/k8s',
+      'vultr/k8s-ha',
+    ]);
+  });
+
+  it('--provider all = every provider defaults, hetzner first (13 total, no compose-ha)', () => {
     expect(modes(resolveSelection({ providers: ['all'] }))).toEqual([
       'hetzner/compose',
       'hetzner/k8s',
@@ -49,8 +57,11 @@ describe('resolveSelection — defaults', () => {
       'linode/k8s',
       'linode/k8s-ha',
       'vultr/compose',
+      'vultr/k8s',
+      'vultr/k8s-ha',
       'scaleway/compose',
     ]);
+    expect(resolveSelection({ providers: ['all'] })).toHaveLength(13);
   });
 
   it('compose-ha runs on every provider when it is named', () => {
@@ -159,7 +170,8 @@ describe('resolveSelection — explicit tokens', () => {
 
   it('provider all + exclude', () => {
     const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/k8s'] });
-    expect(sel).toHaveLength(10);
+    expect(sel).toHaveLength(12);
+    expect(modes(sel)).not.toContain('digitalocean/k8s');
   });
 });
 
@@ -178,8 +190,8 @@ describe('resolveSelection — loud failures (no legacy forms)', () => {
   });
 
   it('mode unsupported by provider throws naming supported modes', () => {
-    // vultr carries the negative case now that DO and Linode support all four tiers.
-    expect(() => resolveSelection({ include: ['vultr/k8s'] })).toThrow(
+    // scaleway carries the negative case now that DO, Linode and Vultr support all four tiers.
+    expect(() => resolveSelection({ include: ['scaleway/k8s'] })).toThrow(
       /does not support k8s.*compose, compose-ha/,
     );
   });

@@ -92,10 +92,7 @@ describe('getDefaultStandbyRegion by price', () => {
   });
 
   it('compose-only providers keep a same-continent partner for k8s roles they have no candidates for', () => {
-    for (const [P, name, primary] of [
-      [VultrProvider, 'vultr', 'ewr'],
-      [ScalewayProvider, 'scaleway', 'fr-par-1'],
-    ] as const) {
+    for (const [P, name, primary] of [[ScalewayProvider, 'scaleway', 'fr-par-1']] as const) {
       const offline = P.getDefaultStandbyRegion(primary);
       seed(P, `2026-10-22/${name}`);
       const live = P.getDefaultStandbyRegion(primary);
@@ -124,6 +121,37 @@ describe('Linode k8s-ha standby region', () => {
 
   it('compose-ha may still pair the VPC-less regions', () => {
     expect(LinodeProvider.getDefaultStandbyRegion('us-east', ['compose'])).toBe('us-southeast');
+  });
+});
+
+describe('Vultr k8s-ha standby region', () => {
+  const k8sRoles = ['master', 'db', 'worker'];
+
+  it('a lax primary, whose conventional partner is sjc, gets a standby that runs Kubernetes, offline or live', () => {
+    expect(VultrProvider.conventionalStandbyRegion('lax')).toBe('sjc');
+    for (const live of [false, true]) {
+      if (live) seed(VultrProvider, '2026-10-22/vultr');
+      const standby = VultrProvider.getDefaultStandbyRegion('lax', k8sRoles);
+      expect(standby, `live=${live}`).not.toBe('sjc');
+      expect(standby, `live=${live}`).not.toBe('lax');
+      expect(VultrProvider.k8sRegionProblem(standby), `live=${live}`).toBeNull();
+      expect(VultrProvider.REGION_CONTINENT[standby]).toBe('na');
+    }
+  });
+
+  it('never picks sjc for any primary, offline or live', () => {
+    for (const live of [false, true]) {
+      if (live) seed(VultrProvider, '2026-10-22/vultr');
+      for (const primary of Object.keys(VultrProvider.REGIONS).filter((r) => r !== 'sjc')) {
+        const standby = VultrProvider.getDefaultStandbyRegion(primary, k8sRoles);
+        expect(standby, `${primary} (live=${live})`).not.toBe('sjc');
+        expect(standby).not.toBe(primary);
+      }
+    }
+  });
+
+  it('compose-ha may still pair lax with sjc', () => {
+    expect(VultrProvider.getDefaultStandbyRegion('lax', ['compose'])).toBe('sjc');
   });
 });
 

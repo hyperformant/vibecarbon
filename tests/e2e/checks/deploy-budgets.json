@@ -298,6 +298,34 @@
           "tlsAllowanceS": 60,
           "samples": 2
         }
+      },
+      "k8s": {
+        "any": {
+          "ownedS": 360,
+          "endToEndS": 425,
+          "tlsAllowanceS": 65,
+          "samples": 0,
+          "seededFrom": [
+            "digitalocean/k8s/regular",
+            "hetzner/k8s/cpx",
+            "hetzner/k8s/cx",
+            "linode/k8s/standard"
+          ]
+        }
+      },
+      "k8s-ha": {
+        "any": {
+          "ownedS": 410,
+          "endToEndS": 470,
+          "tlsAllowanceS": 60,
+          "samples": 0,
+          "seededFrom": [
+            "digitalocean/k8s-ha/intel",
+            "digitalocean/k8s-ha/regular",
+            "hetzner/k8s-ha/cpx",
+            "linode/k8s-ha/standard"
+          ]
+        }
       }
     }
   }

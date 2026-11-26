@@ -76,6 +76,7 @@ describe('reading the results db', () => {
     hetzner: 'Server',
     linode: 'Instance',
     vultr: 'Instance',
+    scaleway: 'Server',
   };
   const deploy = (o: {
     run: string;
@@ -140,10 +141,10 @@ describe('reading the results db', () => {
     ...base,
     run: 'r0',
     started: '2026-11-05T02:00:00Z',
-    provider: 'vultr',
+    provider: 'scaleway',
     mode: 'k8s',
     totalS: 99,
-  }); // classless provider: standard
+  }); // a mode the provider does not run
   db.close();
 
   it('counts only passing, cold deploys since --since, by provider, mode and class', () => {
@@ -180,7 +181,7 @@ describe('reading the results db', () => {
   it('lists only combinations the provider supports, with or without data', () => {
     const built = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
     const listed = built.noData.map((d) => `${d.provider}/${d.mode}`);
-    for (const unsupported of ['vultr/k8s', 'scaleway/k8s-ha']) {
+    for (const unsupported of ['scaleway/k8s', 'scaleway/k8s-ha']) {
       expect(listed).not.toContain(unsupported);
     }
     // Linode runs all four modes, and no provider has a k8s row here, so
@@ -268,7 +269,7 @@ describe('reading the results db', () => {
 
   it('ignores a sample of an unsupported mode', () => {
     const { rows } = buildTable(readSamples(dbPath, '2026-11-05T00:00:00Z'), 'x');
-    expect(rows.some((r) => r.provider === 'vultr' && r.mode === 'k8s')).toBe(false);
+    expect(rows.some((r) => r.provider === 'scaleway' && r.mode === 'k8s')).toBe(false);
   });
 
   it('pools several dbs and counts a step that is in two of them once', async () => {
@@ -556,14 +557,14 @@ describe('carrying over the rows the stock samples do not cover', () => {
     const prev = {
       since: OLD_SINCE,
       budgets: {
-        vultr: { k8s: { vc2: row(300, 4) } },
+        scaleway: { k8s: { BASIC3: row(300, 4) } },
         hetzner: { compose: { zz9: row(300, 4) } },
         nope: { compose: { any: row(300, 4) } },
       },
     };
     const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])], prev);
     expect(carried).toEqual([]);
-    expect(table.budgets.vultr?.k8s).toBeUndefined();
+    expect(table.budgets.scaleway?.k8s).toBeUndefined();
     expect(table.budgets.hetzner.compose.zz9).toBeUndefined();
     expect(table.budgets.nope).toBeUndefined();
   });

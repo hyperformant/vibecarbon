@@ -35,6 +35,11 @@ const ROTATION = (() => {
 const step = (n: number) => ROTATION.split('\n').find((line) => line.startsWith(`${n}. `)) ?? '';
 /** Sentences, for checking what each says around a name. */
 const sentences = (text: string) => text.split(/(?<=\.)\s+(?=[A-Z`])/);
+/** Names as prose lists them: `A`, `A and B`, `A, B and C`. */
+const listed = (names: string[], conjunction: 'and' | 'or') =>
+  names.length < 2
+    ? names.join('')
+    : `${names.slice(0, -1).join(', ')} ${conjunction} ${names[names.length - 1]}`;
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -83,7 +88,10 @@ describe('docs/security.md names the variable each deploy reads', () => {
     );
     expect(ROTATION.startsWith(`#### \`${first.TOKEN_ENV}\``)).toBe(true);
     expect(ROTATION).toContain(
-      `The same steps rotate ${rest.map(([, P]) => `\`${P.TOKEN_ENV}\``).join(' and ')}`,
+      `The same steps rotate ${listed(
+        rest.map(([, P]) => `\`${P.TOKEN_ENV}\``),
+        'and',
+      )}, each in its own provider's console`,
     );
   });
 
@@ -98,8 +106,18 @@ describe('docs/security.md names the variable each deploy reads', () => {
 
   it("the other providers' step 3 is named with their own variables", () => {
     const same = sentences(ROTATION).find((s) => s.startsWith('In step 3 the variable is')) ?? '';
-    expect(same).toContain(rest.map(([, P]) => `\`${P.TOKEN_ENV}\``).join(' or '));
-    expect(same).toContain(rest.map(([, P]) => `\`${P.CLI_TOKEN_ENV}\``).join(' or '));
+    expect(same).toContain(
+      `the variable is ${listed(
+        rest.map(([, P]) => `\`${P.TOKEN_ENV}\``),
+        'or',
+      )}, read the same way`,
+    );
+    expect(same).toContain(
+      `from it is ${listed(
+        rest.map(([, P]) => `\`${P.CLI_TOKEN_ENV}\``),
+        'or',
+      )}.`,
+    );
     expect(same).toContain('sets for Pulumi');
   });
 

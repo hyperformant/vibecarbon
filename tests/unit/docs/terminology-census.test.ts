@@ -13,7 +13,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { assertTierSupported, PROVIDERS, VultrProvider } from '../../../src/lib/providers/index.js';
+import {
+  assertTierSupported,
+  PROVIDERS,
+  ScalewayProvider,
+} from '../../../src/lib/providers/index.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // User-facing surfaces — the "living docs" inventory, minus the
@@ -540,16 +544,16 @@ describe('terminology census', () => {
     }
   });
 
-  it('FEATURES.md quotes the real Vultr k8s capability-gate error byte-identically', () => {
+  it('FEATURES.md quotes the real Scaleway k8s capability-gate error byte-identically', () => {
     // Mirror-with-drift-guard: import the real provider + guard function
     // (src/lib/providers/index.js) and trigger the actual thrown error,
     // rather than duplicating its format string — so a future wording
     // change to assertTierSupported() fails this test instead of silently
-    // leaving FEATURES.md stale. (Vultr/k8s carries the example since the
-    // Linode lift removed Linode's k8s gate.)
+    // leaving FEATURES.md stale. (Scaleway/k8s carries the example since the
+    // Vultr lift removed Vultr's k8s gate.)
     let message = '';
     try {
-      assertTierSupported(VultrProvider, 'k8s');
+      assertTierSupported(ScalewayProvider, 'k8s');
     } catch (err) {
       message = (err as Error).message;
     }
