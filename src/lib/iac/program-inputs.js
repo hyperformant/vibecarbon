@@ -59,10 +59,13 @@ export function requireOperatorCidrs(config, { k8sApi = false } = {}) {
  * what REST wrote, and an up plans no firewall change.
  *
  * Keyed by stack, never by role: a failover swaps `ha.primary` and
- * `ha.standby`, and the stacks keep their names (haStacksFrom). Undefined,
+ * `ha.standby`, and the stacks keep their names (haStacksFrom). A record
+ * without stacks (one written before failover recorded them) maps the way the
+ * deploy and scale resolve it: `<env>-primary` plays primary, `<env>-standby`
+ * standby, the environment being `stackName` without its suffix. Undefined,
  * so the program declares no rule and the deploy's REST step opens it, when
- * the environment is not HA, its stacks are not on record, `stackName` is
- * neither side, or the peer has no address on record yet (the first deploy).
+ * the environment is not HA, `stackName` is neither side, or the peer has no
+ * address on record yet (the first deploy).
  *
  * @param {object|undefined} envConfig the environment's record in .vibecarbon.json
  * @param {string} stackName the Pulumi stack the program is for
@@ -71,19 +74,18 @@ export function requireOperatorCidrs(config, { k8sApi = false } = {}) {
  */
 export function replicationPeerIpFor(envConfig, stackName) {
   const sides = haStacksFrom(envConfig);
-  if (!sides?.primary.stack) return undefined;
+  if (!sides) return undefined;
+  const environment = environmentForStack(stackName);
+  const primaryStack = sides.primary.stack ?? `${environment}-primary`;
+  const standbyStack = sides.standby.stack ?? `${environment}-standby`;
   const peerRole =
-    stackName === sides.primary.stack
-      ? 'standby'
-      : stackName === sides.standby.stack
-        ? 'primary'
-        : null;
+    stackName === primaryStack ? 'standby' : stackName === standbyStack ? 'primary' : null;
   if (!peerRole) return undefined;
-  const peerIp = envConfig.ha[peerRole].dbIp;
+  const peerIp = envConfig.ha[peerRole]?.dbIp;
   if (peerIp == null || peerIp === '') return undefined;
   if (typeof peerIp !== 'string' || !isIPv4(peerIp)) {
     throw new Error(
-      `ha.${peerRole}.dbIp ${JSON.stringify(peerIp)} in environment ${environmentForStack(stackName)} ` +
+      `ha.${peerRole}.dbIp ${JSON.stringify(peerIp)} in environment ${environment} ` +
         `is not an IPv4 address (the replication peer of stack ${stackName}; set it to that ` +
         "database node's public IPv4 in .vibecarbon.json, or delete it and vibecarbon deploy " +
         'records it again)',

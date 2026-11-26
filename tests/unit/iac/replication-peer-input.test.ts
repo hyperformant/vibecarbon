@@ -138,8 +138,10 @@ describe('replicationPeerIpFor', () => {
     });
 
     it("the deploy's REST opener writes each stack's own firewall the same way", async () => {
-      // Role-named before (`<env>-<role>-firewall`): after the swap it wrote
-      // each cluster's own database address into the other's name.
+      // Role-named before (`<env>-<role>-firewall`): after the swap the
+      // primary role's lookup found `acme-prod-primary-firewall`, which is now
+      // the standby's, and wrote it the standby role's address: prod-primary's
+      // own database address, into its own firewall. Likewise for firewall 2.
       const firewalls: Record<string, { id: number; rules: Record<string, unknown>[] }> = {
         'acme-prod-primary-firewall': { id: 1, rules: [] },
         'acme-prod-standby-firewall': { id: 2, rules: [] },
@@ -166,6 +168,33 @@ describe('replicationPeerIpFor', () => {
       expect(written[1]).not.toContain(PRIMARY_DB);
       expect(written[2]).toContain(`"${PRIMARY_DB}/32"`);
       expect(written[2]).not.toContain(STANDBY_DB);
+    });
+  });
+
+  describe('a record without stacks (written before failover recorded them)', () => {
+    // The deploy and scale resolve it as `<env>-primary` primary and
+    // `<env>-standby` standby; the helper maps it the same way.
+    const unstacked = () =>
+      haEnv(
+        { region: 'nbg1', masterIp: '192.0.2.1', dbIp: PRIMARY_DB },
+        { region: 'hel1', masterIp: '192.0.2.2', dbIp: STANDBY_DB },
+      );
+
+    it("each default stack gets the other side's recorded address", () => {
+      expect(replicationPeerIpFor(unstacked(), 'prod-primary')).toBe(STANDBY_DB);
+      expect(replicationPeerIpFor(unstacked(), 'prod-standby')).toBe(PRIMARY_DB);
+    });
+
+    it('a stack of another name is neither side', () => {
+      expect(replicationPeerIpFor(unstacked(), 'prod')).toBeUndefined();
+      expect(replicationPeerIpFor(unstacked(), 'prod-blue')).toBeUndefined();
+    });
+
+    it('a hand-edited address is still refused', () => {
+      const env = haEnv({ dbIp: PRIMARY_DB }, { dbIp: '10.0.0.300' });
+      expect(() => replicationPeerIpFor(env, 'prod-primary')).toThrow(
+        /^ha\.standby\.dbIp "10\.0\.0\.300" in environment prod is not an IPv4 address \(the replication peer of stack prod-primary;/,
+      );
     });
   });
 

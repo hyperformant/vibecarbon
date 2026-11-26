@@ -601,10 +601,11 @@ function startStandbyImageCopy(ctx) {
  *
  * Each firewall is its cluster STACK's (`<project>-<stack>-firewall`, the
  * program's name), never its role's: after a failover the `<env>-primary`
- * stack plays the standby, and a role-named lookup wrote each cluster's own
- * address into the other's firewall. It is attached to all that cluster's
- * nodes incl. the database/WG node. provider.buildReplicationFirewallRules
- * emits the udp/51821 rule (Hetzner also scrubs stale TCP 5432/5433/30432
+ * stack plays the standby, so a role-named lookup paired each firewall with
+ * the wrong peer and wrote each cluster's own database address into its own
+ * firewall. It is attached to all that cluster's nodes incl. the
+ * database/WG node. provider.buildReplicationFirewallRules emits the
+ * udp/51821 rule (Hetzner also scrubs stale TCP 5432/5433/30432
  * rules from the retired public-IP TLS transport — see HetznerProvider's
  * implementation). Non-fatal per cluster (manual firewall config may
  * suffice). Idempotent — no set_rules PUT when the rules already match.

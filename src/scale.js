@@ -2569,6 +2569,27 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
       process.exit(1);
     }
   }
+  // k8s-ha: each cluster's up declares its replication rule from the other
+  // side's recorded database address (convergeClusterInfra reads it with
+  // replicationPeerIpFor). A hand-edited one would stop the standby's
+  // converge after the primary was already resized, so refuse it here,
+  // before the token prompt and any up. No up runs without infra changes.
+  if (isHA && infraChanges.length > 0) {
+    const { replicationPeerIpFor } = await import('./lib/iac/program-inputs.js');
+    const { primary, standby } = resolveHaClusterRoles({
+      environment,
+      envConfig,
+      region,
+      secondaryRegion: envConfig.secondaryRegion,
+      isHA,
+    });
+    try {
+      for (const side of [primary, standby]) replicationPeerIpFor(envConfig, side.clusterEnv);
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
   p.note(`Current ${Provider.NAME} pricing: ${link(Provider.PRICING_URL)}`, 'Cost');
 
   // 6. Require API token if infra changes (server type swap) needed

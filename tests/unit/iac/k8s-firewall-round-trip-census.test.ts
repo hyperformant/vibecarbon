@@ -361,11 +361,57 @@ function peerInputProblems(site: Site): string[] {
     const rest = site.fnText.slice(decl.index + decl[0].length);
     const open = decl.index + decl[0].length + rest.search(/[({]/);
     const value = site.fnText.slice(open, matchBracket(site.fnText, mask, open) + 1);
-    if (!/\breplicationPeerIp\s*[:,}]/.test(value)) {
+    const field = configFieldValue(mask, open, value);
+    if (field === null) {
       problems.push(`${where}: programConfig carries no replicationPeerIp`);
+    } else if (reads.length === 1 && !isTheRead(site.fnText, field, reads[0].at)) {
+      problems.push(
+        `${where}: programConfig's replicationPeerIp is not what replicationPeerIpFor( returned`,
+      );
     }
   }
   return problems;
+}
+
+/**
+ * The `replicationPeerIp` property of the config value at `open` (a code
+ * position): where its value starts, or the variable a shorthand names. Null
+ * when the config has no such property.
+ */
+function configFieldValue(
+  mask: Uint8Array,
+  open: number,
+  value: string,
+): { at: number } | { name: string } | null {
+  for (const m of value.matchAll(/(?<![\w$.])replicationPeerIp(?![\w$])\s*(:)?\s*/g)) {
+    const at = open + (m.index ?? 0);
+    if (mask[at] !== CODE) continue;
+    if (m[1]) return { at: at + m[0].length };
+    if (/^[,}]/.test(value.slice((m.index ?? 0) + m[0].length))) {
+      return { name: 'replicationPeerIp' };
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the config field carries the read's result: its value is the
+ * `replicationPeerIpFor(` call itself, or a variable the call is assigned to
+ * (`x = replicationPeerIpFor(`, `const x = ...`).
+ */
+function isTheRead(text: string, field: { at: number } | { name: string }, readAt: number) {
+  let name: string;
+  if ('at' in field) {
+    if (field.at === readAt) return true;
+    const ident = /^([A-Za-z_$][\w$]*)\s*[,}\n]/.exec(text.slice(field.at));
+    if (!ident) return false;
+    name = ident[1];
+  } else {
+    name = field.name;
+  }
+  return new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*=\\s*$`).test(
+    text.slice(0, readAt),
+  );
 }
 
 describe('every k8s program build site declares the peer from the one helper', () => {
@@ -435,5 +481,30 @@ describe('every k8s program build site declares the peer from the one helper', (
         expect(mutate(file, /\breplicationPeerIp(\s*[:,])/, 'peerIpUnused$1')).not.toEqual([]);
       },
     );
+
+    it.each([
+      [
+        'src/lib/deploy/k8s/k3s.js',
+        'the field set to something else, the read beside it',
+        /replicationPeerIp: replicationPeerIpFor\(/,
+        'replicationPeerIp: undefined, unread: replicationPeerIpFor(',
+      ],
+      [
+        'src/lib/iac/converge-cluster.js',
+        'the shorthand replaced by another value',
+        /^(\s*)replicationPeerIp,$/m,
+        '$1replicationPeerIp: undefined,',
+      ],
+      [
+        'src/lib/iac/converge-cluster.js',
+        'the read assigned to another variable',
+        /\breplicationPeerIp = replicationPeerIpFor\(/,
+        'const unread = replicationPeerIpFor(',
+      ],
+    ])('%s: %s fails', (file, _what, from, to) => {
+      expect(mutate(file, from, to)).toContainEqual(
+        expect.stringContaining("programConfig's replicationPeerIp is not what"),
+      );
+    });
   });
 });

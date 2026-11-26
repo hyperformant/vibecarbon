@@ -188,10 +188,10 @@ export function buildHetznerK8sProgram(config) {
     // every k8s-ha scale replaced both clusters' firewalls and every failover
     // the standby's, each with a new firewall id. Dropping it risks #931
     // emptying the rule set on a live firewall, and an empty Hetzner firewall
-    // fails CLOSED: per
-    // Hetzner's docs, "if you do not set any rule, all inbound traffic will
-    // automatically be blocked". That is a total inbound drop on 22/80/443/6443
-    // — full outage plus operator lockout, with no self-recovery.
+    // fails CLOSED: per Hetzner's docs, "if you do not set any rule, all
+    // inbound traffic will automatically be blocked". That is a total inbound
+    // drop on 22/80/443/6443 — full outage plus operator lockout, with no
+    // self-recovery.
     //
     // Remove this (and drop to a plain in-place Update) once #931 is closed
     // in a release we bridge. Do not "modernise" it away on the strength of
