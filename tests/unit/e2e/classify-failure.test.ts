@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { standbyDbRebuildHint } from '../../../src/lib/deploy/db-workload.js';
 import { summarizeDbPods, summarizeNotReadyNodes } from '../../../src/lib/deploy/k8s/k3s.js';
+import { awaitDbPodReady } from '../../../src/lib/deploy/k8s/readiness.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 import { DB_POD_UID, FAILED_ATTACH_MESSAGE } from '../../_shared/vultr-failed-attach-event.js';
 import {
@@ -494,6 +495,107 @@ describe("the db pod's last-warning clause never decides a classification", () =
       'deploy -restore latest',
     ]);
     for (const [, step, tail] of tails) expect(tail, step).toMatch(/^classifiableTail\(/);
+  });
+});
+
+describe("the skipped apply's last-warning clause never decides a classification", () => {
+  // The message is awaitDbPodReady's own, from its exec seam: the db pod not
+  // Ready, then (when given) one Warning event on it.
+  const skippedApplyFailure = async (warning?: { reason: string; message: string }) => {
+    let t = 0;
+    const err = await awaitDbPodReady({
+      env: {},
+      budgetMs: 3_000,
+      sleep: async () => {
+        t += 1_000;
+      },
+      nowFn: () => t,
+      exec: async (argv: string[]) =>
+        argv.includes('events')
+          ? JSON.stringify({
+              items: warning
+                ? [
+                    {
+                      type: 'Warning',
+                      involvedObject: { kind: 'Pod', name: 'db-0', uid: DB_POD_UID },
+                      lastTimestamp: '2026-11-27T05:13:47Z',
+                      ...warning,
+                    },
+                  ]
+                : [],
+            })
+          : JSON.stringify({
+              metadata: { name: 'db-0', uid: DB_POD_UID },
+              status: {
+                conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
+              },
+            }),
+    }).catch((e: Error) => e);
+    return String((err as Error).message);
+  };
+  // As a failed deploy step throws it (extractDeployFailureDetail: the Error:
+  // line, then the failed perf marker).
+  const step = (msg: string) =>
+    `Deploy exited with code 1: Error: ${msg} | [perf] deploy.k3s.full 190000ms (failed)`;
+
+  it('the FailedAttachVolume clause, and words a rule would match, classify as the message without them', async () => {
+    const today = await skippedApplyFailure();
+    expect(today).toMatch(/db-0 is not Ready \(ContainersNotReady\)$/);
+    const before = classifyFailure({ errorMessage: step(today) });
+    expect(before).toEqual({ category: 'unknown' });
+    for (const warning of [
+      { reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE },
+      { reason: 'FailedCreatePodSandBox', message: 'net/http: TLS handshake timeout' },
+      { reason: 'FailedMount', message: 'dial tcp 10.0.0.2:443: connect: ETIMEDOUT' },
+      { reason: 'BackOff', message: 'TypeError: undefined is not a function' },
+      { reason: 'R'.repeat(200), message: `rate limit exceeded ${'z'.repeat(700)}` },
+    ]) {
+      const now = await skippedApplyFailure(warning);
+      expect(now).toContain('; last warning ');
+      expect(classifyFailure({ errorMessage: step(now) }), now).toEqual(before);
+      expect(classifyFailure({ errorMessage: now, errorStack: `Error: ${now}\n    at x` })).toEqual(
+        classifyFailure({ errorMessage: today, errorStack: `Error: ${today}\n    at x` }),
+      );
+    }
+  });
+
+  it("the step's tail cut leaves the words it left before (a k8s-ha deploy, both clusters failed)", async () => {
+    // The standby's skipped apply gave up behind a primary whose db rollout
+    // failed on a dead node: the node clause is near the front, and a tail cut
+    // that kept the warning would push it out.
+    const primary =
+      'awaitDbRollout: statefulset/db did not become Ready within 900s (timed out). ' +
+      `${summarizeDbPods(`db-0 Pending <none> ${DB_POD_UID}`)}` +
+      `${summarizeNotReadyNodes('master True\nproj-db Unknown')} ${standbyDbRebuildHint('prod')}`;
+    const detail = (standby: string) =>
+      `Error: HA deploy failed — primary: ${primary} | standby: ${standby} | [perf] deploy (failed)`;
+    const today = detail(await skippedApplyFailure());
+    const now = detail(
+      await skippedApplyFailure({ reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE }),
+    );
+    expect(today.length).toBeLessThanOrEqual(1000);
+    expect(now.length).toBeGreaterThan(1000);
+    expect(classifyFailure({ errorMessage: today })).toEqual({
+      category: 'infra',
+      reason: 'k8s node NotReady (host died)',
+    });
+    // A plain tail cut would lose the primary's "never became Ready".
+    expect(classifyFailure({ errorMessage: now.slice(-1000) }).category).toBe('unknown');
+    expect(classifiableTail(now, 1000)).toBe(classifiableTail(today, 1000));
+    expect(
+      classifyFailure({
+        errorMessage: `Deploy exited with code 1: ${classifiableTail(now, 1000)}`,
+      }),
+    ).toEqual(
+      classifyFailure({
+        errorMessage: `Deploy exited with code 1: ${classifiableTail(today, 1000)}`,
+      }),
+    );
+    // Within budget the warning stays for the reader.
+    const alone = step(
+      await skippedApplyFailure({ reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE }),
+    );
+    expect(classifiableTail(alone, 1000)).toBe(alone);
   });
 });
 

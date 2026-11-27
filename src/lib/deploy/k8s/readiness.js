@@ -49,6 +49,7 @@ import {
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
 import { DB_POD, POD_EXEC_PROBE_MS, POD_EXEC_QUERY_MS } from '../db-workload.js';
+import { podWarningClause, readDbPodWarnings } from './db-pod-warning.js';
 
 /**
  * Inert probe resource: namespaced (no cluster-wide footprint), self-signed
@@ -108,12 +109,23 @@ async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal, d
     }
   }
   // The last real error, not a synthetic timeout: a genuinely broken component
-  // must fail the deploy with its own message.
+  // must fail the deploy with its own message. describeTimeout may read the
+  // cluster once more to say why (awaitDbPodReady), so it may be async.
   const seconds = Math.round(budgetMs / 1000);
-  if (describeTimeout) throw new Error(describeTimeout(seconds, lastErr));
-  throw new Error(
-    `${name} did not become serving within ${seconds}s. Last error: ${lastErr?.message ?? '(none recorded)'}`,
-  );
+  if (describeTimeout) throw new Error(await describeTimeout(seconds, lastErr));
+  throw new Error(timeoutMessage(name, seconds, lastErr));
+}
+
+/**
+ * pollCondition's own give-up message.
+ *
+ * @param {string} name
+ * @param {number} seconds
+ * @param {{message?: string}|undefined} lastErr
+ * @returns {string}
+ */
+function timeoutMessage(name, seconds, lastErr) {
+  return `${name} did not become serving within ${seconds}s. Last error: ${lastErr?.message ?? '(none recorded)'}`;
 }
 
 /**
@@ -434,6 +446,12 @@ export async function awaitPostgresAccepting({
  * and it does not prove the exec path (src/backup.js triggerBackupJob): a step
  * that rolled the db, or that execs next with no budget of its own, keeps that.
  *
+ * At its budget it names the pod's newest Warning event, as awaitDbRollout
+ * does (db-pod-warning.js): `db-0 is not Ready (ContainersNotReady; last
+ * warning FailedAttachVolume: ...)`. Read once, only when the last answer
+ * was the pod itself saying it is not Ready, through the same `exec`, and
+ * a failed or empty read leaves the message as it was.
+ *
  * @param {object} params
  * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
  * @param {string} [params.dbPod]
@@ -452,8 +470,10 @@ export async function awaitDbPodReady({
   sleep = defaultSleep,
   nowFn,
 }) {
+  const name = `db pod Ready (${dbPod})`;
+  const notReady = (state, clause = '') => `${dbPod} is not Ready (${state}${clause})`;
   await pollCondition({
-    name: `db pod Ready (${dbPod})`,
+    name,
     budgetMs,
     sleep,
     nowFn,
@@ -463,12 +483,28 @@ export async function awaitDbPodReady({
         silent: true,
         timeout: POD_EXEC_QUERY_MS,
       });
-      const ready = JSON.parse(String(out ?? '')).status?.conditions?.find(
-        (c) => c?.type === 'Ready',
-      );
+      const pod = JSON.parse(String(out ?? ''));
+      const ready = pod.status?.conditions?.find((c) => c?.type === 'Ready');
       if (ready?.status !== 'True') {
-        throw new Error(`${dbPod} is not Ready (${ready?.reason ?? ready?.status ?? 'no status'})`);
+        const state = ready?.reason ?? ready?.status ?? 'no status';
+        throw Object.assign(new Error(notReady(state)), {
+          dbPodNotReady: { state, uid: pod.metadata?.uid },
+        });
       }
+    },
+    describeTimeout: async (seconds, lastErr) => {
+      const seen = lastErr?.dbPodNotReady;
+      if (!seen) return timeoutMessage(name, seconds, lastErr);
+      const warnings = await readDbPodWarnings(env, [{ name: dbPod, uid: seen.uid }], {
+        namespace,
+        exec,
+      });
+      const clause = podWarningClause(warnings.get(dbPod));
+      return timeoutMessage(
+        name,
+        seconds,
+        clause ? { message: notReady(seen.state, clause) } : lastErr,
+      );
     },
   });
 }

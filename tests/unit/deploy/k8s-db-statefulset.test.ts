@@ -50,13 +50,14 @@ const {
   awaitDbRollout,
   buildDbManifestValues,
   dbPodListArgs,
-  dbPodWarningEventsArgs,
-  latestPodWarnings,
   renderK8sBase,
   summarizeDbPods,
   summarizeNotReadyNodes,
   walArchiveConfigSha,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
+const { dbPodWarningEventsArgs, latestPodWarnings } = await import(
+  '../../../src/lib/deploy/k8s/db-pod-warning.js'
+);
 const workload = await import('../../../src/lib/deploy/db-workload.js');
 const { standbyDbRebuildHint } = workload;
 
