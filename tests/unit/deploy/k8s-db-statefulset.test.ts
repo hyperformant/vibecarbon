@@ -26,6 +26,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
+import {
+  DB_POD_UID,
+  FAILED_ATTACH_MESSAGE,
+  failedAttachEvent,
+} from '../../_shared/vultr-failed-attach-event.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -45,6 +50,8 @@ const {
   awaitDbRollout,
   buildDbManifestValues,
   dbPodListArgs,
+  dbPodWarningEventsArgs,
+  latestPodWarnings,
   renderK8sBase,
   summarizeDbPods,
   summarizeNotReadyNodes,
@@ -431,9 +438,17 @@ describe('renderK8sBase on the shipped base', () => {
 // ---------------------------------------------------------------------------
 
 let cmdCalls: string[][] = [];
-let scripted: { match: string; stdout?: string; stderr?: string; exitCode?: number }[] = [];
+let scripted: {
+  match: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  // A child that never exits by itself: only kill() closes it.
+  hang?: boolean;
+}[] = [];
 
-function fakeChild({ exitCode = 0, stdout = '', stderr = '' } = {}) {
+function fakeChild({ exitCode = 0, stdout = '', stderr = '', hang = false } = {}) {
+  let onClose: ((...a: unknown[]) => void) | undefined;
   const child: Record<string, unknown> = {
     stdout: {
       on(ev: string, cb: (chunk: unknown) => void) {
@@ -446,10 +461,13 @@ function fakeChild({ exitCode = 0, stdout = '', stderr = '' } = {}) {
       },
     },
     stdin: { write() {}, end() {} },
-    kill() {},
+    kill(signal = 'SIGTERM') {
+      if (hang) setTimeout(() => onClose?.(null, signal), 0);
+    },
     unref() {},
     on(ev: string, cb: (...a: unknown[]) => void) {
-      if (ev === 'exit' || ev === 'close') setTimeout(() => cb(exitCode), 0);
+      if (ev === 'close' && hang) onClose = cb;
+      else if (ev === 'exit' || ev === 'close') setTimeout(() => cb(exitCode), 0);
       return child;
     },
   };
@@ -468,6 +486,7 @@ beforeEach(() => {
       stdout: hit?.stdout ?? '',
       stderr: hit?.stderr ?? '',
       exitCode: hit?.exitCode ?? 0,
+      hang: hit?.hang ?? false,
     }) as unknown as ReturnType<typeof spawn>;
   }) as typeof spawn);
 });
@@ -619,6 +638,221 @@ describe('summarizeDbPods / summarizeNotReadyNodes', () => {
   it('is silent about nodes on a healthy cluster, names the dead ones otherwise', () => {
     expect(summarizeNotReadyNodes('master True\nworker True')).toBe('');
     expect(summarizeNotReadyNodes('n1 <none>')).toMatch(/n1 \(Ready=<none>\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The db rollout failure names each not-Ready db pod's newest Warning event
+// (perf run 45940611622, vultr/k8s: "db-0 (Pending)" was all a deploy said,
+// while the pod's events said Vultr refused to attach its volume)
+// ---------------------------------------------------------------------------
+
+describe('the db rollout failure names the db pod last warning', () => {
+  const PENDING = `db-0   Pending   <none>   ${DB_POD_UID}\n`;
+  const TODAY = 'The db pod never became Ready: db-0 (Pending).';
+  const eventsOf = (...items: Doc[]) => JSON.stringify({ kind: 'List', items });
+  const eventCalls = () => cmdCalls.filter((a) => a.includes('events'));
+  const failWith = (events: { stdout?: string; exitCode?: number; stderr?: string }) => {
+    scripted = [
+      {
+        match: 'rollout status',
+        exitCode: 1,
+        stderr: 'error: timed out waiting for the condition',
+      },
+      { match: 'get pods', stdout: PENDING },
+      { match: 'get events', ...events },
+      { match: 'get nodes', stdout: 'master True\nproj-db True\n' },
+    ];
+  };
+  const message = async () =>
+    String(((await awaitDbRollout({ env, timeoutS: 5 }).catch((e) => e)) as Error).message);
+
+  it('quotes the real FailedAttachVolume event in db-0 entry, from one bounded read', async () => {
+    failWith({ stdout: eventsOf(failedAttachEvent()) });
+    const msg = await message();
+    expect(msg).toMatch(/^awaitDbRollout: statefulset\/db did not become Ready within 5s /);
+    expect(msg).toContain(
+      `The db pod never became Ready: db-0 (Pending; last warning FailedAttachVolume: ${FAILED_ATTACH_MESSAGE}).`,
+    );
+    expect(eventCalls()).toEqual([dbPodWarningEventsArgs()]);
+    expect(dbPodWarningEventsArgs()).toContain('--request-timeout=10s');
+    expect(dbPodWarningEventsArgs().join(' ')).toContain(
+      '--field-selector involvedObject.kind=Pod,type=Warning',
+    );
+    // The pod list carries the uid the events are matched on.
+    expect(dbPodListArgs().join(' ')).toContain('UID:.metadata.uid');
+  });
+
+  it('several warnings: the newest of the current db-0 wins, by the cluster clock', () => {
+    const pods = [{ name: 'db-0', uid: DB_POD_UID }];
+    const older = failedAttachEvent({
+      reason: 'FailedScheduling',
+      message: '0/3 nodes are available: 1 node(s) had untolerated taint.',
+      lastTimestamp: '2026-11-27T04:58:30Z',
+    });
+    // Each of these is newer than the FailedAttachVolume event, and none is
+    // the current db-0's warning.
+    const normal = failedAttachEvent({
+      type: 'Normal',
+      reason: 'Scheduled',
+      lastTimestamp: '2026-11-27T05:14:00Z',
+    });
+    const replaced = failedAttachEvent({
+      reason: 'FailedMount',
+      involvedObject: { kind: 'Pod', name: 'db-0', uid: 'uid-of-the-db-0-before' },
+      lastTimestamp: '2026-11-27T05:15:00Z',
+    });
+    const appPod = failedAttachEvent({
+      reason: 'Unhealthy',
+      involvedObject: { kind: 'Pod', name: 'app-7d9f-abcde', uid: 'uid-app' },
+      lastTimestamp: '2026-11-27T05:16:00Z',
+    });
+    const blank = failedAttachEvent({
+      reason: 'FailedMount',
+      message: '  ',
+      lastTimestamp: '2026-11-27T05:17:00Z',
+    });
+    // The winner is neither the first nor the last item.
+    const picked = latestPodWarnings(
+      eventsOf(normal, failedAttachEvent(), replaced, appPod, blank, older),
+      pods,
+    );
+    expect(picked.get('db-0')).toEqual({
+      reason: 'FailedAttachVolume',
+      message: FAILED_ATTACH_MESSAGE,
+    });
+    expect([...picked.keys()]).toEqual(['db-0']);
+
+    // The events.k8s.io shape (the scheduler's): eventTime is when the
+    // series began, series.lastObservedTime its latest sighting.
+    const series = failedAttachEvent({
+      reason: 'FailedScheduling',
+      message: '0/3 nodes are available: 3 node(s) did not match the node selector.',
+      firstTimestamp: null,
+      lastTimestamp: null,
+      eventTime: '2026-11-27T04:50:00.000000Z',
+      series: { count: 30, lastObservedTime: '2026-11-27T05:20:00.000000Z' },
+    });
+    expect(latestPodWarnings(eventsOf(failedAttachEvent(), series), pods).get('db-0')?.reason).toBe(
+      'FailedScheduling',
+    );
+    // A pod whose uid the list did not give matches on its name alone.
+    expect(latestPodWarnings(eventsOf(replaced), [{ name: 'db-0' }]).get('db-0')?.reason).toBe(
+      'FailedMount',
+    );
+  });
+
+  it('no warning, an empty or unreadable answer, or a failed read: the message is today, after one read', async () => {
+    for (const events of [
+      { stdout: eventsOf() },
+      { stdout: '' },
+      { stdout: 'error: not json' },
+      { stdout: '{"kind":"List"}' },
+      {
+        exitCode: 1,
+        stderr: 'error: the server was unable to return a response in the time allotted',
+      },
+    ]) {
+      cmdCalls = [];
+      failWith(events);
+      const msg = await message();
+      expect(msg.endsWith(` ${TODAY}`), `${JSON.stringify(events)}: ${msg}`).toBe(true);
+      expect(eventCalls()).toHaveLength(1);
+    }
+    expect(summarizeDbPods(PENDING, new Map())).toBe(TODAY);
+    // Unreadable input is no warning, never an exception.
+    const pods = [{ name: 'db-0', uid: DB_POD_UID }];
+    for (const out of ['', 'error: not json', '{"kind":"List"}', 'null']) {
+      expect(latestPodWarnings(out, pods).size, out).toBe(0);
+    }
+  });
+
+  it('a hostile or long message is printable, one line, free of parentheses and at most 300 characters', () => {
+    const summary = summarizeDbPods(
+      PENDING,
+      new Map([
+        [
+          'db-0',
+          {
+            reason: 'Failed\u001b[2KMount',
+            message:
+              'line one\n\tline\r\ntwo \u001b]52;c;ZXZpbA==\u0007 (x15) \u202eevil\u200b ' +
+              'y'.repeat(600),
+          },
+        ],
+      ]),
+    );
+    const clause = summary.match(/^The db pod never became Ready: db-0 \(Pending; (.*)\)\.$/)?.[1];
+    expect(clause, summary).toBeDefined();
+    const [, reason, text] = String(clause).match(/^last warning (\S+): (.*)$/) ?? [];
+    expect(reason).toBe('Failed\uFFFD[2KMount');
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+    expect(summary).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202e\u200b]/);
+    expect(String(clause)).not.toMatch(/[()]/);
+    expect(text).toMatch(
+      /^line one line two \uFFFD\]52;c;ZXZpbA==\uFFFD \[x15\] \uFFFDevil\uFFFD y+\.\.\.$/,
+    );
+    expect(Array.from(text)).toHaveLength(300);
+    // Short text is not cut, only trimmed.
+    expect(
+      summarizeDbPods(PENDING, new Map([['db-0', { reason: 'BackOff', message: '\n short \n' }]])),
+    ).toBe('The db pod never became Ready: db-0 (Pending; last warning BackOff: short).');
+    // The cut counts code points: it never splits a character in two.
+    const wide = summarizeDbPods(
+      PENDING,
+      new Map([['db-0', { reason: 'R'.repeat(200), message: '\u{1F600}'.repeat(400) }]]),
+    );
+    expect(wide).toBe(
+      `The db pod never became Ready: db-0 (Pending; last warning ${'R'.repeat(61)}...: ` +
+        `${'\u{1F600}'.repeat(297)}...).`,
+    );
+  });
+
+  it('a healthy deploy, a Ready pod or no pod at all reads no events', async () => {
+    await expect(awaitDbRollout({ env })).resolves.toBeUndefined();
+    expect(eventCalls()).toEqual([]);
+    for (const pods of [`db-0   Running   True   ${DB_POD_UID}\n`, '']) {
+      scripted = [
+        { match: 'rollout status', exitCode: 1, stderr: 'error: timed out' },
+        { match: 'get pods', stdout: pods },
+        { match: 'get events', stdout: eventsOf(failedAttachEvent()) },
+      ];
+      const msg = await message();
+      expect(msg).not.toContain('last warning');
+      expect(eventCalls()).toEqual([]);
+    }
+  });
+
+  it('a hung events read is killed at its bound, and the message is today', async () => {
+    vi.useFakeTimers();
+    try {
+      scripted = [
+        { match: 'get pods', stdout: PENDING },
+        { match: 'get events', hang: true },
+      ];
+      let settled = false;
+      const done = awaitDbRollout({
+        env,
+        timeoutS: 5,
+        waitRollout: async () => {
+          throw new Error('error: timed out waiting for the condition');
+        },
+      })
+        .catch((e: Error) => e)
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(settled).toBe(false);
+      expect(cmdCalls.some((a) => a.includes('nodes'))).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBe(true);
+      const msg = String(((await done) as Error).message);
+      expect(msg.endsWith(` ${TODAY}`), msg).toBe(true);
+      expect(eventCalls()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

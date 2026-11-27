@@ -111,7 +111,11 @@ import {
   readClusterTlsInventory,
 } from '../checks/tls-reuse.js';
 import type { E2EDb } from '../metrics/db.js';
-import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
+import {
+  classifiableTail,
+  classifyFailure,
+  rollUpScenarioCategory,
+} from '../utils/classify-failure.js';
 import {
   DESTROY_EXIT_LEAKED,
   extractLeakReport,
@@ -2683,7 +2687,9 @@ EOF`;
               if (stderrClean) {
                 console.warn(`${tag} deploy stderr tail: ${stderrClean.slice(-1500)}`);
               }
-              throw new Error(`Deploy exited with code ${result.exitCode}: ${detail.slice(-1000)}`);
+              throw new Error(
+                `Deploy exited with code ${result.exitCode}: ${classifiableTail(detail, 1000)}`,
+              );
             }
 
             // On success, surface the [k8s-deploy] diag lines that the deploy emits
@@ -2866,7 +2872,7 @@ EOF`;
               if (result.exitCode !== 0) {
                 const stderrClean = stripAnsi(result.stderr || '').trim();
                 throw new Error(
-                  `Warm deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
+                  `Warm deploy exited with code ${result.exitCode}: ${classifiableTail(stderrClean, 1000)}`,
                 );
               }
             };
@@ -2939,7 +2945,7 @@ EOF`;
             if (result.exitCode !== 0) {
               const stderrClean = stripAnsi(result.stderr || '').trim();
               throw new Error(
-                `Warm redeploy (with change) exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
+                `Warm redeploy (with change) exited with code ${result.exitCode}: ${classifiableTail(stderrClean, 1000)}`,
               );
             }
 
@@ -3586,7 +3592,7 @@ EOF`;
             if (deployResult.exitCode !== 0) {
               const detail = extractDeployFailureDetail(deployResult.stdout, deployResult.stderr);
               throw new Error(
-                `deploy -restore latest exited with code ${deployResult.exitCode}: ${detail.slice(-1000)}`,
+                `deploy -restore latest exited with code ${deployResult.exitCode}: ${classifiableTail(detail, 1000)}`,
               );
             }
             serverIps = getServerIps(config.projectDir, config.envPrefix);
@@ -3642,7 +3648,7 @@ EOF`;
               console.warn(`${tag} restore re-deploy stderr tail: ${dStderr.slice(-1500)}`);
             }
             throw new Error(
-              `Re-deploy before restore exited with code ${deployResult.exitCode}: ${detail.slice(-1000)}`,
+              `Re-deploy before restore exited with code ${deployResult.exitCode}: ${classifiableTail(detail, 1000)}`,
             );
           }
 
@@ -4089,7 +4095,7 @@ EOF`;
               if (result.exitCode !== 0) {
                 const stderrClean = stripAnsi(result.stderr || '').trim();
                 throw new Error(
-                  `Reconverge deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
+                  `Reconverge deploy exited with code ${result.exitCode}: ${classifiableTail(stderrClean, 1000)}`,
                 );
               }
             });

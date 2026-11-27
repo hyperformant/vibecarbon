@@ -85,6 +85,7 @@ import { readOperatorVar } from '../../operator-env.js';
 import { writeOperatorRulesAfterUp } from '../../operator-ip.js';
 import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync } from '../../perf.js';
+import { printable } from '../../printable.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { runWithRetry } from '../../retry.js';
@@ -3151,6 +3152,8 @@ export async function assertDbStorageClass({ storageClass, namespace = 'vibecarb
  * any add-ons, and the wait was not on those). PHASE and the READY condition
  * are both read because `rollout status` gates on READY, not on phase — a
  * Running-but-not-Ready pod times the wait out exactly like a Pending one.
+ * UID ties each pod to its own events (latestPodWarnings): a db-0 that an
+ * earlier deploy replaced leaves its events behind under the same name.
  *
  * @returns {string[]}
  */
@@ -3164,9 +3167,137 @@ export function dbPodListArgs() {
     '-l',
     DB_POD_SELECTOR,
     '-o',
-    'custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status',
+    'custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status,UID:.metadata.uid',
     '--no-headers',
   ];
+}
+
+/**
+ * `dbPodListArgs`' output, one entry per pod. Pure.
+ *
+ * @param {string} raw - `kubectl get pods … --no-headers` stdout
+ * @returns {{name: string, phase: string, ready: boolean, uid: string}[]}
+ */
+function parseDbPods(raw) {
+  return String(raw ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      // custom-columns pads with spaces and writes `<none>` for a condition
+      // that does not exist yet (an unscheduled pod has no Ready condition).
+      const [name, phase = 'Unknown', ready = '<none>', uid = '<none>'] = line.split(/\s+/);
+      return { name, phase, ready: ready === 'True', uid: uid === '<none>' ? '' : uid };
+    });
+}
+
+/**
+ * The one read behind the db rollout failure's "last warning" clause: every
+ * Warning event on a pod in the namespace, as JSON. Field selectors cannot OR,
+ * so naming each not-Ready pod would take one read per pod; this is one read
+ * under one bound however many there are, and latestPodWarnings picks the db
+ * pods out of it by name and uid. Warnings only, because a Normal event
+ * (Scheduled, Pulled, Started) explains nothing about a pod that is stuck.
+ * `--request-timeout` bounds kubectl's own call; readDbPodWarnings kills the
+ * process a little later, should kubectl hang anywhere else.
+ *
+ * @returns {string[]}
+ */
+export function dbPodWarningEventsArgs() {
+  return [
+    'kubectl',
+    '-n',
+    'vibecarbon',
+    'get',
+    'events',
+    '--field-selector',
+    'involvedObject.kind=Pod,type=Warning',
+    '-o',
+    'json',
+    '--request-timeout=10s',
+  ];
+}
+
+/** readDbPodWarnings' process bound: past kubectl's own 10 s request timeout. */
+const DB_POD_WARNING_READ_MS = 15_000;
+
+/**
+ * The newest Warning event of each of `pods`, from dbPodWarningEventsArgs'
+ * JSON, keyed by pod name. Pure. An event is a pod's when it names the pod
+ * and, when the pod's uid is known, carries that uid, so the events a replaced
+ * db-0 left behind never speak for the current one. Newest by the cluster's
+ * own clock, never this machine's: the events.k8s.io series' last sighting,
+ * then lastTimestamp (core/v1 bumps it on every repeat, so a warning that has
+ * fired for 15 minutes reads as fresh), then eventTime, then creation. An
+ * event with no message says nothing and is skipped; unreadable JSON is no
+ * warning at all. The text is returned as the cluster sent it: summarizeDbPods
+ * makes it safe to print.
+ *
+ * @param {string} eventsJson
+ * @param {{name: string, uid?: string}[]} pods
+ * @returns {Map<string, {reason: string, message: string}>}
+ */
+export function latestPodWarnings(eventsJson, pods) {
+  const latest = new Map();
+  const latestAt = new Map();
+  let items;
+  try {
+    items = JSON.parse(String(eventsJson ?? ''))?.items;
+  } catch {
+    return latest;
+  }
+  if (!Array.isArray(items)) return latest;
+  for (const ev of items) {
+    if (ev?.type !== 'Warning' || !String(ev.message ?? '').trim()) continue;
+    const obj = ev.involvedObject ?? {};
+    const pod = pods.find((p) => p.name === obj.name && (!p.uid || p.uid === obj.uid));
+    if (!pod) continue;
+    const t = Date.parse(
+      ev.series?.lastObservedTime ??
+        ev.lastTimestamp ??
+        ev.eventTime ??
+        ev.metadata?.creationTimestamp ??
+        '',
+    );
+    const at = Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+    if (latestAt.get(pod.name) > at) continue;
+    latestAt.set(pod.name, at);
+    latest.set(pod.name, { reason: String(ev.reason ?? ''), message: String(ev.message) });
+  }
+  return latest;
+}
+
+/** The longest event message the db rollout failure quotes, in characters. */
+const POD_WARNING_MESSAGE_MAX = 300;
+/** Event reasons are one CamelCase word; anything longer is cut. */
+const POD_WARNING_REASON_MAX = 64;
+
+/**
+ * Event text from the cluster, made safe for one line of an error message.
+ *
+ * The cluster is a server the CLI logs in to, and this text reaches the
+ * operator's terminal through cli.js's `Error:` line as it is. Whitespace
+ * runs, newlines included, become one space; then printable() replaces the
+ * other C0/C1 controls (the escape sequences' way in), and the format
+ * characters printable() leaves (bidi overrides, zero-width marks, which can
+ * make a line read as something else) are replaced the same way.
+ * Parentheses become brackets: the clause sits inside the pod's own
+ * parentheses, and tests/e2e/utils/classify-failure.ts relies on that clause
+ * holding none to find where it ends. Cut to `max` characters, counted as
+ * code points so a cut never splits one.
+ *
+ * @param {unknown} value
+ * @param {number} max
+ * @returns {string}
+ */
+function podWarningText(value, max) {
+  const flat = printable(String(value ?? '').replace(/\s+/g, ' '))
+    .replace(/\p{Cf}/gu, '\uFFFD')
+    .replace(/\(/g, '[')
+    .replace(/\)/g, ']')
+    .trim();
+  const chars = Array.from(flat);
+  return chars.length <= max ? flat : `${chars.slice(0, max - 3).join('')}...`;
 }
 
 /**
@@ -3175,20 +3306,19 @@ export function dbPodListArgs() {
  * tests/e2e/utils/classify-failure.ts pairs it with summarizeNotReadyNodes'
  * clause to tell a dead host from our own bug.
  *
+ * `warnings` (latestPodWarnings) adds each not-Ready pod's newest Warning
+ * event to its entry, `db-0 (Pending; last warning FailedAttachVolume: …)`,
+ * because the phase alone never says why (perf run 45940611622, vultr/k8s: a
+ * volume Vultr refused to attach left only "db-0 (Pending)"). A pod with no
+ * warning keeps its entry exactly as before. classify-failure.ts masks the
+ * clause, so the cluster's words never decide how a run is classified.
+ *
  * @param {string} raw - `kubectl get pods … --no-headers` stdout
+ * @param {Map<string, {reason: string, message: string}>} [warnings]
  * @returns {string}
  */
-export function summarizeDbPods(raw) {
-  const pods = String(raw ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      // custom-columns pads with spaces and writes `<none>` for a condition
-      // that does not exist yet (an unscheduled pod has no Ready condition).
-      const [name, phase = 'Unknown', ready = '<none>'] = line.split(/\s+/);
-      return { name, phase, ready: ready === 'True' };
-    });
+export function summarizeDbPods(raw, warnings = new Map()) {
+  const pods = parseDbPods(raw);
 
   if (pods.length === 0) {
     return `No db pod exists in the namespace; the ${DB_STATEFULSET} StatefulSet never created one.`;
@@ -3203,8 +3333,40 @@ export function summarizeDbPods(raw) {
     );
   }
 
-  const named = notReady.map((p) => `${p.name} (${p.phase})`);
+  const named = notReady.map((p) => {
+    const warning = warnings.get(p.name);
+    if (!warning) return `${p.name} (${p.phase})`;
+    const reason = podWarningText(warning.reason, POD_WARNING_REASON_MAX);
+    const message = podWarningText(warning.message, POD_WARNING_MESSAGE_MAX);
+    return `${p.name} (${p.phase}; last warning${reason ? ` ${reason}` : ''}: ${message})`;
+  });
   return `The db pod never became Ready: ${named.join(', ')}.`;
+}
+
+/**
+ * The newest Warning event of each not-Ready db pod, for summarizeDbPods. One
+ * read, bounded (dbPodWarningEventsArgs), never retried, and only when some
+ * pod is not Ready: the read explains a stuck pod and has nothing to say
+ * otherwise. Never throws: a failed, hung or empty read is no warning, and
+ * the pod summary stays exactly what it was without this read.
+ *
+ * @param {NodeJS.ProcessEnv} env - carries KUBECONFIG
+ * @param {{name: string, ready: boolean, uid: string}[]} pods
+ * @returns {Promise<Map<string, {reason: string, message: string}>>}
+ */
+async function readDbPodWarnings(env, pods) {
+  const notReady = pods.filter((p) => !p.ready);
+  if (notReady.length === 0) return new Map();
+  try {
+    const out = await runCommandAsync(dbPodWarningEventsArgs(), {
+      env,
+      silent: true,
+      timeout: DB_POD_WARNING_READ_MS,
+    });
+    return latestPodWarnings(out, notReady);
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -3273,7 +3435,7 @@ export function summarizeNotReadyNodes(raw) {
 async function describeDbPods(env) {
   try {
     const raw = await runCommandAsync(dbPodListArgs(), { env, silent: true });
-    const podSummary = summarizeDbPods(raw);
+    const podSummary = summarizeDbPods(raw, await readDbPodWarnings(env, parseDbPods(raw)));
     // Node readiness rides along, best-effort: a stuck pod on a dead node
     // is an infrastructure event, and only the node line makes it read as
     // one (see summarizeNotReadyNodes). A failure to list nodes never
