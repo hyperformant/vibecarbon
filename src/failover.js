@@ -67,6 +67,7 @@ import {
   NODE_JOIN_POLL_MS,
 } from './lib/deploy/k8s/node-join.js';
 import { clusterProbe } from './lib/deploy/k8s/node-join-probe.js';
+import { nodeRead, nodeReadOverSsh } from './lib/deploy/k8s/node-join-read.js';
 import { WORKER_NODE_SELECTOR } from './lib/deploy/k8s/node-roles.js';
 import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
@@ -127,6 +128,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
+import { buildHostKeyOpts } from './lib/host-keys.js';
 import {
   asStateUndecryptableError,
   isStackOpenInterrupted,
@@ -1652,6 +1654,9 @@ async function _provisionStandbyCapacityImpl({
           : undefined,
       // A worker that never registered, probed from the standby's k3s server
       // (node-join-probe.js), over the same ssh as the worker wait's kubectl.
+      // One whose private address answered port 22 is then read from the
+      // inside through that server (node-join-read.js), with the standby
+      // stack's k3s token redacted from whatever it prints.
       probeFromCluster: !deps.converge
         ? clusterProbe({
             providerName: Provider.NAME,
@@ -1661,6 +1666,14 @@ async function _provisionStandbyCapacityImpl({
                 timeout: timeoutMs,
                 transportRetry: false,
               }),
+            readNode: nodeRead({
+              run: nodeReadOverSsh({
+                sshKeyPath: sshKeyPathFor(envName),
+                hostKeyOpts: buildHostKeyOpts(sshKeyPathFor(envName)),
+                masterIp: servers.standby.ip,
+              }),
+              secrets: [up?.outputs?.k3sToken],
+            }),
           })
         : undefined,
     });

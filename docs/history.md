@@ -2108,7 +2108,7 @@ its S3 object stay for good.
 dropping one fails) and the restored cases in
 `tests/unit/e2e/stack-probes.test.ts`.
 
-#### 2026-11-27: The e2e failure bundle records the provider's view of every server
+#### 2026-11-27: The e2e failure bundle records the provider's view of every server (#609)
 
 The failure diagnostics of an e2e step now include a section `provider view:
 servers of <project>` on every mode and provider. It lists the scenario's
@@ -2137,6 +2137,55 @@ the provider says at the moment of failure.
 
 **Guard:** `tests/unit/e2e/provider-view.test.ts`, which also runs the section
 against every provider in the e2e registry.
+
+#### 2026-11-27: A node that never joins but answers on its private address is read from the inside (#610)
+
+At the join deadline, each server that never registered and whose private
+address answered port 22 `open` in the probe from its k3s server (#606) is
+read from the inside: one ssh to that private address, hopping through the
+k3s server, bounded at 25 s. It reads the boot marks, `cloud-init status` and
+its errors, each interface's IPv4 addresses and the default routes,
+networkctl's state, a 3 s TCP connect to 1.1.1.1:443, a lookup of get.k3s.io,
+an HTTPS GET of https://get.k3s.io, whether the metadata service answers, and
+at most 10 failure lines of cloud-init's output log. Each fact is a
+`[node-join] on the node itself:` log line, and the node's failure line ends
+with one more sentence: no interface holds the public address, there is no
+default route, the route leaves by the wrong interface, the network is set up
+and its traffic goes unanswered, or outbound works and the boot stopped at a
+named mark with its failure line. Both the deploy and the failover's worker
+wait read.
+
+**Why:** Vultr run 45994716507 (14:21Z), the first with #606's probe: the
+k8s-ha standby's database node answered `ping 2/2, port 22 open` on
+10.159.218.4 from the k3s server and nothing on 66.42.120.170, the fourth
+database node lost while its provider said it was running (Hetzner fsn1
+2026-11-06, Hetzner nbg1 2026-11-27, Vultr ord in runs 45956890734 and
+45994716507). From outside, a public interface with no address or route, a
+provider network that passes nothing, and a boot script that stopped for its
+own reason look the same, and the rig is destroyed at teardown.
+
+**Do not undo:** do not hop with `-J`: the command line's `-i` and `-o`
+options never reach a ProxyJump hop, so the hop is a ProxyCommand running the
+command's own ssh to the k3s server, pinned in the env's known_hosts. Do not
+pin the node's private address there, or multiplex the inner hop: VPC
+addresses repeat across clusters (10.159.218.4 was two servers in that run),
+so a pinned key would refuse a later read and a shared mux socket could reach
+another cluster's server. Taking the node's key on first sight is acceptable
+only while the read sends nothing secret and runs only read-only commands.
+Do not log or parse anything it prints before `redactNodeRead`: the cluster's
+k3s token, `K10<hex>` shapes and credential assignments are replaced and every
+line that says `password` is dropped, and the run's stdout is marked secret so
+a failed run is never echoed raw in CI. Do not read a node whose probe result
+is missing or anything but `open`, and do not add a retry, a reboot or a
+replacement: it is diagnosis, and it never throws into the failure it
+describes.
+
+**Guard:** `tests/unit/deploy/node-join-read.test.ts` (the script, run only
+under stub `ip`, `curl`, `getent`, `timeout`, `cloud-init` and `networkctl`;
+the ProxyCommand split by a real shell into the outer hop's argv; the
+redaction; each sentence from its facts; the bound; and a NodesNeverJoinedError
+unchanged by a read that fails) and `tests/unit/deploy/node-join-census.test.ts`
+(every probe passes the read, built with the secrets it redacts).
 
 ## Added and later removed
 

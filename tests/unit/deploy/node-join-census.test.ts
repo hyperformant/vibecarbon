@@ -32,6 +32,11 @@
  *     every call of the failover's worker wait hands it one (Vultr run
  *     45956890734: the provider said running while the server never
  *     answered, and nothing told a dead server from a broken network);
+ *   - every call of the probe (clusterProbe) passes `readNode`, the read
+ *     from the inside (node-join-read.js), built by nodeRead with the
+ *     `secrets` it redacts, or is in READ_EXEMPT with why (Vultr run
+ *     45994716507: the node answered port 22 on its private address and
+ *     nothing on its public one, and only the guest could say why);
  *   - every provider's view carries its own public and private address for
  *     the server (`publicIp`, `privateIp`), driven by a fixture of that
  *     provider's real response (VIEW_FIXTURES), so the probe has the private
@@ -572,6 +577,44 @@ function workerWaitCalls(files: Parsed[]): Array<{ key: string; passes: boolean 
   return out;
 }
 
+/**
+ * clusterProbe calls that may go without `readNode`, each with why. Empty:
+ * the deploy and the failover both read from the inside.
+ */
+const READ_EXEMPT: Record<string, string> = {};
+
+/**
+ * Every clusterProbe call without `readNode`, or whose `readNode` is not a
+ * nodeRead call that names the `secrets` it redacts, unless `exempt` names
+ * its function.
+ */
+function readFindings(files: Parsed[], exempt: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const { path, ast } of files) {
+    walkAst(ast, (n, ancestors) => {
+      if (n.type !== 'CallExpression' || calleeName(n) !== 'clusterProbe') return;
+      const { key } = enclosing(path, ancestors);
+      if (Object.hasOwn(exempt, key)) return;
+      const arg = n.arguments[0];
+      const prop =
+        arg?.type === 'ObjectExpression'
+          ? arg.properties.find((p: Node) => p.key?.name === 'readNode')
+          : undefined;
+      if (!prop) {
+        out.push(`${key} calls clusterProbe without readNode`);
+        return;
+      }
+      const value = prop.value;
+      if (value?.type !== 'CallExpression' || calleeName(value) !== 'nodeRead') {
+        out.push(`${key} passes clusterProbe a readNode that is not a nodeRead call`);
+      } else if (!optionKeys(value, 0)?.includes('secrets')) {
+        out.push(`${key} builds readNode without the secrets it redacts`);
+      }
+    });
+  }
+  return out;
+}
+
 /** Parse a synthetic source as if it were a file under src/. */
 const fake = (path: string, code: string): Parsed[] => [{ path, ast: parseAst(code) }];
 
@@ -653,6 +696,21 @@ describe('every wait that needs a node other than the k3s server checks the node
   it('each awaitNodesJoined call passes the probe from the k3s server, or says why not', () => {
     expect(probeFindings(FILES, PROBE_EXEMPT)).toEqual([]);
     for (const why of Object.values(PROBE_EXEMPT)) expect(why.length).toBeGreaterThan(20);
+  });
+
+  // A node whose private address answers port 22 is read from the inside,
+  // through its k3s server (node-join-read.js, Vultr run 45994716507): every
+  // probe passes the read, with the token it redacts, or says why not.
+  it('each probe from the k3s server passes the read from the inside, with its secrets, or says why not', () => {
+    let calls = 0;
+    for (const { ast } of FILES) {
+      walkAst(ast, (n) => {
+        if (n.type === 'CallExpression' && calleeName(n) === 'clusterProbe') calls++;
+      });
+    }
+    expect(calls, 'no call of clusterProbe found').toBeGreaterThanOrEqual(2);
+    expect(readFindings(FILES, READ_EXEMPT)).toEqual([]);
+    for (const why of Object.values(READ_EXEMPT)) expect(why.length).toBeGreaterThan(20);
   });
 
   it("each call of the failover's worker wait hands it the probe", () => {
@@ -741,6 +799,48 @@ describe('every wait that needs a node other than the k3s server checks the node
           ),
         ),
       ).toEqual([{ key: 'lib/new.js:grow', passes: false }]);
+    });
+
+    it('a probe without the read, or with one that redacts nothing, is flagged', () => {
+      expect(
+        readFindings(
+          fake('lib/new.js', 'async function grow() { const p = clusterProbe({ run }); }'),
+          {},
+        ),
+      ).toEqual(['lib/new.js:grow calls clusterProbe without readNode']);
+      expect(
+        readFindings(
+          fake('lib/new.js', 'async function grow() { const p = clusterProbe({ run }); }'),
+          { 'lib/new.js:grow': 'a reason long enough to read as one' },
+        ),
+      ).toEqual([]);
+      expect(
+        readFindings(
+          fake(
+            'lib/new.js',
+            'async function grow() { const p = clusterProbe({ run, readNode: myRead }); }',
+          ),
+          {},
+        ),
+      ).toEqual(['lib/new.js:grow passes clusterProbe a readNode that is not a nodeRead call']);
+      expect(
+        readFindings(
+          fake(
+            'lib/new.js',
+            'async function grow() { const p = clusterProbe({ run, readNode: nodeRead({ run }) }); }',
+          ),
+          {},
+        ),
+      ).toEqual(['lib/new.js:grow builds readNode without the secrets it redacts']);
+      expect(
+        readFindings(
+          fake(
+            'lib/new.js',
+            'async function grow() { const p = clusterProbe({ run, readNode: nodeRead({ run, secrets: [t] }) }); }',
+          ),
+          {},
+        ),
+      ).toEqual([]);
     });
 
     it('a new node-list poll is found', () => {

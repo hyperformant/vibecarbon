@@ -33,6 +33,12 @@
  * public one means nothing. tests/unit/deploy/node-join-probe-firewall-census.test.ts
  * runs every k8s program and fails when its firewall stops saying so.
  *
+ * A server whose private address answers port 22 is up, and the probe
+ * cannot say why it never joined: its public network, or its boot. So with
+ * `readNode` it is then read from the inside, through the k3s server
+ * (node-join-read.js, Vultr run 45994716507), and that sentence follows this
+ * one.
+ *
  * Diagnosis only: one ssh to the k3s server, bounded at
  * CLUSTER_PROBE_BUDGET_MS, never retried, and it never throws into the
  * failure it describes. Nothing is rebooted or replaced (no retry ladder).
@@ -265,15 +271,47 @@ export function probeSentence({ priv, pub, providerName, privateAddress }) {
 
 /**
  * Why a run failed, in one line: its bound, or ssh's own words (the first
- * stderr line that is not a warning), never its argv.
+ * stderr line that is not a warning), never its argv. Also the read from the
+ * inside's (node-join-read.js).
+ * @param {any} err
+ * @param {number} budgetS
+ * @returns {string}
  */
-function whyNot(err, budgetS) {
+export function whyRunFailed(err, budgetS) {
   if (err?.timedOut) return `it did not finish within ${budgetS}s`;
   const said = String(err?.stderr ?? '')
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l && !l.startsWith('Warning:'));
   return (said || String(err?.message ?? err).split('\n')[0] || 'unknown error').slice(0, 200);
+}
+
+/**
+ * Run `call` (a `run` given its own bound, `budgetMs`), and stop waiting on
+ * it RUN_GRACE_MS past that bound, so a run whose own timeout keeps what it
+ * printed ends it first. Resolves `{out}`, `{err}` (what the run threw, with
+ * whatever it printed on `err.stdout`), or null when it never settled. Never
+ * rejects. Also the read from the inside's (node-join-read.js).
+ *
+ * @param {() => Promise<unknown>} call
+ * @param {number} budgetMs
+ * @returns {Promise<{out: string} | {err: any} | null>}
+ */
+export async function boundedRun(call, budgetMs) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), budgetMs + RUN_GRACE_MS);
+    timer.unref?.();
+  });
+  const ran = Promise.resolve()
+    .then(call)
+    .then(
+      (out) => ({ out: String(out ?? '') }),
+      (err) => ({ err }),
+    );
+  const outcome = await Promise.race([ran, expired]);
+  clearTimeout(timer);
+  return outcome;
 }
 
 /**
@@ -285,8 +323,15 @@ function whyNot(err, budgetS) {
  * server. One `[node-join] from the k3s server: ...` log line per address,
  * and one sentence per node (probeSentence).
  *
+ * Then, with `readNode`, each node whose private address answered port 22
+ * `open` is read from the inside, through the k3s server (nodeRead,
+ * node-join-read.js), and its sentence is added to that node's. Only a
+ * positive `open`: a node whose check failed, timed out or reported nothing
+ * is not read, and when the probe itself could not run, nothing is.
+ *
  * Never throws and never waits past its bound: a run that fails is one log
- * line, and a run its bound stopped keeps what it printed.
+ * line, and a run its bound stopped keeps what it printed. A read that fails
+ * is one log line too, and the probe's sentence stands.
  *
  * @param {object} args
  * @param {(script: string, opts: {timeoutMs: number}) => Promise<string>} args.run -
@@ -295,6 +340,8 @@ function whyNot(err, budgetS) {
  * @param {string} args.providerName
  * @param {number} [args.budgetMs]
  * @param {(line: string) => void} [args.log]
+ * @param {ReturnType<typeof import('./node-join-read.js').nodeRead>} [args.readNode] -
+ *   the read from the inside (nodeRead, node-join-read.js)
  * @returns {(
  *   nodes: import('./node-join.js').UnjoinedNode[],
  *   views: Map<import('./node-join.js').UnjoinedNode, import('./node-join.js').ProviderViewSummary>,
@@ -305,6 +352,7 @@ export function clusterProbe({
   providerName,
   budgetMs = CLUSTER_PROBE_BUDGET_MS,
   log = (line) => console.error(line),
+  readNode,
 }) {
   const budgetS = Math.round(budgetMs / 1000);
   return async (nodes, views) => {
@@ -348,19 +396,10 @@ export function clusterProbe({
     /** @type {string|null} why a run that printed some lines did not finish */
     let stopped = null;
     try {
-      let timer;
-      const expired = new Promise((resolve) => {
-        timer = setTimeout(() => resolve(null), budgetMs + RUN_GRACE_MS);
-        timer.unref?.();
-      });
-      const ran = Promise.resolve()
-        .then(() => run(clusterProbeScript(targets), { timeoutMs: budgetMs }))
-        .then(
-          (out) => ({ out: String(out ?? '') }),
-          (err) => ({ err }),
-        );
-      const outcome = await Promise.race([ran, expired]);
-      clearTimeout(timer);
+      const outcome = await boundedRun(
+        () => run(clusterProbeScript(targets), { timeoutMs: budgetMs }),
+        budgetMs,
+      );
       if (!outcome) {
         log(
           `[node-join] could not probe from the k3s server: it did not finish within ${budgetS}s`,
@@ -370,17 +409,19 @@ export function clusterProbe({
       if ('err' in outcome) {
         stdout = String(outcome.err?.stdout ?? '');
         if (parseProbeOutput(stdout).length === 0) {
-          log(`[node-join] could not probe from the k3s server: ${whyNot(outcome.err, budgetS)}`);
+          log(
+            `[node-join] could not probe from the k3s server: ${whyRunFailed(outcome.err, budgetS)}`,
+          );
           return sentences;
         }
         stopped = outcome.err?.timedOut
           ? `stopped after ${budgetS}s`
-          : `failed partway (${whyNot(outcome.err, budgetS)})`;
+          : `failed partway (${whyRunFailed(outcome.err, budgetS)})`;
       } else {
         stdout = outcome.out;
       }
     } catch (err) {
-      log(`[node-join] could not probe from the k3s server: ${whyNot(err, budgetS)}`);
+      log(`[node-join] could not probe from the k3s server: ${whyRunFailed(err, budgetS)}`);
       return sentences;
     }
 
@@ -410,6 +451,30 @@ export function clusterProbe({
         privateAddress: privateTarget?.address,
       });
       if (sentence) sentences.set(node, sentence);
+    }
+
+    // The server is up on its private network: read it from the inside.
+    const open = readNode
+      ? targets.filter((t) => t.kind === 'private' && resultOf(t)?.port22 === 'open')
+      : [];
+    if (open.length > 0) {
+      try {
+        const inside = await readNode(
+          open.map((t) => ({
+            node: t.node,
+            label: t.label,
+            privateIp: t.address,
+            publicIp:
+              targets.find((x) => x.node === t.node && x.kind === 'public')?.address ?? null,
+          })),
+        );
+        for (const [node, sentence] of inside ?? []) {
+          const probe = sentences.get(node);
+          sentences.set(node, probe ? `${probe} ${sentence}` : sentence);
+        }
+      } catch (err) {
+        log(`[node-join] could not read from the inside: ${whyRunFailed(err, budgetS)}`);
+      }
     }
     return sentences;
   };

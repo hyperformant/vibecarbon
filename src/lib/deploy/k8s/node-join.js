@@ -28,7 +28,10 @@
  * failure says when its public one is not the address waited on, and each
  * server that never registered is probed from the k3s server it should have
  * joined (probeFromCluster, node-join-probe.js): ping and port 22 on its
- * private and public addresses, and the ARP entry for the private one.
+ * private and public addresses, and the ARP entry for the private one. One
+ * whose private address answers port 22 is then read from the inside,
+ * through that server (node-join-read.js, Vultr run 45994716507): its
+ * interfaces, default route, outbound reach and boot marks.
  * tests/unit/deploy/node-join-census.test.ts holds every node wait to it.
  */
 
