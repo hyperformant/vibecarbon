@@ -29,6 +29,13 @@
  * DigitalOcean's VPC: its delete is refused with a 409 while the cloud file
  * lists members for it (`members[<vpc id>]`, which a test writes for a server
  * no stack records), and a read of one that is gone returns nothing.
+ *
+ * A resource whose type is a Vultr one (`vultr:...`, vultr-refresh-prune.test.ts
+ * writes it into a stack's state by hand, on this provider) models
+ * terraform-provider-vultr's Read for the types whose gone phrase Vultr's 404
+ * does not contain: read or delete one the cloud file does not hold and it
+ * fails with Vultr's own 404 body, as the bridged provider does
+ * (lib/iac/vultr-gone-resources.js).
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as provider from '@pulumi/pulumi/provider/index.js';
@@ -47,6 +54,12 @@ const SERVER = 'fakecloud:index:Server';
 const RESERVED_IP = 'fakecloud:index:ReservedIp';
 const ASSIGNMENT = 'fakecloud:index:ReservedIpAssignment';
 const VPC = 'fakecloud:index:Vpc';
+
+/** Vultr's 404 for a missing `vultr:` resource, as the bridged provider's Read returns it. */
+const vultrGone = (type, id) => {
+  const noun = type.split(':').pop().toLowerCase();
+  return new Error(`error getting ${noun} (${id}): {"error":"${noun} not found","status":404}`);
+};
 
 /** A property value without the wrapper the engine puts on a secret. */
 const revealed = (value) =>
@@ -131,6 +144,7 @@ const fakecloud = {
       return { id, props: outs, inputs: { size: live.size, userData: props?.userData } };
     }
     const live = thingsOf(cloud, type)[id];
+    if (!live && type.startsWith('vultr:')) throw vultrGone(type, id);
     if (!live) return {};
     if (type === ASSIGNMENT) ipOrNotFound(cloud, live);
     const { assignedTo: _assignedTo, ...stored } = live;
@@ -161,6 +175,7 @@ const fakecloud = {
         const assignment = thingsOf(cloud, ASSIGNMENT)[id];
         if (assignment) ipOrNotFound(cloud, assignment).assignedTo = null;
       }
+      if (type.startsWith('vultr:') && !thingsOf(cloud, type)[id]) throw vultrGone(type, id);
       if (type === VPC && (cloud.members?.[id] ?? []).length > 0) {
         throw new Error(`DELETE /v2/vpcs/${id}: 409 Can not delete VPC with members`);
       }

@@ -47,6 +47,7 @@ import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
+import { dropResourcesByUrn } from './state-drop.js';
 import {
   asStateUndecryptableError,
   classifyStateError,
@@ -61,6 +62,7 @@ import { removePlainHistory, removeStackBackup } from './state-history.js';
 import {
   classifyPendingCreates,
   forgetPendingReported,
+  kindOf,
   pendingCreatesBlock,
   pendingLabel,
   pendingLookupFailed,
@@ -76,6 +78,7 @@ import {
   stateSealRecorded,
 } from './state-seal.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
+import { findGoneVultrResources } from './vultr-gone-resources.js';
 import { makeWorkspaceDir } from './workspace-dir.js';
 
 // Re-exported so this module stays the iac layer's public surface while the
@@ -1110,6 +1113,67 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
 }
 
 /**
+ * Before a refresh of a Vultr stack, take out of its state every resource
+ * Vultr says is gone but whose provider cannot tell: its Read fails the
+ * refresh on the 404 instead of dropping it (lib/iac/vultr-gone-resources.js
+ * says which types and why). Each one is read by id first, and only Vultr's
+ * own not-found for that id drops it; any other answer leaves the state as it
+ * was. One line per resource taken out.
+ *
+ * Runs before every refresh in this module: the pre-up refresh
+ * (prepareStackForUp), the pre-destroy refresh (destroyStack) and the one
+ * that clears unfinished creates (resolvePendingCreates). A no-op, with no
+ * export and no API call, on every other provider and without a token; no
+ * import when nothing is gone.
+ *
+ * The import takes the stack's lock. A lock whose holder is gone is cleared
+ * (runPastStaleLock); one a live run holds stops here with StackHeldError,
+ * unchanged. Nothing else throws: on any other failure the state stays as it
+ * was and the refresh after it runs as it always did, a passphrase refusal
+ * included (the refresh reports that one itself).
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ provider?: string, providerToken?: string }} options
+ * @param {object|null} [deployment] - the stack's state as just read, so it is not exported twice
+ * @returns {Promise<{removed: string[], deployment: object|null}>} `removed`:
+ *   the URNs taken out. `deployment`: the state as it now stands, or the one
+ *   handed in (null when none was and nothing was read).
+ */
+export async function pruneVultrGoneResources(stack, options, deployment = null) {
+  if (options?.provider !== 'vultr' || !options.providerToken) return { removed: [], deployment };
+  try {
+    const state =
+      deployment ??
+      (await withStateBackendRetry(() => stack.exportStack(), 'vultr gone-resource export'));
+    const gone = await findGoneVultrResources(state, getProvider('vultr', options.providerToken));
+    if (gone.length === 0) return { removed: [], deployment: state };
+    const result = dropResourcesByUrn(
+      state,
+      gone.map((g) => g.urn),
+    );
+    await withStateBackendRetry(
+      () => runPastStaleLock(stack, () => importStackState(stack, result.deployment)),
+      'vultr gone-resource import',
+    );
+    for (const g of gone) {
+      progressLog(
+        `[pulumi] took the ${kindOf(g.type)} ${g.name} (id ${g.id}) out of ${stack.name}'s state: ` +
+          `Vultr says it's gone ("${g.said}"), and the refresh would fail on it instead of dropping it`,
+      );
+    }
+    return { removed: result.removed, deployment: result.deployment };
+  } catch (err) {
+    if (err instanceof StackHeldError) throw err;
+    if (!isStatePassphraseFailure(err)) {
+      progressLog(
+        `[pulumi] vultr gone-resource check skipped for ${stack.name}: ${summarizePulumiError(err)}`,
+      );
+    }
+    return { removed: [], deployment };
+  }
+}
+
+/**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
  * `options.recordRetiredAddresses` records the addresses the retired-resource
@@ -1154,8 +1218,29 @@ async function refreshBestEffort(stack, stackName, label, options) {
     if (isStatePassphraseFailure(err)) {
       throw passphraseRefusal(err, stackName, label, projectDirOf(options));
     }
-    progressLog(`[pulumi] ${label} warning: ${summarizePulumiError(err)}`);
+    progressLog(`[pulumi] ${label} warning: ${refreshFailureCause(err)}`);
   }
+}
+
+/**
+ * What a failed refresh failed on, from its own output: each resource's
+ * diagnostic (`<type> (<name>): <its error line>`), or, when the output has
+ * none, the usual one-line summary. The stack's own `error: update failed`
+ * names nothing, and it was all the warning used to say (e2e run
+ * 45922250720).
+ * @param {unknown} err
+ * @returns {string}
+ */
+export function refreshFailureCause(err) {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  const diagnostics = pulumiDiagnosticsByResource(message);
+  if (diagnostics.size === 0) return summarizePulumiError(err);
+  return [...diagnostics]
+    .map(([key, text]) => {
+      const at = key.lastIndexOf('::');
+      return `${key.slice(0, at)} (${key.slice(at + 2)}): ${text}`;
+    })
+    .join('; ');
 }
 
 /**
@@ -1197,14 +1282,16 @@ async function prepareStackForUp(stackName, program, options) {
   // Read the state at most once per up: the surgery above already did on a
   // provider that retires resources (DigitalOcean, from the open's probe),
   // and the open's probe did on the first open of this stack in the process.
-  let needsRefresh = true;
+  let state = null;
   try {
-    const state = surgery.deployment ?? takeProbedDeployment(stack) ?? (await stack.exportStack());
-    const resources = state?.deployment?.resources ?? [];
-    needsRefresh = resources.some((r) => r.type !== 'pulumi:pulumi:Stack');
+    state = surgery.deployment ?? takeProbedDeployment(stack) ?? (await stack.exportStack());
   } catch {
     /* exportStack failed — fall through and refresh as before */
   }
+  // Vultr: what its refresh would fail on rather than drop, taken out first.
+  if (state) state = (await pruneVultrGoneResources(stack, options, state)).deployment;
+  const needsRefresh =
+    !state || (state.deployment?.resources ?? []).some((r) => r.type !== 'pulumi:pulumi:Stack');
   if (needsRefresh) {
     await refreshBestEffort(stack, stackName, 'pre-up refresh', options);
     // The refresh above is what makes this necessary — see the function's
@@ -1653,6 +1740,8 @@ async function resolvePendingCreates(stack, exported, options) {
     );
     return null;
   }
+  // Vultr: a resource gone since the up would fail this refresh too.
+  await pruneVultrGoneResources(stack, options, exported);
   await withStateBackendRetry(
     () =>
       runPastStaleLock(stack, () =>
@@ -1796,6 +1885,10 @@ export async function destroyStack(stackName, program, options = {}) {
   // by direct API cleanup). Without this, hcloud returns 404 and pulumi
   // treats it as a hard error — surfaced in orphan-stack cleanup as
   // "server not found (not_found, ...)".
+  // Vultr's Read fails the refresh on that 404 for some types instead, so
+  // those are taken out first (pruneVultrGoneResources). They count as the
+  // stack's: a stack that held only those is not an empty one.
+  const pruned = await pruneVultrGoneResources(stack, options, takeProbedDeployment(stack));
   await refreshBestEffort(stack, stackName, 'pre-destroy refresh', options);
   // A DigitalOcean Droplet's delete detaches every volume DO lists on it,
   // re-read from the live API (state's `volume_ids` is ignored), and fails on
@@ -1859,7 +1952,10 @@ export async function destroyStack(stackName, program, options = {}) {
   // Every resource the stack listed was destroyed and counted above, so the
   // copy `stack rm` leaves (.json.bak) records nothing worth keeping.
   await removeStackBackup(backupArgs(stackName, options));
-  return { destroyed: true, resourceCount: resourceCountBefore ?? deleteCount };
+  return {
+    destroyed: true,
+    resourceCount: (resourceCountBefore ?? deleteCount) + pruned.removed.length,
+  };
 }
 
 /**
@@ -1885,8 +1981,10 @@ export function pulumiDestroyFailureCause(message) {
 
 /**
  * The useful text of one Pulumi error line, or null. Skips the stack's own
- * `update failed` and the engine's `deleting urn:...` wrapper, and strips the
- * terraform-bridge location prefix.
+ * `update failed`, strips the engine's `deleting urn:...:` and
+ * `refreshing urn:...:` wrapper (skipping the line when all it then says is
+ * `1 error occurred:`, the bridge's header for the `* ` lines under it), and
+ * strips the terraform-bridge location prefix.
  * @param {string} line
  * @returns {string|null}
  */
@@ -1894,10 +1992,13 @@ function diagnosticText(line) {
   const m = /^\s*(?:\*\s|error:\s)\s*(.+)$/.exec(line);
   if (!m) return null;
   const text = m[1]
+    .replace(/^preview failed:\s*/i, '')
+    .replace(/^(?:deleting|refreshing) urn:\S+:\s+/i, '')
     .replace(/^sdk-v2\/\S+:\s*/, '')
     .replace(/^sdk\.helper_schema:\s*/, '')
     .trim();
-  if (!text || /^update failed$/i.test(text) || /^deleting urn:/i.test(text)) return null;
+  if (!text || /^update failed$/i.test(text) || /^\d+ errors? occurred:?$/i.test(text)) return null;
+  if (/^(?:deleting|refreshing) urn:\S+$/i.test(text)) return null;
   return text;
 }
 

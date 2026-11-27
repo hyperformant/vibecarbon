@@ -1279,6 +1279,28 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
+   * GET one resource by its path, for the pre-refresh prune
+   * (lib/iac/vultr-gone-resources.js): the HTTP status and the API's own
+   * `error` text, null when the body has none. fetchWithRetry retries a 429,
+   * a 5xx and a network error; a network that never answers throws.
+   * @param {string} endpoint - e.g. `/instances/<id>`
+   * @returns {Promise<{status: number, error: string|null}>}
+   */
+  async readResourceStatus(endpoint) {
+    const response = await this.bareRequest(endpoint);
+    const text = await response.text().catch(() => '');
+    if (response.ok) return { status: response.status, error: null };
+    let error = null;
+    try {
+      const body = JSON.parse(text);
+      if (typeof body?.error === 'string') error = body.error;
+    } catch {
+      /* not JSON: not the API's own answer */
+    }
+    return { status: response.status, error };
+  }
+
+  /**
    * Volume listing preserving the completeness signal.
    * @returns {Promise<{ items: object[], complete: boolean, status?: number }>}
    */

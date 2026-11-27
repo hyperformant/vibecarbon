@@ -31,6 +31,8 @@
  * `RETIRED_STACK_RESOURCES` on the provider class.
  */
 
+import { dropResourcesByUrn } from './state-drop.js';
+
 /**
  * @typedef {{ type: string, name: string }} RetiredResource
  *   A resource's type token and its logical name (the URN's last segment).
@@ -44,12 +46,8 @@ function logicalName(urn) {
 
 /**
  * Remove every resource matching `retired` from an exported deployment, and
- * every reference to it: `dependencies`, `propertyDependencies`,
- * `deletedWith`, a child's `parent` (moved to the removed resource's own
- * parent) and pending operations on it. `pulumi stack import` verifies the
- * snapshot's integrity and refuses a dangling reference, so a removal that
- * left one would fail the import rather than the up after it. Pure: returns a
- * new deployment, `removed` empty (and the same content) when nothing
+ * every reference to it (dropResourcesByUrn, ./state-drop.js). Pure: returns
+ * a new deployment, `removed` empty (and the same content) when nothing
  * matched.
  *
  * @param {{ deployment?: { resources?: object[], pending_operations?: object[] } }} state - exportStack's result
@@ -59,55 +57,19 @@ function logicalName(urn) {
  *   those resources held (`outputs.ipAddress`), once each.
  */
 export function dropStackResources(state, retired) {
-  const next = structuredClone(state);
-  const resources = next?.deployment?.resources;
-  if (!Array.isArray(resources) || retired.length === 0) {
-    return { deployment: next, removed: [], addresses: [] };
-  }
+  const resources = state?.deployment?.resources;
   const isRetired = (r) =>
     retired.some((spec) => r?.type === spec.type && logicalName(r?.urn) === spec.name);
-  const gone = resources.filter(isRetired);
-  if (gone.length === 0) return { deployment: next, removed: [], addresses: [] };
+  const gone = Array.isArray(resources) ? resources.filter(isRetired) : [];
+  const { deployment, removed } = dropResourcesByUrn(
+    state,
+    gone.map((r) => r.urn),
+  );
+  if (removed.length === 0) return { deployment, removed, addresses: [] };
   const addresses = [
     ...new Set(
       gone.map((r) => r?.outputs?.ipAddress).filter((a) => typeof a === 'string' && a !== ''),
     ),
   ];
-
-  const goneUrns = new Set(gone.map((r) => r.urn));
-  // A child of a removed resource moves to that resource's parent; follow the
-  // chain in case a removed resource's parent was removed too.
-  const parentOf = new Map(gone.map((r) => [r.urn, r.parent]));
-  const survivingParent = (urn) => {
-    let p = urn;
-    while (p && goneUrns.has(p)) p = parentOf.get(p);
-    return p;
-  };
-
-  const kept = resources.filter((r) => !goneUrns.has(r?.urn));
-  for (const r of kept) {
-    if (Array.isArray(r.dependencies)) {
-      r.dependencies = r.dependencies.filter((u) => !goneUrns.has(u));
-    }
-    if (r.propertyDependencies && typeof r.propertyDependencies === 'object') {
-      for (const [key, urns] of Object.entries(r.propertyDependencies)) {
-        if (Array.isArray(urns)) r.propertyDependencies[key] = urns.filter((u) => !goneUrns.has(u));
-      }
-    }
-    if (r.deletedWith && goneUrns.has(r.deletedWith)) delete r.deletedWith;
-    if (r.parent && goneUrns.has(r.parent)) {
-      const parent = survivingParent(r.parent);
-      if (parent) r.parent = parent;
-      else delete r.parent;
-    }
-  }
-  next.deployment.resources = kept;
-  // An operation a crashed run left pending on a removed resource would name
-  // a URN the snapshot no longer holds.
-  if (Array.isArray(next.deployment.pending_operations)) {
-    next.deployment.pending_operations = next.deployment.pending_operations.filter(
-      (op) => !goneUrns.has(op?.resource?.urn),
-    );
-  }
-  return { deployment: next, removed: [...goneUrns], addresses };
+  return { deployment, removed, addresses };
 }

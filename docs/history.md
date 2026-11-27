@@ -1903,6 +1903,42 @@ exactly when `K8S_FLOATING_IP` says) and
 `tests/unit/e2e/sweep-reserved-ip-coverage.test.ts` (Vultr's sweep may skip
 reserved IPs only while both of its flags are false).
 
+#### 2026-11-27: Vultr stacks drop what Vultr has already deleted before each refresh
+
+Before every `pulumi refresh` (pre-up, pre-destroy, and the one that clears
+unfinished creates), a Vultr stack's instances, VPCs, reserved IPs and firewall
+rules are read by id. A resource is taken out of the state only when Vultr
+answers with its own 404 for that id, and each one taken out is logged. Any
+other answer leaves the state alone. The refresh warning now names each failing
+resource and its provider's error line, not `error: update failed`.
+
+**Why:** in e2e run 45922250720 (vultr k8s, stack civ3) the backstop released
+a reserved IP the destroy could not delete. The destroy then ran once more:
+its refresh failed with `error: update failed`, its delete got a 404, and the
+environment was kept and reported UNVERIFIED. terraform-provider-vultr 2.27.1
+drops a missing resource only when the error contains its own phrase, and
+Vultr's 404 says something else for four types. Measured 2026-11-27:
+
+| Type | The provider looks for | Vultr's 404 says |
+|---|---|---|
+| Instance | `invalid instance ID` | `instance not found` |
+| Vpc | `Invalid VPC ID` | `VPC not found.` |
+| ReservedIp | `Invalid reserved-ip ID` | `reserved ip not found` |
+| FirewallRule | `Firewall rule ID not found` | `Firewall Rule Not Found` |
+| FirewallGroup | `"status":404` | matches, so its refresh drops it |
+| SSHKey | `Invalid ssh key` | matches, so its refresh drops it |
+
+**Do not undo:** do not widen the check to any 404, or to any non-2xx. A
+404 for the wrong path, a 403 from an IP allowlist or an outage would take a
+live resource out of the state, and the next up would make it again. Do not
+retry the refresh instead: it fails the same way every time.
+
+**Guard:** `tests/unit/iac/vultr-gone-resources-census.test.ts` (every Vultr
+type the programs declare is classified, with the measured bodies as fixtures),
+`tests/unit/iac/vultr-gone-refresh-sites-census.test.ts` (every refresh in
+`src` runs after the check), `tests/unit/iac/vultr-gone-prune-wiring.test.ts`
+and `tests/integration/iac/vultr-refresh-prune.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
@@ -1975,6 +2011,7 @@ reserved IPs only while both of its flags are false).
 | Linode | Two VPCs may share a range | No range allocation is needed, unlike DigitalOcean |
 | Vultr | Nameservers remember that a name did not exist | Same rule: never look up before create |
 | Vultr | A main IP cannot be detached until its server is gone, and the provider's instance delete returns first | k8s clusters have no reserved IP; the domain points at the master |
+| Vultr | Its 404 wording differs from what the provider's Read looks for, for instances, VPCs, reserved IPs and firewall rules | Those are read by id and dropped from the state before each refresh |
 | All | A fresh server may inherit a spent Docker Hub quota | Core images come from the GHCR mirror |
 
 ## Dated bridges
