@@ -2083,6 +2083,31 @@ throw, named fields only) and the refusal cases in
 `tests/unit/deploy/k8s-db-statefulset.test.ts` and
 `tests/unit/e2e/classify-failure.test.ts`.
 
+### 2026-11-27: a probe once added is never removed
+
+The stale-stack sweep kept two civ4 Vultr k8s-ha stacks forever. Both
+recorded a `vultr:index/reservedIp:ReservedIp` that #601 had stopped making,
+and #601 removed the type's probe in the same change. A type with no probe
+reads unknown, so the sweep could not confirm the IPs gone even though Vultr
+answered 404 for both and the account held no reserved IP. The census only
+asked for a probe for each type the programs make today, so nothing stopped
+the removal. DigitalOcean had the same hole: `ReservedIp` and
+`ReservedIpAssignment` left its program in #418 and never had a probe.
+
+The probes are back (Vultr `reserved-ips`, DigitalOcean `reserved_ips`). The
+DigitalOcean assignment is gone exactly when its IP is gone, and is never
+confirmed present from the IP alone, because a live IP does not say which
+droplet holds it.
+
+**Do not undo:** do not delete a probe because no program makes its type any
+more. An older stack still records it, and without the probe that stack and
+its S3 object stay for good.
+
+**Guard:** the frozen `NEVER_DROP` list in
+`tests/unit/e2e/stack-probes-census.test.ts` (adding a type is allowed,
+dropping one fails) and the restored cases in
+`tests/unit/e2e/stack-probes.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

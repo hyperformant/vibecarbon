@@ -5,6 +5,10 @@
  * is unknown, which keeps the stack. A wrong "gone" would delete the only
  * record of a live resource; a wrong "unknown" costs one S3 object.
  *
+ * A probe is never removed, even when no program makes its type any more:
+ * an older stack still records it, and without the probe that stack is kept
+ * forever (#601). stack-probes-census.test.ts freezes the list.
+ *
  * Type tokens come from the SDK classes (`Class.__pulumiType`), never from
  * hand-typed strings, and stack-probes-census.test.ts walks src/lib so a new
  * resource type in a program cannot ship without a probe here.
@@ -13,12 +17,15 @@
  * the same value):
  * - hcloud NetworkSubnet: "<network id>-<ip range>", so the network is probed.
  *   FloatingIpAssignment: the floating IP id. All others: the numeric id.
- * - digitalocean Tag: the tag name. Others: the API id.
+ * - digitalocean Tag: the tag name. ReservedIp: the address. ReservedIpAssignment:
+ *   the address from inputs/outputs (or an import id "<ip>,<droplet id>"); it
+ *   is gone when its IP is gone, and never confirmed present from the IP alone.
+ *   Others: the API id.
  * - linode ReservedIp: the address. VpcSubnet: the subnet id, with the vpc
  *   read from outputs/inputs (an import id "<vpc>,<subnet>" is accepted too).
  * - vultr FirewallRule: the numeric rule id, the group from inputs/outputs
  *   (or an import id "<group>,<rule>"); a gone group means a gone rule.
- *   Vpc: the API uuid (vpc.js import note).
+ *   Vpc and ReservedIp: the API uuid (vpc.js, reservedIp.js import notes).
  * - scaleway instance resources: "<zone>/<uuid>"; network Vpc and
  *   PrivateNetwork: "<region>/<uuid>" (vpc.js, privateNetwork.js import
  *   notes); iam SshKey: a bare uuid.
@@ -98,6 +105,15 @@ const vultrRule: TypeProbe = async (r, get) => {
   return fromStatus(await get(`${VULTR}/firewalls/${enc(group)}/rules/${enc(rule)}`));
 };
 
+/** The reserved IP address: from inputs/outputs, else the import id "<ip>,<droplet id>". */
+const doAssignment: TypeProbe = async (r, get) => {
+  const comma = r.id.indexOf(',');
+  const ip = field(r, 'ipAddress') ?? (comma > 0 ? r.id.slice(0, comma) : null);
+  if (!ip) return 'unknown';
+  // Gone with its IP. A live IP says nothing about which droplet holds it.
+  return (await get(`${DO}/reserved_ips/${enc(ip)}`)) === 404 ? 'gone' : 'unknown';
+};
+
 const PROBES: Record<string, Record<string, TypeProbe>> = {
   hetzner: {
     [typeOf(hcloud.Server)]: plain(HCLOUD, 'servers'),
@@ -120,6 +136,9 @@ const PROBES: Record<string, Record<string, TypeProbe>> = {
     [typeOf(digitalocean.SshKey)]: plain(DO, 'account/keys'),
     [typeOf(digitalocean.Tag)]: plain(DO, 'tags'),
     [typeOf(digitalocean.Vpc)]: plain(DO, 'vpcs'),
+    // No program makes these since #418; older stacks still record them.
+    [typeOf(digitalocean.ReservedIp)]: plain(DO, 'reserved_ips'),
+    [typeOf(digitalocean.ReservedIpAssignment)]: doAssignment,
   },
   linode: {
     [typeOf(linode.Firewall)]: plain(LINODE, 'networking/firewalls'),
@@ -144,6 +163,8 @@ const PROBES: Record<string, Record<string, TypeProbe>> = {
     [typeOf(vultr.SSHKey)]: plain(VULTR, 'ssh-keys'),
     [typeOf(vultr.FirewallRule)]: vultrRule,
     [typeOf(vultr.Vpc)]: plain(VULTR, 'vpcs'),
+    // No program makes this since #601; older stacks still record it.
+    [typeOf(vultr.ReservedIp)]: plain(VULTR, 'reserved-ips'),
   },
   scaleway: {
     [typeOf(scaleway.instance.Server)]: zoned('servers'),
