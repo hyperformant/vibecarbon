@@ -1816,6 +1816,8 @@ export async function waitForWorkersReady(
     deadline: Date.now() + budgetMs,
     budgetS: Math.round(budgetMs / 1000),
     since: 'the converge created its server',
+    // No warnNotReady: the failover scales the app onto these workers, so a
+    // NotReady one fails it like one that never registered.
     describeServers,
     pollMs: NODE_JOIN_POLL_MS,
     ...(deps.sleep && { sleep: deps.sleep }),

@@ -21,6 +21,9 @@
  *   - every call of a wait that needs a node other than the k3s server
  *     (NODE_WAITS) sits in a function registered in WAIT_SITES, which either
  *     runs the check before it, in its own body, or says why it needs none;
+ *   - each call of the check says what NotReady it tolerates: a deploy's
+ *     registered NotReady worker warns (DEPLOY_NOT_READY_WARNS), and nothing
+ *     else does;
  *   - every function that reads the node list (`kubectl get nodes`) is in
  *     NODE_READERS: the check itself, or a single read that is not a wait. A
  *     new hand-rolled node poll lands here and must go through the check.
@@ -353,6 +356,25 @@ describe('every wait that needs a node other than the k3s server checks the node
     });
     expect(built).toBe(true);
     expect(handed).toBe(true);
+  });
+
+  // Ruling on #600: a deploy fails on a server that never registered and on a
+  // NotReady k3s server or database node; a registered NotReady worker only
+  // warns (DEPLOY_NOT_READY_WARNS). The failover tolerates nothing: it scales
+  // the app onto the workers it waits for.
+  it('each awaitNodesJoined call states what NotReady it tolerates: the deploy workers only, the failover none', () => {
+    const policy: Record<string, string | null> = {};
+    for (const { path, ast } of FILES) {
+      walkAst(ast, (n, ancestors) => {
+        if (n.type !== 'CallExpression' || calleeName(n) !== 'awaitNodesJoined') return;
+        const prop = n.arguments[0]?.properties?.find((p: Node) => p.key?.name === 'warnNotReady');
+        policy[enclosing(path, ancestors).key] = prop ? (prop.value?.name ?? '<not a name>') : null;
+      });
+    }
+    expect(policy).toEqual({
+      'lib/deploy/k8s/k3s.js:nodesJoined': 'DEPLOY_NOT_READY_WARNS',
+      'failover.js:waitForWorkersReady': null,
+    });
   });
 
   it('every reader of the node list is classified, and none is stale', () => {

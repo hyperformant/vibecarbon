@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   awaitNodesJoined,
   clusterNodeExpectations,
+  DEPLOY_NOT_READY_WARNS,
   describeServersForLog,
   NODE_JOIN_BUDGET_MS,
   NODE_JOIN_POLL_MS,
@@ -291,24 +292,154 @@ describe('awaitNodesJoined', () => {
 });
 
 describe('nodesNeverJoinedNextStep', () => {
-  it('a node that registered must be deleted before a new server can take its name', () => {
+  it('a registered node is a server that still exists: restart it, or delete it and its node', () => {
     const step = nodesNeverJoinedNextStep({ providerName: 'Linode', env: 'prod' })([
       { role: 'db', ip: DB_IP, name: 'p-db', state: 'notReady' },
     ]);
     const lines = step.split('\n');
-    expect(lines).toContain('  kubectl delete node p-db');
+    expect(lines[0]).toBe('nothing was retried or replaced.');
+    expect(step).toMatch(/Restart it in the Linode console/);
+    // Restarted, a plain deploy picks up where it stopped.
+    expect(lines).toContain('  vibecarbon deploy prod');
+    // Replaced, the node goes first (k3s keeps its name and password).
+    const del = lines.indexOf('  kubectl delete node p-db');
+    expect(del).toBeGreaterThan(lines.indexOf('  vibecarbon deploy prod'));
     expect(lines.at(-1)).toBe('  vibecarbon deploy prod -full');
-    expect(step).toMatch(/Linode console/);
     expect(step).not.toMatch(DASHES);
     // Lowercase CLI voice: every line starts lowercase or with a command.
     for (const line of lines) expect(line).toMatch(/^( {2}|[a-z])/);
   });
 
-  it('a node that never registered needs no node delete', () => {
+  it('a server that never registered is deleted in the console, then deployed from scratch', () => {
     const step = nodesNeverJoinedNextStep({ providerName: 'Hetzner Cloud', env: 'prod' })([
       { role: 'db', ip: DB_IP, state: 'unregistered' },
     ]);
-    expect(step).not.toMatch(/kubectl delete node/);
+    expect(step).toMatch(/never registered in the Hetzner Cloud console/);
+    expect(step).not.toMatch(/kubectl delete node|Restart it/);
+    expect(step.split('\n').at(-1)).toBe('  vibecarbon deploy prod -full');
+    for (const line of step.split('\n')) expect(line).toMatch(/^( {2}|[a-z])/);
+  });
+});
+
+// The deploy's rule (ruling on #600): what this check is for is a server that
+// never booted, and that one never registers. A worker that joined once and
+// went NotReady on a long-lived cluster must not block shipping an app
+// change; a NotReady k3s server or database node blocks the deploy's own
+// waits, so it fails with the clear message.
+describe('the deploy fails on what never registered, and on a NotReady master or db; a NotReady worker warns', () => {
+  const view = (name: string) => ({ name, line: `Hetzner Cloud says ${name} is running.` });
+  const describeAll = vi.fn(async (missing: Parameters<typeof unjoinedNodes>[1]) => {
+    return new Map(missing.map((n) => [n, view(n.role === 'db' ? 'proj-db' : 'proj-worker-1')]));
+  });
+
+  it('only workers are tolerated', () => {
+    expect(DEPLOY_NOT_READY_WARNS).toEqual(['worker']);
+  });
+
+  it('a registered worker that is NotReady at the deadline is one warning line, and the wait passes', async () => {
+    const clock = fakeClock();
+    const warnings: string[] = [];
+    describeAll.mockClear();
+    await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, db, { ...worker, status: 'NotReady' }]),
+      deadline: clock.now() + 2 * NODE_JOIN_POLL_MS,
+      describeServers: describeAll,
+      warnNotReady: DEPLOY_NOT_READY_WARNS,
+      onWarn: (l) => warnings.push(l),
+      ...clock,
+    });
+    // It still waited the whole budget: a fresh worker can register before it is Ready.
+    expect(clock.sleep).toHaveBeenCalledTimes(2);
+    expect(describeAll).toHaveBeenCalledTimes(1);
+    expect(warnings).toEqual([
+      `[node-join] the worker proj-worker-1 (${WORKER_IP}) is registered but was not Ready 600s ` +
+        'after the k3s server came up, so its kubelet is not answering. The deploy goes on ' +
+        'without it: it joined once, and deploying again would not replace a server that still ' +
+        'exists. Hetzner Cloud says proj-worker-1 is running.',
+    ]);
+    expect(warnings[0]).not.toMatch(DASHES);
+  });
+
+  it('a registered database node that is NotReady at the deadline fails, naming it', async () => {
+    const clock = fakeClock();
+    const warnings: string[] = [];
+    const err = await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, { ...db, status: 'NotReady' }, worker]),
+      deadline: clock.now(),
+      describeServers: describeAll,
+      warnNotReady: DEPLOY_NOT_READY_WARNS,
+      onWarn: (l) => warnings.push(l),
+      nextStep: nodesNeverJoinedNextStep({ providerName: 'Hetzner Cloud', env: 'prod' }),
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(err.missing).toEqual([{ role: 'db', ip: DB_IP, name: 'p-db', state: 'notReady' }]);
+    expect(err.message.split('\n')[0]).toBe(
+      `the database node proj-db (${DB_IP}) joined the cluster but was not Ready 600s after the ` +
+        'k3s server came up, so its kubelet is not answering, and the database runs only on that ' +
+        'node. Hetzner Cloud says proj-db is running.',
+    );
+    expect(err.message).toContain('  kubectl delete node p-db');
+    expect(warnings).toEqual([]);
+  });
+
+  it('a NotReady master fails too', async () => {
+    const clock = fakeClock();
+    const err = await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([{ ...master, status: 'NotReady' }, db, worker]),
+      deadline: clock.now(),
+      warnNotReady: DEPLOY_NOT_READY_WARNS,
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(err.missing).toEqual([
+      { role: 'master', ip: MASTER_IP, id: 111, name: 'p-master', state: 'notReady' },
+    ]);
+  });
+
+  it('a worker that never registered fails, beside a NotReady one that only warns', async () => {
+    const clock = fakeClock();
+    const warnings: string[] = [];
+    const two = clusterNodeExpectations({
+      masterIp: MASTER_IP,
+      dbIp: DB_IP,
+      workerIps: [WORKER_IP, '167.233.171.21'],
+    });
+    const err = await awaitNodesJoined({
+      expected: two,
+      readNodes: async () => json([master, db, { ...worker, status: 'NotReady' }]),
+      deadline: clock.now(),
+      warnNotReady: DEPLOY_NOT_READY_WARNS,
+      onWarn: (l) => warnings.push(l),
+      nextStep: nodesNeverJoinedNextStep({ providerName: 'Hetzner Cloud', env: 'prod' }),
+      ...clock,
+    }).catch((e) => e);
+    expect(err.missing).toEqual([{ role: 'worker', ip: '167.233.171.21', state: 'unregistered' }]);
+    expect(err.message).not.toContain('p-worker-1');
+    // The next step speaks to what failed only: no node delete for the tolerated worker.
+    expect(err.message).not.toMatch(/kubectl delete node/);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(`the worker p-worker-1 (${WORKER_IP}) is registered`);
+  });
+
+  it('without warnNotReady (the failover), a NotReady worker fails', async () => {
+    const clock = fakeClock();
+    const err = await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, db, { ...worker, status: 'NotReady' }]),
+      deadline: clock.now(),
+      onWarn: () => {
+        throw new Error('the failover warns about nothing');
+      },
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(err.missing).toEqual([
+      { role: 'worker', ip: WORKER_IP, name: 'p-worker-1', state: 'notReady' },
+    ]);
   });
 });
 

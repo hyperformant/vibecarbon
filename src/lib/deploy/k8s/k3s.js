@@ -173,6 +173,7 @@ import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-di
 import {
   awaitNodesJoined,
   clusterNodeExpectations,
+  DEPLOY_NOT_READY_WARNS,
   describeServersForLog,
   NODE_JOIN_BUDGET_MS,
   NODE_JOIN_POLL_MS,
@@ -6710,7 +6711,8 @@ async function deployK3sSteps(options, inFlight) {
 
   // Every node this provisioning made has registered and is Ready, or the
   // deploy stops at nodesJoinBy naming the ones that are not, with what the
-  // provider says about each (node-join.js). Run before the first wait that
+  // provider says about each (node-join.js). A registered worker that is not
+  // Ready by then is a warning line, and the deploy goes on. Run before the first wait that
   // needs a node other than the k3s server, the db wait (applyK3sManifests'
   // awaitDb, or awaitDbPodReady below when the apply is skipped): by then a
   // healthy cluster's nodes have joined, so it is one read. Each read is
@@ -6737,6 +6739,10 @@ async function deployK3sSteps(options, inFlight) {
           ),
         deadline: nodesJoinBy,
         describeServers,
+        // A worker that registered and went NotReady warns and the deploy
+        // goes on; a server that never registered, or a NotReady master or
+        // database node, fails it.
+        warnNotReady: DEPLOY_NOT_READY_WARNS,
         nextStep: nodesNeverJoinedNextStep({
           providerName: Provider.NAME,
           env: options.operatorEnv ?? options.environment,

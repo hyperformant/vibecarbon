@@ -14,8 +14,11 @@
  * the nodes the provisioning made have registered and are Ready
  * (awaitNodesJoined), and at the deadline the failure carries the provider's
  * own status and recent actions for each one that has not
- * (describeServersForLog, BaseProvider.describeServerForDiagnosis). It
- * diagnoses and stops: nothing is retried, rebooted or replaced.
+ * (describeServersForLog, BaseProvider.describeServerForDiagnosis). A deploy
+ * fails on a server that never registered and on a NotReady k3s server or
+ * database node; a registered worker that is NotReady is a warning line with
+ * the same view (DEPLOY_NOT_READY_WARNS). It diagnoses and stops: nothing is
+ * retried, rebooted or replaced.
  * tests/unit/deploy/node-join-census.test.ts holds every node wait to it.
  */
 
@@ -45,6 +48,19 @@ export const NODE_JOIN_POLL_MS = 10_000;
  * report does not wait longer than that on the API it describes.
  */
 const PROVIDER_VIEW_BUDGET_MS = 30_000;
+
+/**
+ * The roles whose node, registered but not Ready at a deploy's deadline, is a
+ * warning and not a failure: workers only. What this check exists for is a
+ * server that never booted, and that one never registers. A worker that
+ * joined once and has gone NotReady on a long-lived cluster must not block
+ * shipping an app change, and a deploy from scratch would not replace a
+ * server that still exists. The k3s server and the database node are never
+ * here: either one NotReady blocks the deploy's own waits, so it fails with
+ * the clear message. The failover passes none: it scales onto the workers it
+ * just made, so each one must be Ready.
+ */
+export const DEPLOY_NOT_READY_WARNS = Object.freeze(['worker']);
 
 /** @typedef {'master' | 'db' | 'worker'} NodeRole */
 /** @typedef {{role: NodeRole, ip?: string, id?: string|number}} ExpectedNode */
@@ -192,12 +208,14 @@ export class NodesNeverJoinedError extends Error {
 
 /**
  * The last lines of a deploy's NodesNeverJoinedError: what to do, by hand.
- * Nothing replaces the server on its own (no retry ladder): a server that
- * never came up is the provider's to show, and deleting it lets a deploy from
- * scratch (-full: its up refreshes, finds the server gone and makes a new
- * one) build another. A node that registered keeps its name and k3s node
- * password in the cluster, and a new server under that name is refused until
- * the node is deleted.
+ * Nothing replaces a server on its own (no retry ladder).
+ *
+ * A server that never registered is the provider's to show: deleting it lets
+ * a deploy from scratch (-full: its up refreshes, finds the server gone and
+ * makes a new one) build another. A node that registered and stopped
+ * answering is a server that still exists, which no deploy replaces: it is
+ * restarted, or deleted together with its Node (k3s keeps the node's name and
+ * password, and refuses a new server under that name until the Node is gone).
  *
  * @param {{providerName: string, env: string}} args
  * @returns {(missing: UnjoinedNode[]) => string}
@@ -205,24 +223,50 @@ export class NodesNeverJoinedError extends Error {
 export function nodesNeverJoinedNextStep({ providerName, env }) {
   return (missing) => {
     const registered = missing.filter((n) => n.state === 'notReady' && n.name).map((n) => n.name);
-    return [
-      `nothing was retried or replaced. Look at the server in the ${providerName} console. ` +
-        'If it never came up, delete it there and deploy again from scratch, which builds a new one in its place.',
-      ...(registered.length > 0
-        ? [
-            'a node that registered keeps its name in the cluster, so remove it first (from `vibecarbon shell`):',
-            `  kubectl delete node ${registered.join(' ')}`,
-          ]
-        : []),
-      'then run:',
-      `  vibecarbon deploy ${env} -full`,
-    ].join('\n');
+    const lines = ['nothing was retried or replaced.'];
+    if (missing.some((n) => n.state === 'unregistered')) {
+      lines.push(
+        `look at the server that never registered in the ${providerName} console. If it never came up, ` +
+          'delete it there and deploy from scratch, which builds a new one in its place:',
+        `  vibecarbon deploy ${env} -full`,
+      );
+    }
+    if (registered.length > 0) {
+      lines.push(
+        'a node that registered and stopped answering is a server that still exists, and no deploy replaces it. ' +
+          `Restart it in the ${providerName} console if it is stopped or hung, then deploy again:`,
+        `  vibecarbon deploy ${env}`,
+        'to replace it instead, delete the server in the console and its node from the cluster ' +
+          '(from `vibecarbon shell`), then deploy from scratch:',
+        `  kubectl delete node ${registered.join(' ')}`,
+        `  vibecarbon deploy ${env} -full`,
+      );
+    }
+    return lines.join('\n');
   };
 }
 
 /**
+ * The one line a tolerated node gets (DEPLOY_NOT_READY_WARNS): registered,
+ * not Ready at the deadline, and the command goes on without it.
+ *
+ * @param {UnjoinedNode} node
+ * @param {{budgetS: number, since: string, view?: ProviderViewSummary}} args
+ */
+function notReadyWarningLine(node, { budgetS, since, view }) {
+  return (
+    `[node-join] ${nodeLabel(node, view?.name)} is registered but was not Ready ${budgetS}s after ${since}, ` +
+    'so its kubelet is not answering. The deploy goes on without it: it joined once, and ' +
+    `deploying again would not replace a server that still exists.${view?.line ? ` ${view.line}` : ''}`
+  );
+}
+
+/**
  * Wait until every expected node has registered and is Ready, or throw
- * NodesNeverJoinedError once the deadline has passed. One read when they have
+ * NodesNeverJoinedError once the deadline has passed. A node of a role in
+ * `warnNotReady` that registered but is not Ready by then is one warning line
+ * (`onWarn`) instead, and does not fail the wait; one that never registered
+ * always does. One read when they have
  * (the happy path costs a single `kubectl get nodes`), then one every
  * `pollMs`. At the deadline it records the provider's view of each node still
  * missing (`describeServers`) before it throws, and a failure there never
@@ -240,6 +284,9 @@ export function nodesNeverJoinedNextStep({ providerName, env }) {
  * @param {(missing: UnjoinedNode[]) => Promise<Map<UnjoinedNode, ProviderViewSummary>>} [args.describeServers]
  * @param {string | ((missing: UnjoinedNode[]) => string)} [args.nextStep] - the
  *   failure's last lines: what to do
+ * @param {readonly NodeRole[]} [args.warnNotReady] - roles whose registered
+ *   but NotReady node warns at the deadline (DEPLOY_NOT_READY_WARNS); none by default
+ * @param {(line: string) => void} [args.onWarn]
  * @param {number} [args.pollMs]
  * @param {() => number} [args.now]
  * @param {(ms: number) => Promise<unknown>} [args.sleep]
@@ -253,6 +300,8 @@ export async function awaitNodesJoined({
   since = JOIN_CLOCK_START,
   describeServers,
   nextStep = '',
+  warnNotReady = [],
+  onWarn = (line) => progressLog(line),
   pollMs = NODE_JOIN_POLL_MS,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -292,8 +341,16 @@ export async function awaitNodesJoined({
       console.error(`[node-join] could not record the provider's view: ${firstLine(err)}`);
     }
   }
-  const step = typeof nextStep === 'function' ? nextStep(missing) : nextStep;
-  throw new NodesNeverJoinedError(missing, { budgetS, since, views, nextStep: step });
+  // A registered node of a tolerated role is a warning; anything that never
+  // registered, and a NotReady k3s server or database node, fails.
+  const tolerated = (n) => n.state === 'notReady' && warnNotReady.includes(n.role);
+  for (const node of missing.filter(tolerated)) {
+    onWarn(notReadyWarningLine(node, { budgetS, since, view: views.get(node) }));
+  }
+  const failing = missing.filter((n) => !tolerated(n));
+  if (failing.length === 0) return;
+  const step = typeof nextStep === 'function' ? nextStep(failing) : nextStep;
+  throw new NodesNeverJoinedError(failing, { budgetS, since, views, nextStep: step });
 }
 
 /**
