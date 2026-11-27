@@ -1174,7 +1174,11 @@ export async function destroyComposeHA(options) {
     // destroy's 2026-04-27 firewall pagination fix): once the project (or
     // e2e matrix) accumulates 25+ ssh keys, the shared key falls off page 1
     // of the old unfiltered `/ssh_keys` list and destroy silently no-ops on
-    // it, leaking the key. Never throws — false on no match.
+    // it, leaking the key. False on no match. It can throw: on Scaleway
+    // when SCALEWAY_DEFAULT_PROJECT_ID is not set (its listing refuses,
+    // since a key can see other projects' keys too), and on any provider
+    // when a request fails outright. The catch below records the key as a
+    // leak.
     (async () => {
       const sshKeyName = `${projectName}-${environment}-key`;
       try {

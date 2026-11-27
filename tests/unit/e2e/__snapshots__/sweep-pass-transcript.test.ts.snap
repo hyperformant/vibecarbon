@@ -303,18 +303,19 @@ exports[`Scaleway sweep: every pass, line for line > a delete that throws: where
 "log   [t] Sweeping orphaned Scaleway resources for testapp-tr...
 call  listServersDetailed()
 call  listVolumesDetailed()
-fetch GET /instance/v1/zones/fr-par-1/security_groups?per_page=100&page=1
-log   [t] [sweep] Deleting orphaned security group testapp-tr-sg (fr-par-1)
-call  deleteFirewallByName("testapp-tr-sg")
-warn  [t] [sweep] security-group list (fr-par-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-warn  [t] [sweep] Security-group cleanup failed (fr-par-1): connect ETIMEDOUT
-fetch GET /instance/v1/zones/fr-par-2/security_groups?per_page=100&page=1
-log   [t] [sweep] Deleting orphaned security group testapp-tr-sg-3 (fr-par-2)
-call  deleteFirewallByName("testapp-tr-sg-3")
-warn  [t] [sweep] security-group list (fr-par-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-warn  [t] [sweep] Security-group cleanup failed (fr-par-2): connect ETIMEDOUT
-fetch GET /instance/v1/zones/nl-ams-1/security_groups?per_page=100&page=1
-fetch GET /instance/v1/zones/nl-ams-2/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/fr-par-1/security_groups?project=proj-1&per_page=100&page=1
+log   [t] [sweep] Deleting orphaned security group g-1 (testapp-tr-sg) in fr-par-1
+fetch DELETE /instance/v1/zones/fr-par-1/security_groups/g-1
+warn  [t] [sweep] Security group g-1 (testapp-tr-sg) delete failed: connect ETIMEDOUT
+log   [t] [sweep] Deleting orphaned security group g-2 (testapp-tr-sg-2) in fr-par-1
+fetch DELETE /instance/v1/zones/fr-par-1/security_groups/g-2
+warn  [t] [sweep] Security group g-2 (testapp-tr-sg-2) delete failed: connect ETIMEDOUT
+fetch GET /instance/v1/zones/fr-par-2/security_groups?project=proj-1&per_page=100&page=1
+log   [t] [sweep] Deleting orphaned security group g-3 (testapp-tr-sg-3) in fr-par-2
+fetch DELETE /instance/v1/zones/fr-par-2/security_groups/g-3
+warn  [t] [sweep] Security group g-3 (testapp-tr-sg-3) delete failed: connect ETIMEDOUT
+fetch GET /instance/v1/zones/nl-ams-1/security_groups?project=proj-1&per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-2/security_groups?project=proj-1&per_page=100&page=1
 fetch GET /iam/v1alpha1/ssh-keys?project_id=proj-1&page_size=100&page=1
 log   [t] [sweep] Deleting orphaned ssh key testapp-tr-key
 call  deleteSSHKeyByName("testapp-tr-key")
@@ -325,14 +326,14 @@ log   [t] [sweep] Releasing orphaned flexible IP ip-1
 call  releaseFlexibleIP("ip-1", "fr-par-1")
 warn  [t] [sweep] flexible-IP list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Flexible-IP cleanup failed: connect ETIMEDOUT
-fetch GET /lb/v1/zones/fr-par-1/lbs?page_size=100&page=1
-fetch GET /lb/v1/zones/fr-par-2/lbs?page_size=100&page=1
-fetch GET /lb/v1/zones/nl-ams-1/lbs?page_size=100&page=1
-fetch GET /lb/v1/zones/nl-ams-2/lbs?page_size=100&page=1
-fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
-fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
-fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
-fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-1/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-2/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-1/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-2/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/private-networks?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/private-networks?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/vpcs?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] REGRESSION: could not enumerate one or more Scaleway resource types — orphan check is incomplete, treat as a destroy regression.
 result {"counts":{"servers":0,"volumes":0,"placementGroups":0,"firewalls":0,"floatingIps":0,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
 `;
@@ -347,13 +348,13 @@ call  listVolumesDetailed()
 warn  [t] [sweep] volume list enumeration incomplete — residue past the last readable page cannot be ruled out
 log   [t] [sweep] Deleting orphaned volume v-1 (testapp-tr-data)
 call  deleteVolume("v-1")
-fetch GET /instance/v1/zones/fr-par-1/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/fr-par-1/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (fr-par-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/fr-par-2/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/fr-par-2/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (fr-par-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/nl-ams-1/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-1/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (nl-ams-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/nl-ams-2/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-2/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (nl-ams-2) enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /iam/v1alpha1/ssh-keys?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] ssh-key list enumeration incomplete — residue past the last readable page cannot be ruled out
@@ -361,21 +362,21 @@ call  listFlexibleIPsDetailed()
 warn  [t] [sweep] flexible-IP list enumeration incomplete — residue past the last readable page cannot be ruled out
 log   [t] [sweep] Releasing orphaned flexible IP ip-1
 call  releaseFlexibleIP("ip-1", "fr-par-1")
-fetch GET /lb/v1/zones/fr-par-1/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-1/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (fr-par-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/fr-par-2/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-2/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (fr-par-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/nl-ams-1/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-1/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (nl-ams-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/nl-ams-2/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-2/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (nl-ams-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/private-networks?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] private-network list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/private-networks?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] private-network list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] VPC list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] VPC list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] REGRESSION: destroy left 3 Scaleway orphan resource(s) (instances=1, volumes=1, security-groups=0, flexible-ips=1, load-balancers=0, private-networks-and-vpcs=0, buckets=0, ssh-keys=0). vibecarbon destroy did not free these — fix the corresponding destroy code path.
 result {"counts":{"servers":1,"volumes":1,"placementGroups":0,"firewalls":0,"floatingIps":1,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
@@ -400,17 +401,17 @@ call  deleteVolume("v-4")
 warn  [t] [sweep] Unattached CSI volume pvc-0002 carries no project=testapp-tr tag — NOT deleting (could belong to a concurrent run); review manually if it persists.
 log   [t] [sweep] Deleting orphaned volume v-6 (pvc0003)
 call  deleteVolume("v-6")
-fetch GET /instance/v1/zones/fr-par-1/security_groups?per_page=100&page=1
-log   [t] [sweep] Deleting orphaned security group testapp-tr-sg (fr-par-1)
-call  deleteFirewallByName("testapp-tr-sg")
-log   [t] [sweep] Deleting orphaned security group testapp-tr-sg-refused (fr-par-1)
-call  deleteFirewallByName("testapp-tr-sg-refused")
-warn  [t] [sweep] Security group testapp-tr-sg-refused delete failed
-fetch GET /instance/v1/zones/fr-par-2/security_groups?per_page=100&page=1
-fetch GET /instance/v1/zones/nl-ams-1/security_groups?per_page=100&page=1
-fetch GET /instance/v1/zones/nl-ams-2/security_groups?per_page=100&page=1
-log   [t] [sweep] Deleting orphaned security group testapp-tr-sg-ams (nl-ams-2)
-call  deleteFirewallByName("testapp-tr-sg-ams")
+fetch GET /instance/v1/zones/fr-par-1/security_groups?project=proj-1&per_page=100&page=1
+log   [t] [sweep] Deleting orphaned security group g-1 (testapp-tr-sg) in fr-par-1
+fetch DELETE /instance/v1/zones/fr-par-1/security_groups/g-1
+log   [t] [sweep] Deleting orphaned security group g-2 (testapp-tr-sg-refused) in fr-par-1
+fetch DELETE /instance/v1/zones/fr-par-1/security_groups/g-2
+warn  [t] [sweep] Security group g-2 (testapp-tr-sg-refused) delete failed (HTTP 409)
+fetch GET /instance/v1/zones/fr-par-2/security_groups?project=proj-1&per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-1/security_groups?project=proj-1&per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-2/security_groups?project=proj-1&per_page=100&page=1
+log   [t] [sweep] Deleting orphaned security group g-6 (testapp-tr-sg-ams) in nl-ams-2
+fetch DELETE /instance/v1/zones/nl-ams-2/security_groups/g-6
 fetch GET /iam/v1alpha1/ssh-keys?project_id=proj-1&page_size=100&page=1
 log   [t] [sweep] Deleting orphaned ssh key testapp-tr-key
 call  deleteSSHKeyByName("testapp-tr-key")
@@ -423,9 +424,9 @@ call  releaseFlexibleIP("ip-1", "fr-par-1")
 log   [t] [sweep] Releasing orphaned flexible IP ip-2
 call  releaseFlexibleIP("ip-2", "nl-ams-1")
 warn  [t] [sweep] Flexible IP ip-2 release failed
-fetch GET /lb/v1/zones/fr-par-1/lbs?page_size=100&page=1
-fetch GET /lb/v1/zones/fr-par-2/lbs?page_size=100&page=1
-fetch GET /lb/v1/zones/nl-ams-1/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-1/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-2/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-1/lbs?project_id=proj-1&page_size=100&page=1
 log   [t] [sweep] Deleting orphaned load balancer lb-1 (testapp-tr-lb)
 call  deleteLoadBalancer("lb-1")
 log   [t] [sweep] Deleting orphaned load balancer lb-2 (testapp-tr-lb-refused)
@@ -434,9 +435,9 @@ warn  [t] [sweep] Load balancer lb-2 delete failed: the API refused the delete
 log   [t] [sweep] Deleting orphaned load balancer lb-3 (testapp-tr-lb-throws)
 call  deleteLoadBalancer("lb-3")
 warn  [t] [sweep] Load balancer lb-3 delete failed: connect ETIMEDOUT
-fetch GET /lb/v1/zones/nl-ams-2/lbs?page_size=100&page=1
-fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
-fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-2/lbs?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/private-networks?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/private-networks?project_id=proj-1&page_size=100&page=1
 log   [t] [sweep] Orphaned Private Network n-1 (testapp-tr-net) — deleting
 fetch DELETE /vpc/v2/regions/fr-par/private-networks/n-1
 fetch DELETE /vpc/v2/regions/nl-ams/private-networks/n-1
@@ -451,8 +452,8 @@ warn  [t] [sweep] Private Network n-3 delete failed
 log   [t] [sweep] Orphaned Private Network n-4 (testapp-tr-net-throws) — deleting
 fetch DELETE /vpc/v2/regions/fr-par/private-networks/n-4
 warn  [t] [sweep] Private Network n-4 delete failed: connect ETIMEDOUT
-fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
-fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/vpcs?project_id=proj-1&page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] REGRESSION: destroy left 10 Scaleway orphan resource(s) (instances=1, volumes=3, security-groups=2, flexible-ips=1, load-balancers=1, private-networks-and-vpcs=1, buckets=0, ssh-keys=1). vibecarbon destroy did not free these — fix the corresponding destroy code path.
 result {"counts":{"servers":1,"volumes":3,"placementGroups":0,"firewalls":2,"floatingIps":1,"networks":1,"s3Buckets":0,"sshKeys":1,"loadBalancers":1},"enumFailed":true}"
 `;
@@ -465,13 +466,13 @@ warn  [t] [sweep] Instance cleanup failed: connect ETIMEDOUT
 call  listVolumesDetailed()
 warn  [t] [sweep] volume list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Volume cleanup failed: connect ETIMEDOUT
-fetch GET /instance/v1/zones/fr-par-1/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/fr-par-1/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (fr-par-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/fr-par-2/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/fr-par-2/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (fr-par-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/nl-ams-1/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-1/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (nl-ams-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /instance/v1/zones/nl-ams-2/security_groups?per_page=100&page=1
+fetch GET /instance/v1/zones/nl-ams-2/security_groups?project=proj-1&per_page=100&page=1
 warn  [t] [sweep] security-group list (nl-ams-2) enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /iam/v1alpha1/ssh-keys?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] ssh-key list enumeration incomplete — residue past the last readable page cannot be ruled out
@@ -479,21 +480,21 @@ warn  [t] [sweep] SSH-key cleanup failed: connect ETIMEDOUT
 call  listFlexibleIPsDetailed()
 warn  [t] [sweep] flexible-IP list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Flexible-IP cleanup failed: connect ETIMEDOUT
-fetch GET /lb/v1/zones/fr-par-1/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-1/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (fr-par-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/fr-par-2/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/fr-par-2/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (fr-par-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/nl-ams-1/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-1/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (nl-ams-1) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /lb/v1/zones/nl-ams-2/lbs?page_size=100&page=1
+fetch GET /lb/v1/zones/nl-ams-2/lbs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] load-balancer list (nl-ams-2) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/private-networks?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] private-network list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/private-networks?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] private-network list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] VPC list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?project_id=proj-1&page_size=100&page=1
 warn  [t] [sweep] VPC list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] REGRESSION: could not enumerate one or more Scaleway resource types — orphan check is incomplete, treat as a destroy regression.
 result {"counts":{"servers":0,"volumes":0,"placementGroups":0,"firewalls":0,"floatingIps":0,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"

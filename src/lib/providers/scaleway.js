@@ -282,10 +282,13 @@ function scalewayOperatorIds() {
  * would reach another project's resource with the same name or tags. Every
  * listing is scoped to it (projectScope), and none falls back to an unscoped
  * listing when it is missing: the listing throws instead, naming it.
+ * Returned as typed: guided setup accepts an uppercase id (UUID_FORMAT), so
+ * every comparison with a row goes through sameProject, which ignores case.
+ * Exported for the e2e orphan sweep, whose own walks stay in this project.
  * @returns {string}
  * @throws when it is not set
  */
-function configuredProjectId() {
+export function configuredProjectId() {
   const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
   if (projectId) return projectId;
   throw new Error(
@@ -312,16 +315,32 @@ function configuredProjectId() {
  *     (:492), ListVPCs (:1387) and VPC.ProjectID (:671); iam/v1alpha1
  *     ListSSHKeys (iam_sdk.go:3215) and SSHKey.ProjectID (:1535); lb/v1
  *     ZonedAPI.ListLBs (lb_sdk.go:4653) and LB.ProjectID (:1351).
+ *
+ * A caller's page walk ends on the raw page's length, never on what `keep`
+ * left of it: a full page of another project's rows is still a full page.
  * @param {'project'|'project_id'} field
+ * @param {string} [projectId] - the project; SCALEWAY_DEFAULT_PROJECT_ID
+ *   (configuredProjectId) unless given, as the e2e orphan sweep gives it
  * @returns {{query: string, keep: (rows: object[]) => object[]}}
- * @throws when SCALEWAY_DEFAULT_PROJECT_ID is not set (configuredProjectId)
+ * @throws when no id is given and SCALEWAY_DEFAULT_PROJECT_ID is not set
  */
-function projectScope(field) {
-  const projectId = configuredProjectId();
+export function projectScope(field, projectId = configuredProjectId()) {
   return {
-    query: `${field}=${encodeURIComponent(projectId)}`,
-    keep: (rows) => rows.filter((row) => row?.[field] === projectId),
+    query: `${field}=${encodeURIComponent(projectId.toLowerCase())}`,
+    keep: (rows) => rows.filter((row) => sameProject(row?.[field], projectId)),
   };
+}
+
+/**
+ * Whether two project ids name one project: UUIDs, compared without case.
+ * The API writes them lowercase (the query asks for that form too), and a
+ * configured id may be uppercase.
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {boolean}
+ */
+function sameProject(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 }
 
 /**
@@ -1454,15 +1473,17 @@ export class ScalewayProvider extends BaseProvider {
    *
    * Only a server of the configured project is deleted (configuredProjectId):
    * without SCALEWAY_DEFAULT_PROJECT_ID this refuses before any request, and
-   * a server step 1 reads in another project is refused before terminate. A
+   * a server step 1 reads in another project, or cannot read at all, is
+   * refused before terminate. A
    * key that sees several projects can read another project's server by id,
    * and an id reaches here from a listing, a record or the autoscaler.
    * @param {string} serverId
    * @param {{waitUntilGone?: boolean, onLeftover?: (line: import('./base.js').ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>}
    * @throws when a zone refused the read and no zone showed the server, when
-   *   SCALEWAY_DEFAULT_PROJECT_ID is not set, or when the server is another
-   *   project's
+   *   SCALEWAY_DEFAULT_PROJECT_ID is not set, when the server is another
+   *   project's, or when step 1's read fails (any status but 404), before
+   *   anything is terminated or deleted
    */
   async deleteServer(serverId, { waitUntilGone = false, onLeftover } = {}) {
     const projectId = configuredProjectId();
@@ -1479,7 +1500,7 @@ export class ScalewayProvider extends BaseProvider {
     const getRes = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (getRes.ok) {
       const { server } = await getRes.json();
-      if (server.project !== projectId) {
+      if (!sameProject(server.project, projectId)) {
         throw new Error(
           `Failed to delete server: ${server.name ?? serverId} (${serverId}) is in Scaleway ` +
             `project ${server.project ?? 'unknown'}, not SCALEWAY_DEFAULT_PROJECT_ID's ` +
@@ -1491,6 +1512,21 @@ export class ScalewayProvider extends BaseProvider {
       publicIpIds = (server.public_ips ?? []).map((ip) => ip?.id).filter(Boolean);
     } else if (getRes.status === 404) {
       return waitUntilGone ? false : undefined;
+    } else {
+      // A read that failed (a 403, or a 5xx or 429 fetchWithRetry gave up
+      // on) says nothing of the server's project, and captures no root
+      // volume or IP: terminating here would delete a server that may be
+      // another project's, and leak this one's SBS root volume unseen.
+      const cause = await refusal(getRes);
+      throw Object.assign(
+        new Error(
+          `Failed to delete server: reading server ${serverId} in ${zone} answered ` +
+            `${cause.message}, so vibecarbon could not confirm it is in ` +
+            `SCALEWAY_DEFAULT_PROJECT_ID's project ${projectId}. Nothing was terminated or ` +
+            'deleted; run this again once Scaleway answers',
+        ),
+        { status: getRes.status, cause },
+      );
     }
 
     // 2. Terminate (poweroff + delete in one action) …

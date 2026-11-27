@@ -743,6 +743,43 @@ describe("deleteServer deletes only the configured project's server", () => {
     expect(writes).toEqual([]);
   });
 
+  it.each([403, 500, 429])(
+    'a step-1 read that answers %i throws, naming the server, zone and status, and terminates nothing',
+    async (status) => {
+      stubScalewayProject();
+      // The zone probe finds srv-1 in fr-par-1; the read after it fails.
+      let reads = 0;
+      const writes: string[] = [];
+      fetchWithRetryMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (method !== 'GET') {
+          writes.push(`${method} ${url}`);
+          return jsonResp({}, 204);
+        }
+        if (url.endsWith('/instance/v1/zones/fr-par-1/servers/srv-1')) {
+          reads += 1;
+          return reads === 1
+            ? jsonResp({ server: { id: 'srv-1', project: SCALEWAY_TEST_PROJECT } })
+            : jsonResp({ message: 'refused' }, status);
+        }
+        return jsonResp({}, 404);
+      });
+      const err = await new ScalewayProvider('tok')
+        .deleteServer('srv-1', { waitUntilGone: true })
+        .catch((e: Error & { status?: number }) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe(
+        `Failed to delete server: reading server srv-1 in fr-par-1 answered HTTP ${status}: ` +
+          'refused, so vibecarbon could not confirm it is in ' +
+          `SCALEWAY_DEFAULT_PROJECT_ID's project ${SCALEWAY_TEST_PROJECT}. Nothing was ` +
+          'terminated or deleted; run this again once Scaleway answers',
+      );
+      expect((err as { status?: number }).status).toBe(status);
+      expect(reads).toBe(2);
+      expect(writes).toEqual([]);
+    },
+  );
+
   it("a destroy sweep never lists another project's server with our name and labels", async () => {
     stubScalewayProject();
     const { sweepEnvironmentServers } = await import('../../../src/lib/destroy/server-sweep.js');
@@ -1123,5 +1160,120 @@ describe('a server still terminating when deleteServer stops waiting', () => {
     expect(left.hint).not.toContain('once the server is gone');
     // Kept on record either way, so the next destroy runs the sweep again.
     expect(results.unreleasedReservedIps).toEqual(['203.0.113.20', '203.0.113.21']);
+  });
+});
+
+// A walk ends on the page the API sent, never on the rows the project filter
+// kept: a full page that held another project's row is still a full page,
+// and the rows after it are ours.
+describe('a project-scoped walk ends on the raw page, not on the rows it kept', () => {
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
+  /** Page 1: a full page, one row of it another project's; page 2: ours. */
+  function twoPages(path: RegExp, key: string, field: 'project' | 'project_id') {
+    const pages: number[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (!path.test(u.pathname)) return jsonResp({ [key]: [] });
+      const page = Number(u.searchParams.get('page'));
+      pages.push(page);
+      const rows =
+        page === 1
+          ? [
+              { id: 'theirs', [field]: SCALEWAY_OTHER_PROJECT },
+              ...Array.from({ length: 99 }, (_, i) => ({
+                id: `ours-${i}`,
+                [field]: SCALEWAY_TEST_PROJECT,
+              })),
+            ]
+          : page === 2
+            ? [{ id: 'ours-on-page-2', [field]: SCALEWAY_TEST_PROJECT }]
+            : [];
+      return jsonResp({ [key]: rows });
+    });
+    return pages;
+  }
+
+  it('the zone walk (Instance API) reads page 2 and keeps its row', async () => {
+    const pages = twoPages(/^\/instance\/v1\/zones\/fr-par-1\/ips$/, 'ips', 'project');
+    const { items, complete } = await new ScalewayProvider('tok').listFlexibleIPsDetailed();
+    const ids = items.map((ip: { id: string }) => ip.id);
+    expect(pages).toEqual([1, 2]);
+    expect(complete).toBe(true);
+    expect(ids).toContain('ours-on-page-2');
+    expect(ids).not.toContain('theirs');
+    expect(ids).toHaveLength(100);
+  });
+
+  it('the page_size walk (VPC API) reads page 2 and keeps its row', async () => {
+    const pages = twoPages(
+      /^\/vpc\/v2\/regions\/fr-par\/private-networks$/,
+      'private_networks',
+      'project_id',
+    );
+    const { items, complete } = await new ScalewayProvider('tok').listNetworksDetailed();
+    const ids = items.map((pn: { id: string }) => pn.id);
+    expect(pages).toEqual([1, 2]);
+    expect(complete).toBe(true);
+    expect(ids).toContain('ours-on-page-2');
+    expect(ids).not.toContain('theirs');
+    expect(ids).toHaveLength(100);
+  });
+});
+
+// Guided setup accepts an uppercase Project ID (UUID_FORMAT), and the API
+// writes every UUID lowercase: the id is compared without case.
+describe('an uppercase SCALEWAY_DEFAULT_PROJECT_ID still matches its rows', () => {
+  const UPPER = SCALEWAY_TEST_PROJECT.toUpperCase();
+
+  it('keeps the lowercase rows of the project, and asks for it lowercase', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', UPPER);
+    const queries: string[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      queries.push(u.searchParams.get('project') ?? '');
+      return jsonResp({
+        ips: u.pathname.endsWith('/zones/fr-par-1/ips')
+          ? [
+              { id: 'ours', project: SCALEWAY_TEST_PROJECT },
+              { id: 'theirs', project: SCALEWAY_OTHER_PROJECT },
+            ]
+          : [],
+      });
+    });
+    const { items } = await new ScalewayProvider('tok').listFlexibleIPsDetailed();
+    expect(items.map((ip: { id: string }) => ip.id)).toEqual(['ours']);
+    expect(new Set(queries)).toEqual(new Set([SCALEWAY_TEST_PROJECT]));
+  });
+
+  it("deleteServer reads the lowercase server as the project's own", async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', UPPER);
+    let gone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/zones/fr-par-1/servers/srv-1') && method === 'GET') {
+        return gone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: { id: 'srv-1', project: SCALEWAY_TEST_PROJECT, volumes: {}, public_ips: [] },
+            });
+      }
+      if (url.endsWith('/servers/srv-1/action') && method === 'POST') {
+        gone = true;
+        return jsonResp({ task: { id: 't' } });
+      }
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+    expect(await new ScalewayProvider('tok').deleteServer('srv-1', { waitUntilGone: true })).toBe(
+      true,
+    );
+    expect(gone).toBe(true);
   });
 });

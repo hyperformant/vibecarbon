@@ -56,6 +56,29 @@ interface Cloud {
   deleteThrows: Scenario;
 }
 
+/**
+ * Scaleway listings as the API answers them in the sweep's project
+ * ('proj-1'): every row gets `project` and `project_id` unless it names its
+ * own, since the sweep keeps only that project's rows.
+ */
+function inProj1(gets: Record<string, Get>): Record<string, Get> {
+  return Object.fromEntries(
+    Object.entries(gets).map(([path, body]) => [
+      path,
+      typeof body === 'object'
+        ? Object.fromEntries(
+            Object.entries(body).map(([key, value]) => [
+              key,
+              Array.isArray(value)
+                ? value.map((row: Row) => ({ project: 'proj-1', project_id: 'proj-1', ...row }))
+                : value,
+            ]),
+          )
+        : body,
+    ]),
+  );
+}
+
 /** Provider listings every scenario starts from: nothing there, all read. */
 function baseProvider(): ProviderFns {
   return {
@@ -441,7 +464,6 @@ const CLOUDS: Cloud[] = [
       provider: {
         ...serversAndVolumes('name'),
         ...loadBalancerDeletes,
-        deleteFirewallByName: async (name: unknown) => ({ deleted: name !== `${P}-sg-refused` }),
         deleteSSHKeyByName: async (name: unknown) => name !== `${P}-key-refused`,
         listFlexibleIPsDetailed: async () => ({
           items: [
@@ -461,7 +483,7 @@ const CLOUDS: Cloud[] = [
         }),
         releaseFlexibleIP: async (id: unknown) => id !== 'ip-2',
       },
-      gets: {
+      gets: inProj1({
         '/instance/v1/zones/fr-par-1/security_groups': {
           security_groups: [
             { id: 'g-1', name: `${P}-sg` },
@@ -486,8 +508,14 @@ const CLOUDS: Cloud[] = [
         '/vpc/v2/regions/nl-ams/private-networks': {
           private_networks: [...fiveNets('name'), { id: 'n-6' }],
         },
-      },
+        // Another project's group, with this run's prefix: never deleted.
+        '/instance/v1/zones/fr-par-2/security_groups': {
+          security_groups: [{ id: 'g-7', name: `${P}-sg-theirs`, project: 'proj-other' }],
+        },
+      }),
       deletes: {
+        // Security groups go by id and zone: g-2 is refused.
+        '/instance/v1/zones/fr-par-1/security_groups/g-2': 409,
         // n-1 is found in the second region; n-2 is in neither; n-3 is
         // refused in both; n-4 throws on the first try.
         '/vpc/v2/regions/fr-par/private-networks/n-1': 404,
@@ -500,9 +528,6 @@ const CLOUDS: Cloud[] = [
     },
     deleteThrows: {
       provider: {
-        deleteFirewallByName: async () => {
-          throw boom();
-        },
         deleteSSHKeyByName: async () => {
           throw boom();
         },
@@ -517,7 +542,7 @@ const CLOUDS: Cloud[] = [
           throw boom();
         },
       },
-      gets: {
+      gets: inProj1({
         '/instance/v1/zones/fr-par-1/security_groups': {
           security_groups: [
             { id: 'g-1', name: `${P}-sg` },
@@ -534,6 +559,12 @@ const CLOUDS: Cloud[] = [
             { id: 'k-2', name: `${P}-key-2` },
           ],
         },
+      }),
+      // A group's delete is a fetch, and a throw is caught per group.
+      deletes: {
+        '/instance/v1/zones/fr-par-1/security_groups/g-1': 'throw',
+        '/instance/v1/zones/fr-par-1/security_groups/g-2': 'throw',
+        '/instance/v1/zones/fr-par-2/security_groups/g-3': 'throw',
       },
     },
   },
