@@ -135,10 +135,12 @@ import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import { waitForRemoteMarker } from '../remote-marker.js';
 import {
+  attachRefusalsOf,
   READ_WRITE_PGOPTIONS,
   REPL_PORT,
   restoreRolloutTimeoutS,
   StaleVolumeAttachmentError,
+  VolumeAttachRefusedError,
   watchDbAttach,
 } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
@@ -160,6 +162,7 @@ import {
 import { awaitAcmeChallengesSettled, challengeWaitLine } from './acme-challenges.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { DEPLOY_OWNED_CERTIFICATES } from './acme-order-recovery.js';
+import { logAttachRefusalView } from './attach-refusal-view.js';
 import { carbonAutoscalerSecretYaml } from './autoscaler-secret.js';
 import { podWarningClause, readDbPodWarnings } from './db-pod-warning.js';
 import {
@@ -3438,13 +3441,18 @@ export async function assertNoRetiredChartDb({
  * Fails EARLY on a stale volume attachment (watchDbAttach): the wait runs
  * while the current db pod's events are read every `staleAttachPollMs`, and
  * once the mkfs-on-a-missing-device signature has held it stops and names
- * that state. It repairs nothing and retries nothing.
+ * that state. It stops the same way on a refused attach the provider class
+ * declares permanent (`attachRefusals`, VolumeAttachRefusedError: Vultr runs
+ * 45940611622 and 45966805225), and then first hands the refusal to
+ * `onAttachRefused`, which the deploy uses to log the provider's view of the
+ * database server and the volume (attach-refusal-view.js); that never
+ * replaces the failure. It repairs nothing and retries nothing.
  *
  * A k8s-ha standby's deploy passes `hint` (standbyDbRebuildHint): its db
  * holds only a replica, so a db that never becomes Ready there has a manual
  * way back, which a timeout names.
  *
- * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>, hint?: string}} args
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>, hint?: string, attachRefusals?: import('../replication.js').AttachRefusals, onAttachRefused?: (refusal: VolumeAttachRefusedError) => Promise<void>}} args
  */
 export async function awaitDbRollout({
   env,
@@ -3453,6 +3461,8 @@ export async function awaitDbRollout({
   staleAttachPollMs = 15_000,
   waitRollout = runKubectlWithRetry,
   kubectl = localKubectlReader(env),
+  attachRefusals,
+  onAttachRefused,
 }) {
   const started = Date.now();
   try {
@@ -3473,10 +3483,17 @@ export async function awaitDbRollout({
             signal,
           },
         ),
-      { kubectl, pollMs: staleAttachPollMs },
+      { kubectl, pollMs: staleAttachPollMs, attachRefusals },
     );
   } catch (err) {
-    if (err instanceof StaleVolumeAttachmentError) {
+    if (err instanceof VolumeAttachRefusedError) {
+      try {
+        await onAttachRefused?.(err);
+      } catch {
+        // the provider's view is evidence for the log, never the failure
+      }
+    }
+    if (err instanceof StaleVolumeAttachmentError || err instanceof VolumeAttachRefusedError) {
       throw new Error(`awaitDbRollout: ${err.message} ${await describeDbPods(env)}`);
     }
     throw new Error(
@@ -4676,6 +4693,10 @@ export async function applyK3sManifests({
   // node-join.js). awaitDb runs it before the db wait, which cannot pass
   // without the database node.
   nodesJoined,
+  // Logs the provider's view of the database server and the db volume when
+  // the provider refused to attach it and the refusal held (deployK3s:
+  // logAttachRefusalView). Bounded, and never throws.
+  describeAttachRefusal,
 }) {
   if (!masterIp) throw new Error('applyK3sManifests: masterIp required');
   if (!sshKeyPath) throw new Error('applyK3sManifests: sshKeyPath required');
@@ -5671,6 +5692,10 @@ export async function applyK3sManifests({
         timeoutS: dbRolloutTimeoutS,
         // A pilot standby's db holds only a replica: name the rebuild.
         hint: role === 'standby' ? standbyDbRebuildHint(operatorEnv ?? environment) : '',
+        // A refusal this provider declares permanent stops the wait at once,
+        // after the provider's view of the server and the volume is logged.
+        attachRefusals: attachRefusalsOf(ProviderClass),
+        onAttachRefused: describeAttachRefusal,
       }),
     );
     await awaitPostgresAccepting({ env, dbPod: DB_POD });
@@ -6789,6 +6814,24 @@ async function deployK3sSteps(options, inFlight) {
       }),
     );
 
+  // The provider refused to attach the db volume and the refusal held
+  // (VolumeAttachRefusedError): what it says about the database server and
+  // the volume, logged before the deploy fails (attach-refusal-view.js).
+  // Read only then, bounded, and it never throws.
+  const describeAttachRefusal = (refusal) =>
+    logAttachRefusalView({
+      provider: new Provider(options.apiToken),
+      Provider,
+      dbNode: clusterNodes.find((n) => n.role === 'db'),
+      volume: refusal.volume,
+      readPv: (name) =>
+        runCommandAsync(['kubectl', 'get', 'pv', name, '-o', 'json', '--request-timeout=10s'], {
+          env: { ...process.env, KUBECONFIG: kubeconfig },
+          silent: true,
+          timeout: 15_000,
+        }),
+    });
+
   // 5b. The cluster's restore marker decides what this deploy may do (a
   //     pending restore stops a plain deploy; a running database stops
   //     `deploy -restore`). Outside every step gate on purpose: a skipped
@@ -6975,6 +7018,8 @@ async function deployK3sSteps(options, inFlight) {
         // Every node joined, or the deploy stops naming the one that did
         // not: awaitDb runs it before the db wait.
         nodesJoined,
+        // A refused volume attach that held: the provider's view, logged.
+        describeAttachRefusal,
       }),
     );
     tlsRestoredAt = applied?.tlsRestoredAt ?? null;

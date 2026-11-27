@@ -653,11 +653,14 @@ export const STALE_ATTACH_EVENT_PATTERN =
   /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
 
 /**
- * How long the stale-attachment signature must have held before a db rollout
- * wait gives up on it. kubelet retries MountDevice with an exponential
- * backoff (0.5s doubling, capped near 2 minutes), so a device that is merely
- * slow to appear clears within the first few retries; two minutes of
- * `mkfs` on a device that still does not exist is the stale state itself.
+ * How long a watched signature must have held before a db rollout wait gives
+ * up on it. Both run on Kubernetes' volume operation backoff (0.5s doubling,
+ * capped near 2 minutes): kubelet's MountDevice retries for the stale
+ * attachment, and the attachdetach-controller's AttachVolume retries for a
+ * refused attach (persistentAttachRefusal). So a device that is merely slow
+ * to appear, or one refusal right after the volume was created, clears
+ * within the first few retries; two minutes of the same failure is the state
+ * itself.
  */
 const STALE_ATTACH_PERSIST_MS = 120_000;
 
@@ -683,28 +686,103 @@ const MISSING_DEVICE_PATTERN = /does not exist and no size was specified/;
  * @returns {{volume: string, count: number, persistedS: number}|null}
  */
 export function persistentStaleAttach(eventsJson, { minPersistMs = STALE_ATTACH_PERSIST_MS } = {}) {
-  let items;
-  try {
-    items = JSON.parse(String(eventsJson))?.items;
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(items)) return null;
-  for (const ev of items) {
+  for (const ev of eventItems(eventsJson)) {
     const message = String(ev?.message ?? '');
     if (!STALE_ATTACH_EVENT_PATTERN.test(message) || !MISSING_DEVICE_PATTERN.test(message)) {
       continue;
     }
-    const first = Date.parse(ev.firstTimestamp ?? ev.eventTime ?? '');
-    const last = Date.parse(ev.series?.lastObservedTime ?? ev.lastTimestamp ?? ev.eventTime ?? '');
-    if (!Number.isFinite(first) || !Number.isFinite(last) || last - first < minPersistMs) continue;
-    return {
-      volume: message.match(/for volume "([^"]+)"/)?.[1] ?? 'the db volume',
-      count: Number(ev.series?.count ?? ev.count ?? 1),
-      persistedS: Math.round((last - first) / 1000),
-    };
+    const held = heldFor(ev, minPersistMs);
+    if (held) return { volume: volumeOf(message), ...held };
   }
   return null;
+}
+
+/** The items of `kubectl get events -o json`; unreadable input is none. */
+function eventItems(eventsJson) {
+  try {
+    const items = JSON.parse(String(eventsJson))?.items;
+    return Array.isArray(items) ? items : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * How many times, and over how long, one event was seen, by the cluster's
+ * own clock, or null when that is under `minPersistMs`. Reads the core/v1
+ * shape (firstTimestamp/lastTimestamp/count) and the events.k8s.io one
+ * (eventTime + series).
+ * @returns {{count: number, persistedS: number}|null}
+ */
+function heldFor(ev, minPersistMs) {
+  const first = Date.parse(ev.firstTimestamp ?? ev.eventTime ?? '');
+  const last = Date.parse(ev.series?.lastObservedTime ?? ev.lastTimestamp ?? ev.eventTime ?? '');
+  if (!Number.isFinite(first) || !Number.isFinite(last) || last - first < minPersistMs) return null;
+  return {
+    count: Number(ev.series?.count ?? ev.count ?? 1),
+    persistedS: Math.round((last - first) / 1000),
+  };
+}
+
+/** The volume a mount or attach event names. */
+function volumeOf(message) {
+  return message.match(/for volume "([^"]+)"/)?.[1] ?? 'the db volume';
+}
+
+/**
+ * The second watched signature: the provider refused to attach the db volume
+ * to its node with words its provider class declares permanent
+ * (ATTACH_REFUSALS_PERMANENT), and the refusal has held for at least
+ * `minPersistMs`. Vultr runs 45940611622 and 45966805225 (2026-11-27, fresh
+ * vc2-4c-8gb in ewr): every ControllerPublishVolume for 900 s answered
+ * "Block storage is not compatible with this server" (400), and db-0 sat
+ * Pending for the db wait's whole budget. One refusal right after the volume
+ * was made is not the state; a refusal that has held is.
+ *
+ * Pure. Reads `kubectl get events -o json` for ONE db pod (the caller scopes
+ * it to the pod's uid), FailedAttachVolume events only; timestamps are the
+ * cluster's. An empty list, unreadable input, or a wording not on the list
+ * is no verdict, so every other failure keeps today's timeout.
+ *
+ * @param {string} eventsJson
+ * @param {{permanent?: readonly RegExp[], minPersistMs?: number}} [opts]
+ * @returns {{volume: string, count: number, persistedS: number, providerMessage: string}|null}
+ *   `providerMessage` is the provider's own words, as the declared pattern matched them
+ */
+export function persistentAttachRefusal(
+  eventsJson,
+  { permanent = [], minPersistMs = STALE_ATTACH_PERSIST_MS } = {},
+) {
+  if (permanent.length === 0) return null;
+  for (const ev of eventItems(eventsJson)) {
+    if (ev?.reason !== 'FailedAttachVolume') continue;
+    const message = String(ev?.message ?? '');
+    const said = permanent.map((re) => message.match(re)).find(Boolean);
+    if (!said) continue;
+    const held = heldFor(ev, minPersistMs);
+    if (held) return { volume: volumeOf(message), ...held, providerMessage: said[0] };
+  }
+  return null;
+}
+
+/**
+ * What a db rollout wait needs to know to stop on a refused attach: the
+ * provider's name, for the message, and the refusals its class declares
+ * permanent. Built from the provider class by the caller, which knows it;
+ * this module never reads the provider registry.
+ * @typedef {{provider: string, permanent: readonly RegExp[]}} AttachRefusals
+ */
+
+/**
+ * @param {{NAME?: string, ATTACH_REFUSALS_PERMANENT?: readonly RegExp[]}|undefined} ProviderClass
+ *   none (a caller that does not know its provider) declares no refusals
+ * @returns {AttachRefusals}
+ */
+export function attachRefusalsOf(ProviderClass) {
+  return {
+    provider: ProviderClass?.NAME || 'the provider',
+    permanent: ProviderClass?.ATTACH_REFUSALS_PERMANENT ?? [],
+  };
 }
 
 /**
@@ -731,6 +809,34 @@ export class StaleVolumeAttachmentError extends Error {
   }
 }
 
+/**
+ * A db rollout wait stopped because the provider refused to attach the db
+ * volume to the database node, in words its class declares permanent, and
+ * the refusal held (persistentAttachRefusal). It names no command: no CLI
+ * step makes the provider take the volume on this server, and nothing here
+ * replaces one, so the provider's support is the way to learn why.
+ */
+export class VolumeAttachRefusedError extends Error {
+  /** @param {{provider: string, volume: string, count: number, persistedS: number, providerMessage: string}} refusal */
+  constructor(refusal) {
+    const { provider } = refusal;
+    super(
+      `${provider} refused to attach the db volume ${refusal.volume} to the database node, ` +
+        `${refusal.count} times over ${refusal.persistedS}s, in its own words: ` +
+        `"${refusal.providerMessage}". Waiting does not change that: on the servers this ` +
+        'refusal has been seen on, it never cleared. Nothing was retried or replaced. ' +
+        `${provider}'s support can say why this server cannot take the volume; once that is ` +
+        'sorted, run the command that failed again.',
+    );
+    this.name = 'VolumeAttachRefusedError';
+    this.provider = provider;
+    this.volume = refusal.volume;
+    this.count = refusal.count;
+    this.persistedS = refusal.persistedS;
+    this.providerMessage = refusal.providerMessage;
+  }
+}
+
 /** Every watcher read is bounded: kubectl's own request timeout, then the process. */
 const ATTACH_WATCH_REQUEST_TIMEOUT = '--request-timeout=20s';
 const ATTACH_WATCH_READ_TIMEOUT_MS = 30_000;
@@ -738,7 +844,11 @@ const ATTACH_WATCH_READ_TIMEOUT_MS = 30_000;
 /**
  * Run a db rollout wait while watching the db pod for the stale-attachment
  * state, and stop the wait early, with StaleVolumeAttachmentError, once it
- * has held (persistentStaleAttach). Every db rollout wait that (re)attaches
+ * has held (persistentStaleAttach). It stops the same way, with
+ * VolumeAttachRefusedError, on a refused attach the provider class declares
+ * permanent once that has held (persistentAttachRefusal, `attachRefusals`):
+ * Vultr runs 45940611622 and 45966805225, where a fresh database server never
+ * took its volume in 900 s. Every db rollout wait that (re)attaches
  * the db volume goes through here: the cold and redeploy rollout
  * (awaitDbRollout), the deploy-side reseed's standby boot, and the remote
  * db settles (k8sDbRolloutWait). A volume in that state never mounts by
@@ -760,13 +870,19 @@ const ATTACH_WATCH_READ_TIMEOUT_MS = 30_000;
  * @param {object} o
  * @param {(argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>} o.kubectl - runs `kubectl <argv>` against the cluster (locally, or over ssh) and returns stdout
  * @param {number} [o.pollMs]
+ * @param {AttachRefusals} [o.attachRefusals] - the provider's permanent refusals
+ *   (attachRefusalsOf); none means only the stale attachment stops the wait.
+ *   Every caller passes it (attach-refusal census in
+ *   tests/unit/deploy/db-attach-watch.test.ts).
  * @returns {Promise<T>}
  */
-export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
+export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000, attachRefusals }) {
   const rollout = new AbortController();
   const stop = new AbortController();
   const stopped = new Promise((resolve) => stop.signal.addEventListener('abort', resolve));
-  let stale = null;
+  /** @type {Error|null} what stopped the wait, once a signature has held */
+  let verdict = null;
+  const permanent = attachRefusals?.permanent ?? [];
   const read = (argv) =>
     Promise.race([
       kubectl([...argv, ATTACH_WATCH_REQUEST_TIMEOUT], {
@@ -802,11 +918,19 @@ export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
           'json',
         ]);
         if (events == null) continue;
-        stale = persistentStaleAttach(events);
+        const stale = persistentStaleAttach(events);
+        const refused = stale ? null : persistentAttachRefusal(events, { permanent });
+        if (stale) verdict = new StaleVolumeAttachmentError(stale);
+        else if (refused) {
+          verdict = new VolumeAttachRefusedError({
+            ...refused,
+            provider: attachRefusals?.provider || 'the provider',
+          });
+        }
       } catch {
         continue; // an unreadable pod or listing is no evidence
       }
-      if (stale) {
+      if (verdict) {
         rollout.abort();
         return;
       }
@@ -815,7 +939,7 @@ export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
   try {
     return await waitRollout(rollout.signal);
   } catch (err) {
-    if (stale) throw new StaleVolumeAttachmentError(stale);
+    if (verdict) throw verdict;
     throw err;
   } finally {
     stop.abort();
@@ -828,7 +952,8 @@ export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
  * watchDbAttach: a db pod that is down or mid-roll re-attaches its volume on
  * the way back (the do-csi-stale-volumeattachment trigger), so a stale
  * attachment stops the wait early with StaleVolumeAttachmentError instead of
- * burning the budget. The ssh budget sits 30s above the kubectl --timeout so
+ * burning the budget, and so does a refused attach `attachRefusals` declares
+ * permanent (VolumeAttachRefusedError). The ssh budget sits 30s above the kubectl --timeout so
  * kubectl reports a rollout failure itself. The one way a remote caller waits
  * on a db roll (db-rollout-wait census in
  * tests/unit/deploy/db-attach-watch.test.ts).
@@ -838,13 +963,20 @@ export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
  * @param {string} o.ip
  * @param {number} [o.timeoutS]
  * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
+ * @param {AttachRefusals} [o.attachRefusals] - the cluster's provider's permanent refusals
  * @returns {Promise<string>}
  */
-export function k8sDbRolloutWait({ kubectl, ip, timeoutS = DB_STS_BOOT_TIMEOUT_S, pollMs }) {
+export function k8sDbRolloutWait({
+  kubectl,
+  ip,
+  timeoutS = DB_STS_BOOT_TIMEOUT_S,
+  pollMs,
+  attachRefusals,
+}) {
   return watchDbAttach(
     (signal) =>
       kubectl(ip, k8sDbRolloutStatusArgv(timeoutS), { timeout: (timeoutS + 30) * 1000, signal }),
-    { kubectl: (argv, opts) => kubectl(ip, argv, opts), pollMs },
+    { kubectl: (argv, opts) => kubectl(ip, argv, opts), pollMs, attachRefusals },
   );
 }
 
@@ -1118,6 +1250,8 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
  * @param {() => object|undefined} [opts.readEnvConfig] - the env's config read now
  * @param {(systemIdentifier: string) => (void|Promise<void>)} [opts.onSeeded]
  * @param {number} [opts.attachWatchPollMs]
+ * @param {AttachRefusals} [opts.attachRefusals] - the standby's provider's
+ *   permanent attach refusals, for the db wait when the restart recreated the pod
  * @param {(ms: number) => Promise<void>} [opts.sleep]
  * @param {() => number} [opts.now]
  * @returns {Promise<'reseeded'|'skipped'>}
@@ -1133,6 +1267,7 @@ export async function reseedStandbyFromPrimary(
     onSeeded,
     readEnvConfig = () => loadProjectConfig()?.environments?.[envName],
     attachWatchPollMs,
+    attachRefusals,
     sleep,
     now,
   } = {},
@@ -1187,6 +1322,7 @@ export async function reseedStandbyFromPrimary(
     stageScript,
     envName,
     attachWatchPollMs,
+    attachRefusals,
     sleep,
     now,
     beforeStage: () => prepareReseedSource(primaryKubectl, { envName }),
@@ -1477,6 +1613,7 @@ function newReseedAttempt() {
  * @param {number} [o.stageProbeS=0] the stage's own probe budget before the
  *   transfer starts; added to the client bound so it never cuts a stage short
  * @param {number} [o.attachWatchPollMs]
+ * @param {AttachRefusals} [o.attachRefusals] - the provider's permanent attach refusals, for the recreated pod's wait
  * @param {(ms: number) => Promise<void>} [o.sleep]
  * @param {() => number} [o.now]
  * @returns {Promise<'reseeded'|'skipped'>}  'skipped' only when the stage printed RESEED_SKIPPED
@@ -1490,6 +1627,7 @@ export async function reseedStandbyInPlace({
   onGuard,
   stageProbeS = 0,
   attachWatchPollMs,
+  attachRefusals,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
 }) {
@@ -1539,6 +1677,7 @@ export async function reseedStandbyInPlace({
           kubectl: (_ip, argv, opts) => kubectl(argv, opts),
           ip: '',
           pollMs: attachWatchPollMs,
+          attachRefusals,
         }),
       sleep,
       now,

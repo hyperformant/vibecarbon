@@ -1070,7 +1070,8 @@ export class HetznerProvider extends BaseProvider {
   /**
    * Hetzner's view of a server for the failure log (see
    * BaseProvider.describeServerForDiagnosis): GET /servers/{id} for its
-   * status, `created`, datacenter and addresses (`public_net.ipv4.ip`, read
+   * status, `created`, datacenter, server type (`server_type.name`, as
+   * getServerSummary reads it) and addresses (`public_net.ipv4.ip`, read
    * by getPublicIP, and `private_net[0].ip`, its address on the cluster's
    * network: a k8s server is on exactly one), and GET /servers/{id}/actions,
    * newest first, for what Hetzner did to it (create_server, start_server,
@@ -1102,6 +1103,7 @@ export class HetznerProvider extends BaseProvider {
       status: server.status ?? null,
       created: server.created ?? null,
       location: server.datacenter?.name ?? null,
+      plan: server.server_type?.name ?? null,
       publicIp: HetznerProvider.getPublicIP(server),
       privateIp: server.private_net?.[0]?.ip || null,
       ...history,

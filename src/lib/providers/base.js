@@ -306,6 +306,10 @@ const DIAGNOSIS_READ_TIMEOUT_MS = 5000;
  * @property {string|null} [detail] - provider state worth reading beside it (Vultr's power and subscription, Scaleway's state_detail)
  * @property {string|null} created - when the provider says it was made
  * @property {string|null} location - datacenter, region or zone
+ * @property {string|null} [plan] - the size the provider gave it, in its own
+ *   words (Hetzner `server_type.name`, DigitalOcean `size_slug`, Linode
+ *   `type`, Vultr `plan`, Scaleway `commercial_type`: the field each
+ *   getServerSummary reads from the same response)
  * @property {string|null} publicIp - the public IPv4 the provider lists for
  *   it (the provider's getPublicIP), read from the same server read; null
  *   when it lists none
@@ -317,6 +321,20 @@ const DIAGNOSIS_READ_TIMEOUT_MS = 5000;
  * @property {ServerProviderEvent[]} events - newest first, at most SERVER_VIEW_EVENTS
  * @property {string} [eventsError] - why the recent actions could not be read
  * @property {string} [eventsNote] - why this provider has none to read
+ */
+
+/**
+ * What the provider itself says about one block volume
+ * (describeVolumeForDiagnosis), named fields only.
+ * @typedef {object} VolumeProviderView
+ * @property {string} id
+ * @property {string|null} label
+ * @property {string|null} blockType - the provider's word for the kind of volume (Vultr `high_perf`, `storage_opt`)
+ * @property {string|null} region
+ * @property {number|null} sizeGb
+ * @property {string|null} status
+ * @property {string|null} attachedToInstance - the server it is attached to, null when none
+ * @property {string|null} created
  */
 
 /**
@@ -715,6 +733,21 @@ export class BaseProvider {
    * @type {ReadonlyArray<{namespace: string, name: string, keys?: string[], copyOf?: string}>}
    */
   static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([]);
+
+  /**
+   * The CSI attach refusals this provider gives that never clear on the
+   * server that got them: the wordings of a FailedAttachVolume event's
+   * message that, once they have held two minutes, stop the db rollout wait
+   * at once with VolumeAttachRefusedError (watchDbAttach,
+   * persistentAttachRefusal in src/lib/deploy/replication.js) instead of
+   * spending the rest of its budget. Only measured wordings: each entry
+   * cites the runs it was read in, and
+   * tests/unit/deploy/db-attach-watch.test.ts holds every pattern to a
+   * measured message. None by default, so every other refusal keeps the
+   * wait's own timeout.
+   * @type {ReadonlyArray<RegExp>}
+   */
+  static ATTACH_REFUSALS_PERMANENT = Object.freeze([]);
 
   /**
    * Resources this provider's programs once declared and no longer do, which
@@ -1128,6 +1161,24 @@ export class BaseProvider {
       `${this.constructor.NAME || 'This provider'} has no read of a server's own status, ` +
         'so the failure log cannot record what the provider says about it',
     );
+  }
+
+  /**
+   * What the provider itself says about one block volume, for the log of a db
+   * wait the provider stopped by refusing to attach it
+   * (VolumeAttachRefusedError, logAttachRefusalView in
+   * src/lib/deploy/k8s/attach-refusal-view.js): its type, region, size,
+   * status, what it is attached to and when it was made. Same contract as
+   * describeServerForDiagnosis: GETs only, each one attempt under
+   * DIAGNOSIS_READ_TIMEOUT_MS (_readForDiagnosis), never retried; a failed
+   * read throws. Only a provider that declares a permanent refusal
+   * (ATTACH_REFUSALS_PERMANENT) reaches it, so the others keep this stub:
+   * null, meaning not read.
+   * @param {string} _volumeId - the provider's volume id (the PV's CSI handle, as csi-volumes.js reads it)
+   * @returns {Promise<VolumeProviderView|null>}
+   */
+  async describeVolumeForDiagnosis(_volumeId) {
+    return null;
   }
 
   /**

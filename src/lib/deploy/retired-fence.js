@@ -48,6 +48,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { providerFor } from '../providers/index.js';
 import { hasSentinelLine } from '../remote-sentinel.js';
 import {
   composeWriterServices,
@@ -60,11 +61,13 @@ import { sshRun as composeSshRun } from './compose/index.js';
 import { dbExecArgv } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import {
+  attachRefusalsOf,
   fenceDatabaseWrites,
   k8sDbRolloutWait,
   k8sPsqlRunner,
   StaleVolumeAttachmentError,
   tierPsqlFor,
+  VolumeAttachRefusedError,
   WRITE_FENCE_SETTING,
 } from './replication.js';
 import {
@@ -425,28 +428,37 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
  * failure is a quiet false, like every other fence step (the caller reports
  * the part as missing). A stale volume attachment is a false too, but its
  * name and recovery reach the operator once: otherwise the fence would only
- * say the db "did not answer", hiding the one state waiting cannot clear.
+ * say the db "did not answer", hiding the one state waiting cannot clear. So
+ * is a volume attach the provider refuses for good (`attachRefusals`,
+ * VolumeAttachRefusedError).
  *
  * @param {object} o
  * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} o.kubectl
  * @param {string} o.ip
  * @param {(line: string) => void} o.warn
  * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
+ * @param {import('./replication.js').AttachRefusals} [o.attachRefusals] - the retired side's provider's permanent refusals
  * @returns {Promise<boolean>}
  */
-export async function settleK8sDb({ kubectl, ip, warn, pollMs }) {
+export async function settleK8sDb({ kubectl, ip, warn, pollMs, attachRefusals }) {
   try {
-    await k8sDbRolloutWait({ kubectl, ip, timeoutS: DB_SETTLE_TIMEOUT_S, pollMs });
+    await k8sDbRolloutWait({
+      kubectl,
+      ip,
+      timeoutS: DB_SETTLE_TIMEOUT_S,
+      pollMs,
+      attachRefusals,
+    });
     return true;
   } catch (err) {
-    if (err instanceof StaleVolumeAttachmentError) {
+    if (err instanceof StaleVolumeAttachmentError || err instanceof VolumeAttachRefusedError) {
       warn(`retired side ${ip}: its db did not come back. ${err.message}`);
     }
     return false;
   }
 }
 
-function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
+function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn, attachRefusals }) {
   return {
     probe: (ip) => probeK8s(ip, { kubectl, psqlFor, workloads }),
     // Ordered so backups are refused first, the database stops taking writes
@@ -552,7 +564,7 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
       },
     ],
     // The db pod was down or mid-roll: wait for it (bounded) before the second pass.
-    settle: (ip) => settleK8sDb({ kubectl, ip, warn }),
+    settle: (ip) => settleK8sDb({ kubectl, ip, warn, attachRefusals }),
   };
 }
 
@@ -674,6 +686,9 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
       zeroWorkloads: deps.zeroWorkloads,
       workloads: k8sFencedWorkloads(),
       warn: deps.warn ?? ((line) => p.log.warn(line)),
+      // A volume attach the provider refuses for good ends the db settle at
+      // once, by name. No envConfig reads as the default provider's: none.
+      attachRefusals: attachRefusalsOf(providerFor(envConfig)),
     });
   }
   if (tier === 'compose-ha') {

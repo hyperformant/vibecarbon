@@ -12,17 +12,35 @@
  *     machine's clock;
  *   - a hung read can never hang the wait: each read gets the stop signal
  *     and a bounded timeout, and kubectl a --request-timeout;
- *   - the signature is the missing-device one, not any formatting failure.
+ *   - the signature is the missing-device one, not any formatting failure;
+ *   - the second signature, a refusal to attach that the provider class
+ *     declares permanent (ATTACH_REFUSALS_PERMANENT, only measured wordings:
+ *     Vultr runs 45940611622 and 45966805225), stops the wait once it has
+ *     held two minutes, and a wording not on the list never does;
+ *   - every db rollout wait is handed its provider's refusal list (census).
  */
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
 import {
+  attachRefusalsOf,
+  persistentAttachRefusal,
   persistentStaleAttach,
   StaleVolumeAttachmentError,
+  VolumeAttachRefusedError,
   watchDbAttach,
 } from '../../../src/lib/deploy/replication.js';
+import { BaseProvider } from '../../../src/lib/providers/base.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { type AstNode, calleeName, isFunctionNode, walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import {
+  DB_POD_UID,
+  FAILED_ATTACH_MESSAGE,
+  failedAttachEvent,
+} from '../../_shared/vultr-failed-attach-event.js';
 
 const VOL = 'pvc-a769b72d-05d6-451d-adbe-c05698766f80';
 const MKFS_MISSING =
@@ -360,5 +378,452 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
     // restore) restarts the db in place and waits through k8sDbRolloutWait
     // only when the pod was recreated. No WALG_ROLE roll is left to wait on.
     expect(seen).toBeGreaterThanOrEqual(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The second signature: the provider refused the attach, and it held
+// ---------------------------------------------------------------------------
+
+/**
+ * The FailedAttachVolume message of run 45966805225 (vultr/k8s restore-deploy,
+ * 2026-11-27, fresh vc2-4c-8gb in ewr), `x15 over 15m`. The shared fixture is
+ * run 45940611622's. Every pattern a provider declares permanent must match
+ * one of its measured messages (MEASURED below).
+ */
+const RUN_45966805225_MESSAGE =
+  'AttachVolume.Attach failed for volume "pvc-d77e8ece45b54f59" : rpc error: code = Internal ' +
+  'desc = ControllerPublishVolume: cannot attach volume to node: storage handler unable to ' +
+  'attach block storage : {"error":"Block storage is not compatible with this server","status":400}';
+
+/** Each provider's measured permanent refusals, with the runs they were read in. */
+const MEASURED: Record<string, { runs: string; message: string }[]> = {
+  vultr: [
+    { runs: '45940611622', message: FAILED_ATTACH_MESSAGE },
+    { runs: '45966805225', message: RUN_45966805225_MESSAGE },
+  ],
+};
+
+/** A FailedAttachVolume wording no provider declares permanent (a negative case, not a measurement). */
+const NOT_ON_THE_LIST =
+  'AttachVolume.Attach failed for volume "pvc-8d578e6fd25c44b0" : rpc error: code = Internal ' +
+  'desc = ControllerPublishVolume: cannot attach volume to node: storage handler unable to ' +
+  'attach block storage : {"error":"server is busy, try again","status":400}';
+
+const VULTR = attachRefusalsOf(VultrProvider);
+const ONE_MINUTE_IN = { lastTimestamp: '2026-11-27T05:00:20Z', count: 6 }; // held 99 s
+const eventsJson = (...items: Ev[]) => JSON.stringify({ kind: 'List', items });
+
+describe('persistentAttachRefusal', () => {
+  const permanent = VultrProvider.ATTACH_REFUSALS_PERMANENT;
+
+  it("names the volume, the count, the time held and the provider's own words once it has held two minutes", () => {
+    expect(persistentAttachRefusal(eventsJson(failedAttachEvent()), { permanent })).toEqual({
+      volume: 'pvc-8d578e6fd25c44b0',
+      count: 15,
+      persistedS: 906,
+      providerMessage: 'Block storage is not compatible with this server',
+    });
+  });
+
+  it('reads the events.k8s.io shape (eventTime + series)', () => {
+    const series = failedAttachEvent({
+      firstTimestamp: null,
+      lastTimestamp: null,
+      count: null,
+      eventTime: '2026-11-27T04:58:41.000000Z',
+      series: { count: 15, lastObservedTime: '2026-11-27T05:13:47.000000Z' },
+    });
+    expect(persistentAttachRefusal(eventsJson(series), { permanent })).toMatchObject({
+      count: 15,
+      persistedS: 906,
+    });
+    const young = failedAttachEvent({
+      firstTimestamp: null,
+      lastTimestamp: null,
+      count: null,
+      eventTime: '2026-11-27T04:58:41.000000Z',
+      series: { count: 6, lastObservedTime: '2026-11-27T05:00:20.000000Z' },
+    });
+    expect(persistentAttachRefusal(eventsJson(young), { permanent })).toBeNull();
+  });
+
+  it('one refusal right after create is not the state: under two minutes is no verdict', () => {
+    expect(
+      persistentAttachRefusal(eventsJson(failedAttachEvent(ONE_MINUTE_IN)), { permanent }),
+    ).toBeNull();
+    // A single first refusal: first and last are the same instant.
+    expect(
+      persistentAttachRefusal(
+        eventsJson(failedAttachEvent({ lastTimestamp: '2026-11-27T04:58:41Z', count: 1 })),
+        { permanent },
+      ),
+    ).toBeNull();
+  });
+
+  it('a wording not on the list, the measured words under another reason, or an empty list: never', () => {
+    expect(
+      persistentAttachRefusal(eventsJson(failedAttachEvent({ message: NOT_ON_THE_LIST })), {
+        permanent,
+      }),
+    ).toBeNull();
+    expect(
+      persistentAttachRefusal(eventsJson(failedAttachEvent({ reason: 'FailedMount' })), {
+        permanent,
+      }),
+    ).toBeNull();
+    expect(persistentAttachRefusal(eventsJson(failedAttachEvent()), { permanent: [] })).toBeNull();
+    expect(persistentAttachRefusal(eventsJson(failedAttachEvent()))).toBeNull();
+  });
+
+  it('unreadable output is no evidence', () => {
+    for (const out of ['not json', '', 'null', '{"kind":"List"}']) {
+      expect(persistentAttachRefusal(out, { permanent }), out).toBeNull();
+    }
+  });
+});
+
+describe('ATTACH_REFUSALS_PERMANENT: only measured wordings', () => {
+  it('BaseProvider declares none', () => {
+    expect(BaseProvider.ATTACH_REFUSALS_PERMANENT).toEqual([]);
+    expect(Object.isFrozen(BaseProvider.ATTACH_REFUSALS_PERMANENT)).toBe(true);
+  });
+
+  it("Vultr's list matches both measured refusals", () => {
+    for (const { runs, message } of MEASURED.vultr) {
+      expect(
+        VultrProvider.ATTACH_REFUSALS_PERMANENT.some((re) => re.test(message)),
+        runs,
+      ).toBe(true);
+    }
+  });
+
+  it('every pattern on every provider is a RegExp that matches one of its measured messages', () => {
+    for (const [id, Class] of Object.entries(PROVIDERS)) {
+      const list = (Class as typeof BaseProvider).ATTACH_REFUSALS_PERMANENT;
+      expect(Array.isArray(list), id).toBe(true);
+      expect(Object.isFrozen(list), id).toBe(true);
+      const measured = MEASURED[id] ?? [];
+      if (measured.length === 0) expect(list, `${id} has no measured refusal`).toEqual([]);
+      for (const re of list) {
+        expect(re, id).toBeInstanceOf(RegExp);
+        expect(
+          measured.some(({ message }) => re.test(message)),
+          `${id}: ${re} matches no measured refusal`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('attachRefusalsOf carries the provider name and its list', () => {
+    expect(VULTR).toEqual({
+      provider: 'Vultr',
+      permanent: VultrProvider.ATTACH_REFUSALS_PERMANENT,
+    });
+    class Plain extends BaseProvider {
+      static NAME = 'Example Cloud';
+    }
+    expect(attachRefusalsOf(Plain)).toEqual({ provider: 'Example Cloud', permanent: [] });
+  });
+});
+
+describe('watchDbAttach: a refusal the provider declares permanent stops the wait', () => {
+  /** A cluster whose db-0 events the test changes while the watch runs. */
+  function liveCluster(events: Ev[]) {
+    let current = events;
+    const reads: string[][] = [];
+    const kubectl = async (argv: string[]) => {
+      reads.push(argv);
+      if (argv.includes('pod'))
+        return JSON.stringify({ metadata: { name: 'db-0', uid: DB_POD_UID } });
+      const sel = argv[argv.indexOf('--field-selector') + 1] ?? '';
+      expect(sel).toBe(`involvedObject.uid=${DB_POD_UID}`);
+      return eventsJson(...current);
+    };
+    const eventReads = () => reads.filter((a) => a.includes('events')).length;
+    return {
+      kubectl,
+      eventReads,
+      set: (next: Ev[]) => {
+        current = next;
+      },
+    };
+  }
+  const until = async (cond: () => boolean) => {
+    while (!cond()) await new Promise((res) => setTimeout(res, 1));
+  };
+
+  it('held under two minutes it keeps waiting; held over two minutes it stops, by name', async () => {
+    const cluster = liveCluster([failedAttachEvent(ONE_MINUTE_IN)]);
+    const r = rollout();
+    const done = watchDbAttach(r.wait, {
+      kubectl: cluster.kubectl,
+      pollMs: 1,
+      attachRefusals: VULTR,
+    }).catch((e: Error) => e);
+    await until(() => cluster.eventReads() >= 5);
+    expect(r.aborted()).toBe(false);
+    // The same refusal, now 906 s old (x15 over 15m).
+    cluster.set([failedAttachEvent()]);
+    const err = await done;
+    expect(r.aborted()).toBe(true);
+    expect(err).toBeInstanceOf(VolumeAttachRefusedError);
+    expect(err).toMatchObject({
+      provider: 'Vultr',
+      volume: 'pvc-8d578e6fd25c44b0',
+      count: 15,
+      persistedS: 906,
+      providerMessage: 'Block storage is not compatible with this server',
+    });
+    const msg = (err as Error).message;
+    expect(msg).toContain(
+      'Vultr refused to attach the db volume pvc-8d578e6fd25c44b0 to the database node, ' +
+        '15 times over 906s, in its own words: "Block storage is not compatible with this server".',
+    );
+    expect(msg).toMatch(/waiting does not change that/i);
+    expect(msg).toContain("Vultr's support can say why this server cannot take the volume");
+    expect(msg).toMatch(/run the command that failed again/);
+    expect(msg).toContain('Nothing was retried or replaced.');
+    // No invented command, no em or en dash.
+    expect(msg).not.toMatch(/`|vibecarbon |kubectl /);
+    expect(msg).not.toMatch(/[–—]/);
+  });
+
+  it('the events.k8s.io shape stops it too', async () => {
+    const cluster = liveCluster([
+      failedAttachEvent({
+        firstTimestamp: null,
+        lastTimestamp: null,
+        count: null,
+        eventTime: '2026-11-27T04:58:41.000000Z',
+        series: { count: 15, lastObservedTime: '2026-11-27T05:13:47.000000Z' },
+      }),
+    ]);
+    const r = rollout();
+    await expect(
+      watchDbAttach(r.wait, { kubectl: cluster.kubectl, pollMs: 1, attachRefusals: VULTR }),
+    ).rejects.toBeInstanceOf(VolumeAttachRefusedError);
+    expect(r.aborted()).toBe(true);
+  });
+
+  /** A rollout that times out on its own once the watch has polled `polls` times. */
+  const timesOutAfter = (cluster: { eventReads: () => number }, polls: number, boom: Error) => {
+    let aborted = false;
+    const wait = (signal: AbortSignal) =>
+      new Promise<void>((_resolve, reject) => {
+        const timer = setInterval(() => {
+          if (cluster.eventReads() >= polls) {
+            clearInterval(timer);
+            reject(boom);
+          }
+        }, 1);
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          clearInterval(timer);
+          reject(new Error('aborted'));
+        });
+      });
+    return { wait, aborted: () => aborted };
+  };
+
+  it("a wording not on the list never stops it: the wait's own timeout is today's", async () => {
+    const cluster = liveCluster([failedAttachEvent({ message: NOT_ON_THE_LIST })]);
+    const boom = new Error('error: timed out waiting for the condition');
+    const r = timesOutAfter(cluster, 8, boom);
+    await expect(
+      watchDbAttach(r.wait, { kubectl: cluster.kubectl, pollMs: 1, attachRefusals: VULTR }),
+    ).rejects.toBe(boom);
+    expect(r.aborted()).toBe(false);
+  });
+
+  it('a provider that declares nothing never stops on the measured words either', async () => {
+    for (const attachRefusals of [undefined, { provider: 'Hetzner Cloud', permanent: [] }]) {
+      const cluster = liveCluster([failedAttachEvent()]);
+      const boom = new Error('error: timed out waiting for the condition');
+      const r = timesOutAfter(cluster, 5, boom);
+      await expect(
+        watchDbAttach(r.wait, { kubectl: cluster.kubectl, pollMs: 1, attachRefusals }),
+      ).rejects.toBe(boom);
+      expect(r.aborted()).toBe(false);
+    }
+  });
+
+  it('k8sDbRolloutWait hands the list to the watch', async () => {
+    const { k8sDbRolloutWait } = await import('../../../src/lib/deploy/replication.js');
+    const cluster = liveCluster([failedAttachEvent()]);
+    const kubectl = (
+      _ip: string,
+      argv: string[],
+      opts: { signal?: AbortSignal; timeout?: number } = {},
+    ) => {
+      if (argv.includes('rollout')) {
+        return new Promise<string>((_r, reject) =>
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted'))),
+        );
+      }
+      return cluster.kubectl(argv);
+    };
+    await expect(
+      k8sDbRolloutWait({ kubectl, ip: '10.0.0.9', pollMs: 1, attachRefusals: VULTR }),
+    ).rejects.toBeInstanceOf(VolumeAttachRefusedError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Census: every db rollout wait is handed its provider's refusal list
+// ---------------------------------------------------------------------------
+
+describe('attach-refusal census: every watched db wait knows its provider', () => {
+  /**
+   * The calls that reach watchDbAttach, directly or by handing the list on:
+   * each must pass `attachRefusals`, built by attachRefusalsOf(<the provider
+   * class>) where the caller knows it, or forwarded by name.
+   */
+  const CHAIN = new Set([
+    'watchDbAttach',
+    'k8sDbRolloutWait',
+    'awaitDbRollout',
+    'reseedStandbyInPlace',
+    'reseedStandbyFromPrimary',
+    'setupReplication',
+    'settleK8sDb',
+  ]);
+
+  /**
+   * Injected seams whose default is a CHAIN function, by file: the failover
+   * calls its reseed through `reseed` (default reseedStandbyOrAbort, which
+   * hands the list on to reseedStandbyFromPrimary).
+   */
+  const SEAMS: Record<string, Set<string>> = { 'failover.js': new Set(['reseed']) };
+
+  /**
+   * Calls in CHAIN that may go without the list, by `file:function`, each
+   * with why. Empty: every caller knows its provider.
+   */
+  const NOT_WIRED: Record<string, string> = {};
+
+  /**
+   * The innermost NAMED function a node sits in: a declaration, or a function
+   * bound to a const. An unnamed callback (a `settle: (ip) => ...` property,
+   * an argument) reads as the function around it.
+   */
+  const enclosing = (ancestors: AstNode[]) => {
+    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+      const a = ancestors[i];
+      if (!isFunctionNode(a)) continue;
+      if (a.id?.name) return a.id.name;
+      const parent = ancestors[i - 1];
+      if (parent?.type === 'VariableDeclarator' && parent.id?.name) return parent.id.name;
+    }
+    return '(top level)';
+  };
+
+  /** Why a call's `attachRefusals` is missing or not a real list, or null when it is fine. */
+  const findingOf = (call: AstNode): string | null => {
+    const props = call.arguments
+      .filter((a: AstNode) => a.type === 'ObjectExpression')
+      .flatMap((o: AstNode) => o.properties)
+      .filter((p: AstNode) => p.type === 'Property' && p.key?.name === 'attachRefusals');
+    if (props.length === 0) return 'passes no attachRefusals';
+    const v = props[0].value;
+    if (v.type === 'Identifier' && v.name === 'attachRefusals') return null;
+    if (v.type === 'MemberExpression' && v.property?.name === 'attachRefusals') return null;
+    if (v.type === 'CallExpression' && calleeName(v) === 'attachRefusalsOf') return null;
+    return 'attachRefusals is neither attachRefusalsOf(...) nor forwarded by name';
+  };
+
+  const scan = (path: string, source: string) => {
+    const sites: { site: string; callee: string; finding: string | null }[] = [];
+    walkAst(parseAst(source), (n, ancestors) => {
+      if (n.type !== 'CallExpression') return;
+      const callee = calleeName(n);
+      if (!callee || !(CHAIN.has(callee) || SEAMS[path]?.has(callee))) return;
+      sites.push({ site: `${path}:${enclosing(ancestors)}`, callee, finding: findingOf(n) });
+    });
+    return sites;
+  };
+
+  it('the census sees a call that passes nothing, and one that passes a made-up value', () => {
+    const bad = scan(
+      'x.js',
+      'async function a() { await watchDbAttach(w, { kubectl, pollMs }); }\n' +
+        'async function b() { await k8sDbRolloutWait({ kubectl, ip, attachRefusals: [] }); }\n' +
+        'async function c() { await settleK8sDb({ ip, attachRefusals: attachRefusalsOf(P) }); }\n' +
+        'const d = () => reseedStandbyInPlace({ kubectl, attachRefusals: options.attachRefusals });',
+    );
+    expect(bad).toEqual([
+      { site: 'x.js:a', callee: 'watchDbAttach', finding: 'passes no attachRefusals' },
+      {
+        site: 'x.js:b',
+        callee: 'k8sDbRolloutWait',
+        finding: 'attachRefusals is neither attachRefusalsOf(...) nor forwarded by name',
+      },
+      { site: 'x.js:c', callee: 'settleK8sDb', finding: null },
+      { site: 'x.js:d', callee: 'reseedStandbyInPlace', finding: null },
+    ]);
+  });
+
+  it('every call in src passes the list, or is listed with why it cannot', () => {
+    const sites = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] }).flatMap((abs) =>
+      scan(relative(join(REPO_ROOT, 'src'), abs), readFileSync(abs, 'utf-8')),
+    );
+    const offenders = sites
+      .filter((s) => s.finding && !(s.site in NOT_WIRED))
+      .map((s) => `${s.site} (${s.callee}): ${s.finding}`);
+    expect(offenders).toEqual([]);
+    for (const [site, why] of Object.entries(NOT_WIRED)) {
+      expect(
+        sites.some((s) => s.site === site && s.finding),
+        `${site} is wired now; take it out`,
+      ).toBe(true);
+      expect(why.length).toBeGreaterThan(20);
+    }
+    // Positive control: the deploy, restore, failover, reseed and fence
+    // chains, each callee seen, and the list built where the provider is known.
+    expect(new Set(sites.map((s) => s.callee))).toEqual(new Set([...CHAIN, 'reseed']));
+    expect(sites.length).toBeGreaterThanOrEqual(12);
+    const roots = sites.map((s) => s.site);
+    for (const root of [
+      'lib/deploy/k8s/k3s.js:awaitDb',
+      'restore.js:runK8sRestore',
+      'failover.js:reseedStandbyOrAbort',
+      'failover.js:catchUpReseedAndPromote',
+      'lib/deploy/effects/k8s-ha.js:haK8sConfigureReplication',
+      'lib/deploy/retired-fence.js:k8sBackend',
+    ]) {
+      expect(roots, root).toContain(root);
+    }
+  });
+
+  it("the deploy's db wait records the provider's view on a refusal: the deploy builds it, awaitDb hands it on", () => {
+    const k3s = readFileSync(join(REPO_ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const handed: string[] = [];
+    walkAst(parseAst(k3s), (n, ancestors) => {
+      if (n.type !== 'CallExpression') return;
+      const props = n.arguments
+        .filter((a: AstNode) => a.type === 'ObjectExpression')
+        .flatMap((o: AstNode) => o.properties);
+      const prop = (name: string) =>
+        props.find((p: AstNode) => p.type === 'Property' && p.key?.name === name)?.value;
+      const callee = calleeName(n);
+      if (
+        callee === 'awaitDbRollout' &&
+        prop('onAttachRefused')?.name === 'describeAttachRefusal'
+      ) {
+        handed.push(`${enclosing(ancestors)}:awaitDbRollout`);
+      }
+      if (callee === 'applyK3sManifests' && prop('describeAttachRefusal')) {
+        handed.push(`${enclosing(ancestors)}:applyK3sManifests`);
+      }
+      if (callee === 'logAttachRefusalView')
+        handed.push(`${enclosing(ancestors)}:logAttachRefusalView`);
+    });
+    expect(handed.sort()).toEqual(
+      [
+        'awaitDb:awaitDbRollout',
+        'deployK3sSteps:applyK3sManifests',
+        'describeAttachRefusal:logAttachRefusalView',
+      ].sort(),
+    );
   });
 });

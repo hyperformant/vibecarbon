@@ -456,30 +456,33 @@ function addressMismatch(providerName, view, node) {
 }
 
 /**
- * The provider view as log lines: the server, then each recent action.
+ * The provider view as log lines: the server, then each recent action. The
+ * plan rides on the server line when the provider's read carries one.
  * @param {string} providerName
- * @param {UnjoinedNode} node
+ * @param {ExpectedNode} node
  * @param {import('../../providers/base.js').ServerProviderView} view
+ * @param {string} [tag] - the log tag (`node-join`; `db` for a refused volume attach)
  * @returns {string[]}
  */
-function providerViewLogLines(providerName, node, view) {
+function providerViewLogLines(providerName, node, view, tag = 'node-join') {
   const head =
-    `[node-join] ${providerName}'s view of ${view.name ?? node.ip} (${node.ip ?? '?'}, ${ROLE_WORDS[node.role]}): ` +
+    `[${tag}] ${providerName}'s view of ${view.name ?? node.ip} (${node.ip ?? '?'}, ${ROLE_WORDS[node.role]}): ` +
     `status ${view.status ?? '?'}${view.detail ? ` (${view.detail})` : ''}, ` +
     `created ${view.created ?? '?'}, at ${view.location ?? '?'}, id ${view.id}, ` +
     `public ${view.publicIp ?? 'none'}, ` +
-    `private ${view.privateIp ?? (view.privateIpNote ? `unknown (${view.privateIpNote})` : 'none')}`;
+    `private ${view.privateIp ?? (view.privateIpNote ? `unknown (${view.privateIpNote})` : 'none')}` +
+    (view.plan ? `, plan ${view.plan}` : '');
   const events = (view.events ?? []).map(
     (e) =>
-      `[node-join]   ${e.action}: ${e.status ?? '?'}, started ${e.started ?? '?'}` +
+      `[${tag}]   ${e.action}: ${e.status ?? '?'}, started ${e.started ?? '?'}` +
       `${e.finished ? `, finished ${e.finished}` : ''}${e.error ? `, error ${e.error}` : ''}`,
   );
   const none = view.eventsError
-    ? [`[node-join]   recent actions not read: ${view.eventsError}`]
+    ? [`[${tag}]   recent actions not read: ${view.eventsError}`]
     : view.eventsNote && events.length === 0
-      ? [`[node-join]   no recent actions: ${view.eventsNote}`]
+      ? [`[${tag}]   no recent actions: ${view.eventsNote}`]
       : events.length === 0
-        ? ['[node-join]   no recent actions listed']
+        ? [`[${tag}]   no recent actions listed`]
         : [];
   return [head, ...events, ...none];
 }
@@ -495,13 +498,17 @@ function providerViewLogLines(providerName, node, view) {
  * it never throws: a read that fails is a log line, and the failure it
  * describes is reported as it was.
  *
+ * @template {ExpectedNode} N
  * @param {object} args
  * @param {import('../../providers/base.js').BaseProvider} args.provider
  * @param {typeof import('../../providers/base.js').BaseProvider} args.Provider
- * @param {UnjoinedNode[]} args.nodes
+ * @param {N[]} args.nodes
  * @param {number} [args.budgetMs]
  * @param {(line: string) => void} [args.log]
- * @returns {Promise<Map<UnjoinedNode, ProviderViewSummary>>}
+ * @param {string} [args.tag] - the log tag: `node-join` for a node that never
+ *   joined, `db` for the database server of a refused volume attach
+ *   (attach-refusal-view.js)
+ * @returns {Promise<Map<N, ProviderViewSummary>>}
  */
 export async function describeServersForLog({
   provider,
@@ -509,8 +516,9 @@ export async function describeServersForLog({
   nodes,
   budgetMs = PROVIDER_VIEW_BUDGET_MS,
   log = (line) => console.error(line),
+  tag = 'node-join',
 }) {
-  /** @type {Map<UnjoinedNode, ProviderViewSummary>} */
+  /** @type {Map<N, ProviderViewSummary>} */
   const views = new Map();
   const providerName = Provider?.NAME || 'the provider';
   const work = (async () => {
@@ -526,7 +534,7 @@ export async function describeServersForLog({
       nodes.map(async (node) => {
         try {
           const view = await provider.describeServerForDiagnosis(await idOf(node));
-          for (const line of providerViewLogLines(providerName, node, view)) log(line);
+          for (const line of providerViewLogLines(providerName, node, view, tag)) log(line);
           views.set(node, {
             ...(view.name && { name: view.name }),
             line: providerViewLine(providerName, view, node),
@@ -535,7 +543,7 @@ export async function describeServersForLog({
           });
         } catch (err) {
           log(
-            `[node-join] could not read ${providerName}'s view of ${node.ip ?? ROLE_WORDS[node.role]}: ${firstLine(err)}`,
+            `[${tag}] could not read ${providerName}'s view of ${node.ip ?? ROLE_WORDS[node.role]}: ${firstLine(err)}`,
           );
         }
       }),
@@ -551,7 +559,7 @@ export async function describeServersForLog({
   clearTimeout(timer);
   if (outcome === 'expired') {
     log(
-      `[node-join] stopped reading ${providerName}'s view after ${Math.round(budgetMs / 1000)}s; what it had answered is above`,
+      `[${tag}] stopped reading ${providerName}'s view after ${Math.round(budgetMs / 1000)}s; what it had answered is above`,
     );
   }
   return views;
