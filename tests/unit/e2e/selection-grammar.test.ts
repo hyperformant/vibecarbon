@@ -203,16 +203,18 @@ describe('resolveSelection — loud failures (no legacy forms)', () => {
   it('mode unsupported by provider throws naming supported modes', () => {
     // Every provider registers all four modes now, so a compose-only
     // registry row stands in for one that does not.
-    const { scenarios } = testConfig.e2e.providers.scaleway as unknown as {
-      scenarios: { mode: string }[];
-    };
-    const removed = scenarios.splice(2);
+    const providers = testConfig.e2e.providers as unknown as Record<
+      string,
+      { scenarios: { mode: string }[] }
+    >;
+    const original = providers.scaleway;
+    providers.scaleway = { ...original, scenarios: original.scenarios.slice(0, 2) };
     try {
       expect(() => resolveSelection({ include: ['scaleway/k8s'] })).toThrow(
         /does not support k8s.*compose, compose-ha/,
       );
     } finally {
-      scenarios.push(...removed);
+      providers.scaleway = original;
     }
   });
 

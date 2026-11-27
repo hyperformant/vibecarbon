@@ -230,8 +230,8 @@ export const testConfig = {
           'vhf-2c-4gb': 'vhf-3c-8gb',
         },
       },
-      // Scaleway runs all four modes (see ScalewayProvider.SUPPORTED_TIERS). "Regions"
-      // are ZONES (Scaleway's Instance API is zone-scoped): the audited
+      // Scaleway runs all four modes (see ScalewayProvider.SUPPORTED_TIERS).
+      // "Regions" are ZONES (Scaleway's Instance API is zone-scoped): the audited
       // four that carry the compose candidates (BASIC3, DEV1) and whose S3
       // regions (fr-par, nl-ams) have all three storage classes.
       // NO Scaleway type exists in all ten zones (live per-zone catalog

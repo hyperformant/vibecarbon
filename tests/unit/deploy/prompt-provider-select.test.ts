@@ -5,8 +5,10 @@
  * check and the post-select re-check in gatherDeploymentConfig — see its
  * "Resolved once per flow" comment). Also pins the gate interaction with
  * resolveDeployMode (A2's SUPPORTED_TIERS mode filter), which must use the
- * POST-SELECT provider so selecting a compose-only provider (Scaleway) hides
- * the k8s modes while Hetzner, DigitalOcean, Linode and Vultr keep them.
+ * POST-SELECT provider: each provider's own modes are offered after the
+ * select (all five offer compose, Kubernetes and Kubernetes HA today).
+ * A provider with fewer tiers is covered in resolve-deploy-mode.test.ts with
+ * a stub.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';

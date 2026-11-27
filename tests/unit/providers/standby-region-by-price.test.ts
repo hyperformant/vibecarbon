@@ -92,6 +92,30 @@ describe('getDefaultStandbyRegion by price', () => {
   });
 });
 
+describe('a provider with compose candidates only', () => {
+  // No registered provider is compose-only now, so a Scaleway subclass with
+  // only ROLE_CANDIDATES.compose stands in for the path regionRoleDefaults
+  // and cheapestStandbyRegion keep for one.
+  class ComposeOnly extends ScalewayProvider {
+    static ROLE_CANDIDATES = { compose: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'] };
+  }
+
+  it('answers composeType for all four role types, and keeps a same-continent standby', () => {
+    const primary = 'fr-par-1';
+    const offline = ComposeOnly.getDefaultStandbyRegion(primary);
+    seed(ComposeOnly, '2026-10-22/scaleway');
+    const defaults = ComposeOnly.getRegionDefaults(primary);
+    expect(defaults.composeType).toBeTruthy();
+    expect(defaults.masterType).toBe(defaults.composeType);
+    expect(defaults.dbType).toBe(defaults.composeType);
+    expect(defaults.workerType).toBe(defaults.composeType);
+    const live = ComposeOnly.getDefaultStandbyRegion(primary);
+    expect(live).not.toBe(primary);
+    expect(ComposeOnly.REGION_CONTINENT[live]).toBe(ComposeOnly.REGION_CONTINENT[primary]);
+    expect(ComposeOnly.getDefaultStandbyRegion(primary, ['master', 'db'])).toBe(offline);
+  });
+});
+
 describe('Linode k8s-ha standby region', () => {
   const NO_VPC = LinodeProvider.K8S_UNSUPPORTED_REGIONS;
   const k8sRoles = ['master', 'db', 'worker'];
