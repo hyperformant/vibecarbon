@@ -2068,9 +2068,11 @@ measured it; an unlisted refusal keeps the wait's own timeout. Do not turn
 the stop into a retry, a server replacement, an HDD fallback or another
 StorageClass: our code does not choose where the provider places a server,
 and the error names no command because no CLI step is proven to give the db
-role a new server that takes the volume back. The e2e classifier reads it as infra (`provider refused the db volume
-attach`, class `provider-volume-attach-refusal`) by our own sentence, never
-by the cluster event.
+role a new server that takes the volume back. Do not make it infra: the e2e
+classifier names it (`code: provider refused the db volume attach`) by our
+own sentence, never by the cluster event, and keeps it out of INFRA_PATTERNS,
+because CI's E2E_RETRY_FLAKES=1 would rerun it on a new server and hide the
+refusal behind a green row.
 
 **Guard:** `tests/unit/deploy/db-attach-watch.test.ts` (the detector on both
 event shapes, the watch under and over 120 s and with an unlisted wording,

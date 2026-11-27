@@ -271,6 +271,10 @@ describe('classifyFailure', () => {
     ['SQL constraint violation', 'UNIQUE constraint failed: orgs.slug'],
     ['ACME issuance terminally failed', 'terminally failed after 2 recovery attempts'],
     ['project quota exhausted (leak residue)', 'server limit reached (resource_limit_exceeded)'],
+    [
+      'provider refused the db volume attach',
+      'Vultr refused to attach the db volume pvc-d77e8ece45b54f59 to the database node',
+    ],
   ];
 
   it.each(CODE_SAMPLES)('code beats infra: %s', (reason, sample) => {
@@ -609,7 +613,7 @@ describe("the skipped apply's last-warning clause never decides a classification
   });
 });
 
-describe("a volume the provider refused to attach is the provider's, not ours", () => {
+describe('a volume the provider refused to attach is named, and never auto-retried', () => {
   // The error awaitDbRollout throws when the refusal held (watchDbAttach,
   // VolumeAttachRefusedError), built by the product's own code from the
   // event of perf run 45940611622 (run 45966805225 hit the same).
@@ -626,10 +630,12 @@ describe("a volume the provider refused to attach is the provider's, not ours", 
     );
     return `awaitDbRollout: ${new VolumeAttachRefusedError({ ...refusal, provider }).message} ${summary}`;
   };
-  const INFRA = { category: 'infra', reason: 'provider refused the db volume attach' };
+  // Not infra: E2E_RETRY_FLAKES=1 in CI retries every infra failure on a new
+  // server, which would turn this refusal into a green row (no retry is a fix).
+  const REFUSED = { category: 'unknown', reason: 'code: provider refused the db volume attach' };
 
-  it('classifies as infra, by our own words and never the cluster event', () => {
-    expect(classifyFailure({ errorMessage: thrown() })).toEqual(INFRA);
+  it('is named by our own words, never the cluster event, and is not infra', () => {
+    expect(classifyFailure({ errorMessage: thrown() })).toEqual(REFUSED);
     // The same event under a plain timeout stays ours until proven otherwise.
     const timeout =
       'awaitDbRollout: statefulset/db did not become Ready within 900s (error: timed out). ' +
@@ -652,7 +658,7 @@ describe("a volume the provider refused to attach is the provider's, not ours", 
           errorMessage: `deploy -restore latest exited with code 1: ${classifiableTail(detail, 1000)}`,
         }),
         detail,
-      ).toEqual(INFRA);
+      ).toEqual(REFUSED);
     }
   });
 });
