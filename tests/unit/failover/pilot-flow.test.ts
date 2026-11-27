@@ -37,7 +37,6 @@ import {
   swapHaRoles,
   waitForWorkersReady,
 } from '../../../src/failover.js';
-import { WORKER_NODE_SELECTOR } from '../../../src/lib/deploy/k8s/node-roles.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
 import { ConvergeBuildError } from '../../../src/lib/iac/converge-cluster.js';
 import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
@@ -543,14 +542,8 @@ describe('waitForWorkersReady', () => {
     expect(ready).toBe(2);
     expect(kubectl).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
-    // Polls the worker nodes by label, no headers.
-    expect(kubectl).toHaveBeenCalledWith([
-      'get',
-      'nodes',
-      '-l',
-      WORKER_NODE_SELECTOR,
-      '--no-headers',
-    ]);
+    // Reads the whole node list (workers are told apart by label).
+    expect(kubectl).toHaveBeenCalledWith(['get', 'nodes', '-o', 'json']);
   });
 
   // linode/k8s-ha, 2026-11-15: the failover's worker joined the standby as
@@ -570,21 +563,65 @@ describe('waitForWorkersReady', () => {
     const kubectl = vi.fn(async (argv: string[]) =>
       getNodesOutput(standbyNodes(1, 'NotReady'), argv),
     );
-    await expect(
-      waitForWorkersReady('10.0.0.9', '/key', 1, {
-        budgetMs: -1,
-        deps: { kubectl, sleep: vi.fn(async () => {}) },
-      }),
-    ).rejects.toThrow(/not Ready: 0\/1/);
+    const err = await waitForWorkersReady('10.0.0.9', '/key', 1, {
+      budgetMs: -1,
+      deps: { kubectl, sleep: vi.fn(async () => {}) },
+    }).catch((e) => e);
+    expect(err.name).toBe('NodesNeverJoinedError');
+    expect(err.message).toMatch(
+      /^the worker testapp-k8s-ha-1794719879300-ptt2cz-l4-st-d644a9d0 joined the cluster but was not Ready/,
+    );
+    expect(err.message.split('\n')).toHaveLength(1);
   });
 
-  it('throws when the ready budget is exceeded', async () => {
+  it('throws naming each worker missing when the ready budget is exceeded', async () => {
     const kubectl = readyKubectl(0);
     const sleep = vi.fn(async () => {});
-    await expect(
-      waitForWorkersReady('10.0.0.9', '/key', 2, { budgetMs: -1, deps: { kubectl, sleep } }),
-    ).rejects.toThrow(/not Ready: 0\/2/);
+    const err = await waitForWorkersReady('10.0.0.9', '/key', 2, {
+      budgetMs: -1,
+      deps: { kubectl, sleep },
+    }).catch((e) => e);
+    expect(err.name).toBe('NodesNeverJoinedError');
+    expect(err.message.split('\n')).toEqual([
+      expect.stringMatching(
+        /^a worker never joined the cluster: 0s after the converge created its server/,
+      ),
+      expect.stringMatching(/^a worker never joined the cluster/),
+    ]);
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  // perf run 45922250720: a server that never came up was destroyed before
+  // anyone read the provider's view of it. The wait records it first.
+  it("names a worker that never registered by its address, with the provider's view", async () => {
+    const nodes: FakeNode[] = [
+      ...standbyNodes(0),
+      { name: 'w-joined', ip: '203.0.113.11', status: 'Ready' },
+    ];
+    const kubectl = vi.fn(async (argv: string[]) => getNodesOutput(nodes, argv));
+    const describeServers = vi.fn(async (missing: Array<{ ip?: string }>) => {
+      return new Map(
+        missing.map((n) => [
+          n,
+          { name: 'e4-standby-worker-2', line: 'Hetzner Cloud says it is off.' },
+        ]),
+      );
+    });
+    const err = await waitForWorkersReady('10.0.0.9', '/key', 2, {
+      budgetMs: -1,
+      workerIps: ['203.0.113.11', '203.0.113.12'],
+      describeServers,
+      deps: { kubectl, sleep: vi.fn(async () => {}) },
+    }).catch((e) => e);
+    expect(describeServers).toHaveBeenCalledTimes(1);
+    expect(describeServers.mock.calls[0][0]).toEqual([
+      { role: 'worker', ip: '203.0.113.12', state: 'unregistered' },
+    ]);
+    expect(err.message).toBe(
+      'the worker e4-standby-worker-2 (203.0.113.12) never joined the cluster: 0s after the ' +
+        'converge created its server it still had not registered, and the app needs its workers. ' +
+        'Hetzner Cloud says it is off.',
+    );
   });
 });
 

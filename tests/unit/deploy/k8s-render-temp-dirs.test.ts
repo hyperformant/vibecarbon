@@ -112,6 +112,7 @@ function args() {
     sshKeyPath: '/tmp/key',
     khPath: join(dir, 'known_hosts'),
     perfPrefix: 'k3s',
+    nodesJoined: async () => {},
   };
 }
 

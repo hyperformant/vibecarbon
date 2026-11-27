@@ -13,6 +13,8 @@ export interface FakeNode {
   labels?: Record<string, string>;
   /** Default `Ready`. */
   status?: string;
+  /** The node's address (its ExternalIP), listed by `-o json`. */
+  ip?: string;
 }
 
 /** The three node kinds of a vibecarbon k3s cluster, as the cluster labels them. */
@@ -40,10 +42,34 @@ function selectNodes(nodes: FakeNode[], argv: string[]): FakeNode[] {
   return nodes.filter((n) => matchesSelector(n.labels ?? {}, selector));
 }
 
-/** `kubectl get nodes [...] --no-headers` (default columns) or `-o name`. */
+/**
+ * `kubectl get nodes [...] --no-headers` (default columns), `-o name`, or
+ * `-o json` (a NodeList: name, labels, the ExternalIP when set, and the
+ * Ready condition from the status column).
+ */
 export function getNodesOutput(nodes: FakeNode[], argv: string[]): string {
   const picked = selectNodes(nodes, argv);
   if (argv.includes('name')) return picked.map((n) => `node/${n.name}\n`).join('');
+  if (argv.includes('json')) {
+    return JSON.stringify({
+      kind: 'NodeList',
+      items: picked.map((n) => ({
+        metadata: { name: n.name, labels: n.labels ?? {} },
+        status: {
+          addresses: [
+            { type: 'Hostname', address: n.name },
+            ...(n.ip ? [{ type: 'ExternalIP', address: n.ip }] : []),
+          ],
+          conditions: [
+            {
+              type: 'Ready',
+              status: (n.status ?? 'Ready').split(',').includes('Ready') ? 'True' : 'Unknown',
+            },
+          ],
+        },
+      })),
+    });
+  }
   return picked
     .map((n) => `${n.name}   ${n.status ?? 'Ready'}   <none>   5m   v1.37.2+k3s1`)
     .join('\n');

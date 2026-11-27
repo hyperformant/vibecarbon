@@ -511,6 +511,8 @@ function args(restore: typeof RESTORE | null) {
     sshKeyPath: '/tmp/key',
     khPath: join(dir, 'known_hosts'),
     perfPrefix: 'k3s',
+    // Every node joined (node-join.js has its own tests).
+    nodesJoined: async () => {},
   };
 }
 

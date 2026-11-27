@@ -1744,6 +1744,47 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
+   * Scaleway's view of a server for the failure log (see
+   * BaseProvider.describeServerForDiagnosis): GET
+   * /instance/v1/zones/{zone}/servers/{id} only, one attempt per zone until
+   * one has it (the zone cache first, as getServerSummary does): `state`
+   * with its `state_detail`, `creation_date` and zone. The Instance API
+   * keeps no history of what it did to a server, so there are no recent
+   * actions to read.
+   * @param {string} serverId
+   * @returns {Promise<import('./base.js').ServerProviderView>}
+   */
+  async describeServerForDiagnosis(serverId) {
+    this._zoneCache ??= new Map();
+    const zones = this._zoneCache.has(serverId)
+      ? [this._zoneCache.get(serverId)]
+      : ScalewayProvider._zones();
+    for (const zone of zones) {
+      let body;
+      try {
+        body = await this._readForDiagnosis(`/instance/v1/zones/${zone}/servers/${serverId}`);
+      } catch (err) {
+        if (err?.status === 404) continue;
+        throw err;
+      }
+      const { server } = body ?? {};
+      if (!server) continue;
+      this._zoneCache.set(serverId, zone);
+      return {
+        id: server.id,
+        name: server.name ?? null,
+        status: server.state ?? null,
+        detail: server.state_detail || null,
+        created: server.creation_date ?? null,
+        location: server.zone ?? zone,
+        events: [],
+        eventsNote: "Scaleway's Instance API keeps no event history for a server",
+      };
+    }
+    throw new Error(`no Scaleway zone has the server ${serverId}`);
+  }
+
+  /**
    * Fetch a single commercial type's specs by exact name — walks the
    * public per-zone catalog (the type may not exist in every zone, so all
    * REGIONS zones are consulted before giving up).

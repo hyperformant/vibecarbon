@@ -26,8 +26,10 @@ import {
   BaseProvider,
   deleteFailure,
   deleteVpcByName,
+  eventsOrWhyNot,
   normalizePublicKey,
   replaceWireguardPeerRules,
+  SERVER_VIEW_EVENTS,
   standbyPairOrNeighbour,
   waitUntilServerUp,
 } from './base.js';
@@ -997,6 +999,42 @@ export class DigitalOceanProvider extends BaseProvider {
       status: droplet.status,
       serverType: droplet.size_slug || null,
     }));
+  }
+
+  /**
+   * DigitalOcean's view of a droplet for the failure log (see
+   * BaseProvider.describeServerForDiagnosis): GET /droplets/{id} for its
+   * status (`new`, `active`, `off`), `created_at` and region, and GET
+   * /droplets/{id}/actions for what DigitalOcean did to it (create,
+   * power_on, ...) and whether each completed or errored.
+   * @param {number|string} serverId
+   * @returns {Promise<import('./base.js').ServerProviderView>}
+   */
+  async describeServerForDiagnosis(serverId) {
+    const [{ droplet }, history] = await Promise.all([
+      this._readForDiagnosis(`/droplets/${serverId}`),
+      eventsOrWhyNot(
+        this._readForDiagnosis(`/droplets/${serverId}/actions?per_page=${SERVER_VIEW_EVENTS}`).then(
+          ({ actions }) =>
+            (actions ?? []).map((a) => ({
+              action: a.type,
+              status: a.status ?? null,
+              started: a.started_at ?? null,
+              finished: a.completed_at ?? null,
+              error: a.status === 'errored' ? 'the action errored' : null,
+            })),
+        ),
+      ),
+    ]);
+    if (!droplet) throw new Error(`DigitalOcean returned no droplet for ${serverId}`);
+    return {
+      id: droplet.id,
+      name: droplet.name ?? null,
+      status: droplet.status ?? null,
+      created: droplet.created_at ?? null,
+      location: droplet.region?.slug ?? null,
+      ...history,
+    };
   }
 
   /**

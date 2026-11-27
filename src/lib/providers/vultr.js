@@ -895,6 +895,31 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
+   * Vultr's view of an instance for the failure log (see
+   * BaseProvider.describeServerForDiagnosis): GET /instances/{id} only.
+   * `server_status` is the operating system's state (`installingbooting`,
+   * `ok`: see waitForServer), and the power and subscription states ride
+   * beside it as `detail`. Vultr's API keeps no history of what it did to an
+   * instance, so there are no recent actions to read.
+   * @param {string} serverId
+   * @returns {Promise<import('./base.js').ServerProviderView>}
+   */
+  async describeServerForDiagnosis(serverId) {
+    const { instance } = await this._readForDiagnosis(`/instances/${serverId}`);
+    if (!instance) throw new Error(`Vultr returned no instance for ${serverId}`);
+    return {
+      id: instance.id,
+      name: instance.label ?? null,
+      status: instance.server_status ?? null,
+      detail: `power ${instance.power_status ?? '?'}, subscription ${instance.status ?? '?'}`,
+      created: instance.date_created ?? null,
+      location: instance.region ?? null,
+      events: [],
+      eventsNote: "Vultr's API keeps no event history for an instance",
+    };
+  }
+
+  /**
    * Fetch a single plan's specs by exact id — GET /v2/plans has no by-id
    * endpoint, so this walks the (public) cursor-paginated catalog and
    * matches client-side, same shape as DO's getServerType.

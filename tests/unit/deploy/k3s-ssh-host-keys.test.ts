@@ -82,6 +82,34 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     timers.mockRestore();
   });
 
+  // perf run 45922250720: a server ssh never reached left no record of what
+  // the provider said about it. The timeout carries that view, and a failed
+  // read of it never replaces the timeout.
+  it("waitForK3sReady's timeout carries the provider's view of the master", async () => {
+    const { waitForK3sReady } = await k3sModulePromise;
+    const spawnMock = vi.mocked(spawn);
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild(255) as unknown as ReturnType<typeof spawn>);
+    const tmp = createTempDir('vc-k3s-test-');
+    const describeMaster = vi.fn(async () => 'Hetzner Cloud says it is off.');
+
+    const err = await waitForK3sReady('1.2.3.4', '/tmp/key', join(tmp, 'kh'), 1, {
+      describeMaster,
+    }).catch((e) => e);
+
+    expect(describeMaster).toHaveBeenCalledTimes(1);
+    expect(err.message).toMatch(/^k3s did not become ready on 1\.2\.3\.4 within 1s\./);
+    // On a line of its own after the ssh error, before the install diagnostics.
+    expect(err.message.split('\n')).toContain('Hetzner Cloud says it is off.');
+
+    describeMaster.mockRejectedValueOnce(new Error('HTTP 503'));
+    const masked = await waitForK3sReady('1.2.3.4', '/tmp/key', join(tmp, 'kh'), 1, {
+      describeMaster,
+    }).catch((e) => e);
+    expect(masked.message).toMatch(/^k3s did not become ready on 1\.2\.3\.4 within 1s\./);
+    expect(masked.message).not.toContain('HTTP 503');
+  });
+
   it('fetchKubeconfig passes UserKnownHostsFile=<env known_hosts> to scp', async () => {
     // fetchKubeconfig's scp now goes through runCommandAsync (Task A3).
     const { fetchKubeconfig } = await k3sModulePromise;
