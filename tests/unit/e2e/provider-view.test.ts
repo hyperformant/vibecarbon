@@ -138,7 +138,7 @@ describe('collectProviderView', () => {
 
   it('writes events and notes as named fields, redacted', async () => {
     const provider = fakeProvider({
-      items: [{ id: 1, name: `${PROJECT}-db` }],
+      items: [{ id: 1, name: `${PROJECT}-db`, labels: { project: PROJECT } }],
       describe: async (id) =>
         view(id, `${PROJECT}-db`, {
           events: [
@@ -276,12 +276,38 @@ describe('collectProviderView', () => {
 
 describe('ownership is the sweeps', () => {
   it('Hetzner lists by the project label the sweep selects on', async () => {
-    const provider = fakeProvider({ items: [{ id: 1, name: `${PROJECT}-master` }] });
+    const provider = fakeProvider({
+      items: [{ id: 1, name: `${PROJECT}-master`, labels: { project: PROJECT } }],
+    });
     await collectProviderView({ provider, providerId: 'hetzner', projectName: PROJECT });
     expect(provider.listedWith).toEqual([hetznerServerLabels(PROJECT)]);
     expect(hetznerServerSelectorQuery(PROJECT)).toBe(
       `label_selector=${encodeURIComponent(`project=${PROJECT}`)}`,
     );
+  });
+
+  it('Hetzner re-filters by label when the API ignores the selector', async () => {
+    const provider: ProviderViewProvider = {
+      async listServersDetailed() {
+        return {
+          items: [
+            { id: 1, name: `${PROJECT}-master`, labels: { project: PROJECT } },
+            { id: 2, name: 'foreign-box', labels: { project: 'someone-else' } },
+            { id: 3, name: 'unlabelled-box' },
+          ],
+          complete: true,
+        };
+      },
+      describeServerForDiagnosis: async (id) => view(id, `s${id}`) as never,
+    };
+    const [, text] = await collectProviderView({
+      provider,
+      providerId: 'hetzner',
+      projectName: PROJECT,
+    });
+    expect(text).toContain(`${PROJECT}-master`);
+    expect(text).not.toContain('foreign-box');
+    expect(text).not.toContain('unlabelled-box');
   });
 
   it('the other clouds own a server by prefix on its name or label', () => {
@@ -318,7 +344,7 @@ describe('every registered e2e provider gets the section', () => {
   for (const id of ids) {
     it(`${id}: lists this project's servers only and reads each one`, async () => {
       const field = NAME_FIELD[id];
-      const mine = { id: 11, [field]: `${PROJECT}-worker-1` } as Item;
+      const mine = { id: 11, [field]: `${PROJECT}-worker-1`, labels: { project: PROJECT } } as Item;
       const other = { id: 12, [field]: 'unrelated-server' } as Item;
       const all = [mine, other];
       const base = fakeProvider({ items: all });

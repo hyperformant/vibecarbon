@@ -39,6 +39,20 @@ export function hetznerServerLabels(projectName: string): Record<string, string>
   return { project: projectName };
 }
 
+/**
+ * A Hetzner server is this project's only when its own labels carry every
+ * key and value of hetznerServerLabels. The API filters on them too; this is
+ * the client-side check that keeps a dropped selector from listing the whole
+ * account.
+ */
+export function hetznerOwnsServer(
+  server: { labels?: Record<string, string> | null },
+  projectName: string,
+): boolean {
+  const labels = server.labels ?? {};
+  return Object.entries(hetznerServerLabels(projectName)).every(([k, v]) => labels[k] === v);
+}
+
 /** The same selector as a Hetzner query string (the sweep's raw listing). */
 export function hetznerServerSelectorQuery(projectName: string): string {
   const selector = Object.entries(hetznerServerLabels(projectName))

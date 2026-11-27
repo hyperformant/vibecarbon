@@ -19,7 +19,12 @@
  * throws into the writer, and the whole section is bounded.
  */
 import { redactHostDiagnostics } from './host-diagnostics.js';
-import { assertSweepableProjectName, hetznerServerLabels, sweepOwnsServer } from './sweep-core.js';
+import {
+  assertSweepableProjectName,
+  hetznerOwnsServer,
+  hetznerServerLabels,
+  sweepOwnsServer,
+} from './sweep-core.js';
 
 /** The whole section, listing and reads together. */
 export const PROVIDER_VIEW_BOUND_MS = 30_000;
@@ -47,7 +52,12 @@ interface ServerView {
   eventsError?: string;
 }
 
-type ListedServer = { id: string | number; name?: string | null; label?: string | null };
+type ListedServer = {
+  id: string | number;
+  name?: string | null;
+  label?: string | null;
+  labels?: Record<string, string> | null;
+};
 
 export interface ProviderViewProvider {
   listServersDetailed(
@@ -138,8 +148,8 @@ export async function collectProviderView({
         `(could not list ${providerId} servers: no answer within ${Math.round(boundMs / 1000)} s)`,
       ]);
     }
-    const servers = (listing.items as ListedServer[]).filter(
-      (s) => byLabel || sweepOwnsServer(s, projectName),
+    const servers = (listing.items as ListedServer[]).filter((s) =>
+      byLabel ? hetznerOwnsServer(s, projectName) : sweepOwnsServer(s, projectName),
     );
     const lines: string[] = [];
     if (!listing.complete) {
