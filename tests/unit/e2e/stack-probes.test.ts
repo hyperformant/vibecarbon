@@ -100,6 +100,27 @@ const cases: Case[] = [
     id: 'project:citest-1',
     url: 'https://api.digitalocean.com/v2/tags/project%3Acitest-1',
   },
+  // DO ReservedIp id is the address (reservedIp.d.ts import note); #418 dropped the type from the program
+  {
+    provider: 'digitalocean',
+    type: T('digitalocean', 'ReservedIp'),
+    id: '192.0.2.1',
+    url: 'https://api.digitalocean.com/v2/reserved_ips/192.0.2.1',
+  },
+  // DO ReservedIpAssignment: import id "<ip>,<droplet id>", or the ip in inputs/outputs
+  {
+    provider: 'digitalocean',
+    type: T('digitalocean', 'ReservedIpAssignment'),
+    id: '192.0.2.1,123456',
+    url: 'https://api.digitalocean.com/v2/reserved_ips/192.0.2.1',
+  },
+  {
+    provider: 'digitalocean',
+    type: T('digitalocean', 'ReservedIpAssignment'),
+    id: '123456-20260101abcdef',
+    extra: { outputs: { ipAddress: '192.0.2.2' } },
+    url: 'https://api.digitalocean.com/v2/reserved_ips/192.0.2.2',
+  },
   // Linode
   {
     provider: 'linode',
@@ -172,6 +193,13 @@ const cases: Case[] = [
     id: '0e04f918-575e-41cb-86f6-d729b354a5a1',
     url: 'https://api.vultr.com/v2/vpcs/0e04f918-575e-41cb-86f6-d729b354a5a1',
   },
+  // Vultr ReservedIp id is the API uuid (reservedIp.js import note); #601 dropped the type from the program
+  {
+    provider: 'vultr',
+    type: T('vultr', 'ReservedIp'),
+    id: 'c29e41b6-c34c-45a9-a939-bde895dc9e4a',
+    url: 'https://api.vultr.com/v2/reserved-ips/c29e41b6-c34c-45a9-a939-bde895dc9e4a',
+  },
   // Scaleway: zoned ids "<zone>/<uuid>" (server.js, ip.js, securityGroup.js import notes); iam SshKey is a bare uuid
   {
     provider: 'scaleway',
@@ -233,8 +261,10 @@ describe('probeFor: one URL per type', () => {
   it.each(cases)('maps statuses to answers for $provider $type', async (c) => {
     const answer = async (status: number) =>
       probeFor(c.provider, opts(rig(status).fetchImpl, c.provider))(res(c));
-    expect(await answer(200)).toBe('present');
-    expect(await answer(204)).toBe('present');
+    // An assignment cannot be confirmed from its IP alone: a live IP says nothing about it.
+    const live = c.type.endsWith(':ReservedIpAssignment') ? 'unknown' : 'present';
+    expect(await answer(200)).toBe(live);
+    expect(await answer(204)).toBe(live);
     expect(await answer(500)).toBe('unknown');
     expect(await answer(429)).toBe('unknown');
     expect(await answer(401)).toBe('unknown');
@@ -277,6 +307,23 @@ describe('probeFor: edges', () => {
     const probe = probeFor('linode', opts(r.fetchImpl, 'linode'));
     expect(await probe({ type: T('linode', 'VpcSubnet'), id: '7' })).toBe('unknown');
     expect(r.seen).toEqual([]);
+  });
+
+  it('a DO reserved IP assignment with no address anywhere is unknown', async () => {
+    const r = rig(404);
+    const probe = probeFor('digitalocean', opts(r.fetchImpl, 'digitalocean'));
+    expect(await probe({ type: T('digitalocean', 'ReservedIpAssignment'), id: '123456-abc' })).toBe(
+      'unknown',
+    );
+    expect(r.seen).toEqual([]);
+  });
+
+  it('a DO reserved IP assignment whose address is present stays unknown, never present', async () => {
+    const r = rig(200);
+    const probe = probeFor('digitalocean', opts(r.fetchImpl, 'digitalocean'));
+    expect(
+      await probe({ type: T('digitalocean', 'ReservedIpAssignment'), id: '192.0.2.1,123456' }),
+    ).toBe('unknown');
   });
 
   it('Scaleway ids are never sent without their zone', async () => {

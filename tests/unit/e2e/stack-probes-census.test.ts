@@ -18,6 +18,62 @@ import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { PROBED_TYPES } from '../../e2e/utils/stack-probes.ts';
 
+/**
+ * Every type the sweep has ever been able to confirm gone, per provider. A
+ * probe once added is never removed: an older stack still records the types
+ * its program made then, and a type with no probe reads unknown, which keeps
+ * that stack and its S3 object forever (#601 dropped the Vultr ReservedIp
+ * probe with the program's ReservedIp, and two civ4 k8s-ha stacks were kept
+ * though Vultr answered 404 for both IPs; DigitalOcean's ReservedIp and
+ * ReservedIpAssignment, dropped from the program in #418, had no probe at all).
+ * Add a type here when a program starts making it. Never delete a line.
+ */
+const NEVER_DROP: Record<string, string[]> = {
+  hetzner: [
+    'hcloud:index/server:Server',
+    'hcloud:index/firewall:Firewall',
+    'hcloud:index/floatingIp:FloatingIp',
+    'hcloud:index/network:Network',
+    'hcloud:index/placementGroup:PlacementGroup',
+    'hcloud:index/sshKey:SshKey',
+    'hcloud:index/networkSubnet:NetworkSubnet',
+    'hcloud:index/floatingIpAssignment:FloatingIpAssignment',
+  ],
+  digitalocean: [
+    'digitalocean:index/droplet:Droplet',
+    'digitalocean:index/firewall:Firewall',
+    'digitalocean:index/sshKey:SshKey',
+    'digitalocean:index/tag:Tag',
+    'digitalocean:index/vpc:Vpc',
+    'digitalocean:index/reservedIp:ReservedIp',
+    'digitalocean:index/reservedIpAssignment:ReservedIpAssignment',
+  ],
+  linode: [
+    'linode:index/firewall:Firewall',
+    'linode:index/instance:Instance',
+    'linode:index/sshKey:SshKey',
+    'linode:index/vpc:Vpc',
+    'linode:index/reservedIp:ReservedIp',
+    'linode:index/vpcSubnet:VpcSubnet',
+  ],
+  vultr: [
+    'vultr:index/instance:Instance',
+    'vultr:index/firewallGroup:FirewallGroup',
+    'vultr:index/sSHKey:SSHKey',
+    'vultr:index/firewallRule:FirewallRule',
+    'vultr:index/vpc:Vpc',
+    'vultr:index/reservedIp:ReservedIp',
+  ],
+  scaleway: [
+    'scaleway:instance/server:Server',
+    'scaleway:instance/ip:Ip',
+    'scaleway:instance/securityGroup:SecurityGroup',
+    'scaleway:network/vpc:Vpc',
+    'scaleway:network/privateNetwork:PrivateNetwork',
+    'scaleway:iam/sshKey:SshKey',
+  ],
+};
+
 const SDKS: Record<string, { provider: string; mod: unknown }> = {
   '@pulumi/hcloud': { provider: 'hetzner', mod: hcloud },
   '@pulumi/digitalocean': { provider: 'digitalocean', mod: digitalocean },
@@ -87,4 +143,25 @@ describe('stack probe census', () => {
       expect(PROBED_TYPES[c.provider]).toContain(c.type);
     },
   );
+
+  it.each(Object.entries(NEVER_DROP))(
+    '%s keeps a probe for every type it ever had',
+    (provider, types) => {
+      const missing = types.filter((t) => !PROBED_TYPES[provider]?.includes(t));
+      expect(
+        missing,
+        `${provider} lost the probe for ${missing.join(', ')}. Older stacks still record these types, and a type with no probe keeps its stack forever (#601). Put the probe back; never remove one.`,
+      ).toEqual([]);
+    },
+  );
+
+  it('the frozen list names every provider and every probed type', () => {
+    expect(Object.keys(NEVER_DROP).sort()).toEqual(Object.keys(PROBED_TYPES).sort());
+    for (const [provider, types] of Object.entries(PROBED_TYPES)) {
+      expect(
+        types.filter((t) => !NEVER_DROP[provider].includes(t)),
+        `${provider} has a probe the frozen list does not name; add it to NEVER_DROP`,
+      ).toEqual([]);
+    }
+  });
 });
