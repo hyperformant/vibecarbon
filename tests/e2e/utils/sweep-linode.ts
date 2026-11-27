@@ -23,6 +23,7 @@ import {
   reportSweep,
   sweepBuckets,
   sweepClass,
+  sweepOwnsServer,
   sweepOwnsVolume,
 } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
@@ -173,7 +174,7 @@ export async function sweepOrphanedLinodeResources(
     cleanupFailed: 'Instance cleanup failed',
     count: 'servers',
     list: () => provider.listServersDetailed(),
-    owned: (instance) => instance.label.startsWith(projectName),
+    owned: (instance) => sweepOwnsServer(instance, projectName),
     announce: (instance) => `Deleting orphaned instance ${instance.id} (${instance.label})`,
     remove: async (instance) => {
       await provider.deleteServer(instance.id, { waitUntilGone: true });

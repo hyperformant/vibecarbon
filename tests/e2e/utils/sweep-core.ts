@@ -25,6 +25,41 @@ export function assertSweepableProjectName(cloud: string, projectName: string): 
   }
 }
 
+/**
+ * The ownership rule for a project's SERVERS, shared by every sweep and by
+ * the failure bundle's provider view (./provider-view.ts), so the two cannot
+ * drift: what the sweep would delete is what the bundle lists.
+ *
+ * Hetzner is owned by label, and its API filters on it: the label selector
+ * `project=<projectName>` (hetznerServerLabels). Every other cloud owns a
+ * server by prefix on its name (`name` on DigitalOcean and Scaleway, `label`
+ * on Linode and Vultr): sweepOwnsServer.
+ */
+export function hetznerServerLabels(projectName: string): Record<string, string> {
+  return { project: projectName };
+}
+
+/** The same selector as a Hetzner query string (the sweep's raw listing). */
+export function hetznerServerSelectorQuery(projectName: string): string {
+  const selector = Object.entries(hetznerServerLabels(projectName))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+  return `label_selector=${encodeURIComponent(selector)}`;
+}
+
+/** A server's own name: `label` on Linode and Vultr, `name` elsewhere. */
+export function serverName(server: { label?: string | null; name?: string | null }): string {
+  return String(server.label ?? server.name ?? '');
+}
+
+/** The prefix rule for a server of this project (every cloud but Hetzner). */
+export function sweepOwnsServer(
+  server: { label?: string | null; name?: string | null },
+  projectName: string,
+): boolean {
+  return serverName(server).startsWith(projectName);
+}
+
 export interface Sweep {
   readonly tag: string;
   readonly cloud: string;

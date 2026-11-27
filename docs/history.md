@@ -2083,7 +2083,7 @@ throw, named fields only) and the refusal cases in
 `tests/unit/deploy/k8s-db-statefulset.test.ts` and
 `tests/unit/e2e/classify-failure.test.ts`.
 
-### 2026-11-27: a probe once added is never removed
+#### 2026-11-27: A probe once added is never removed (#608)
 
 The stale-stack sweep kept two civ4 Vultr k8s-ha stacks forever. Both
 recorded a `vultr:index/reservedIp:ReservedIp` that #601 had stopped making,
@@ -2107,6 +2107,36 @@ its S3 object stay for good.
 `tests/unit/e2e/stack-probes-census.test.ts` (adding a type is allowed,
 dropping one fails) and the restored cases in
 `tests/unit/e2e/stack-probes.test.ts`.
+
+#### 2026-11-27: The e2e failure bundle records the provider's view of every server
+
+The failure diagnostics of an e2e step now include a section `provider view:
+servers of <project>` on every mode and provider. It lists the scenario's
+servers by the rule the sweeps use (Hetzner by its `project` label, the other
+four by name prefix; both live in `tests/e2e/utils/sweep-core.ts` and the
+sweeps call them), reads each with the provider class's
+`describeServerForDiagnosis`, and writes one line per server of named fields:
+id, status, power and subscription detail, plan, region, created, public and
+private address, and recent actions. A listing that fails or is incomplete,
+and a read that fails or is still pending at the 30 s bound, is one line each.
+It records and decides nothing.
+
+**Why:** CI run 45994716507 (vultr/k8s, step scale): a worker went NotReady
+two minutes into an in-place resize and was still NotReady 57 minutes later,
+until the scale budget killed the CLI. The step read only `Scale exited with
+code 1.` The bundle held kubectl and ssh into the master and db, and nothing
+of what Vultr said about the worker (still resizing, locked, old plan,
+stopped). The same gap hid a database node that never came up, on Hetzner and
+Vultr twice each. The rig is destroyed at teardown.
+
+**Do not undo:** do not log the view or the listing as JSON: Vultr's instance
+carries `default_password` and a `kvm` console URL, so only named fields are
+written. Do not give the section its own ownership rule: a copy would drift
+from the sweeps. Do not raise the bound or add a retry: it is a read of what
+the provider says at the moment of failure.
+
+**Guard:** `tests/unit/e2e/provider-view.test.ts`, which also runs the section
+against every provider in the e2e registry.
 
 ## Added and later removed
 

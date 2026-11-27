@@ -30,6 +30,7 @@ import {
   reportSweep,
   sweepBuckets,
   sweepClass,
+  sweepOwnsServer,
   sweepOwnsVolume,
 } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
@@ -162,7 +163,7 @@ export async function sweepOrphanedDigitalOceanResources(
     cleanupFailed: 'Droplet cleanup failed',
     count: 'servers',
     list: () => provider.listServersDetailed(),
-    owned: (droplet) => droplet.name.startsWith(projectName),
+    owned: (droplet) => sweepOwnsServer(droplet, projectName),
     announce: (droplet) => `Deleting orphaned droplet ${droplet.id} (${droplet.name})`,
     remove: async (droplet) => {
       await provider.deleteServer(droplet.id, { waitUntilGone: true });
