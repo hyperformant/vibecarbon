@@ -269,7 +269,7 @@ One CLI, three deploy modes, picked per environment. Every mode includes automat
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean, Linode and Vultr are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast), and on Vultr in every region except Silicon Valley (sjc). Scaleway is supported for `compose`, with the same CLI and e2e gate; `k8s` and `k8s-ha` aren't built for it yet.
+DigitalOcean, Linode, Vultr and Scaleway are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast), and on Vultr in every region except Silicon Valley (sjc).
 
 ### Integration Guides
 
@@ -307,7 +307,7 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 _Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
-`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, Linode, and Vultr today.
+`k8s-ha` (pilot-light multi-region with one-command failover) runs on all five providers today.
 
 ---
 

@@ -629,8 +629,7 @@ confirmations.
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 
-Provider support varies by mode: `compose` runs on all five providers, and
-`k8s` and `k8s-ha` run on Hetzner, DigitalOcean, Linode, and Vultr. See
+All five providers run `compose`, `k8s` and `k8s-ha`. See
 [Deployment](/docs/deployment#choosing-a-provider) for the full matrix and
 the API token each provider reads.
 
@@ -871,8 +870,7 @@ A compose scale builds the new server, fences writes on the old one, pushes
 a base backup, restores it on the new server and moves DNS. The app pauses
 from the fence until the new server serves. It needs the backup bucket's
 object-storage keys on your machine (the refusal names the variables), since
-the new server is seeded from a backup. Compose scale is not available on
-Scaleway yet: resize the server in the Scaleway console instead.
+the new server is seeded from a backup.
 
 If a scale stops part way through the cutover (a killed terminal, a lost
 connection), run it again. It reads where it stopped, finishes the move to
