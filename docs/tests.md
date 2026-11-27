@@ -103,7 +103,7 @@ Five unit files once sent real requests to provider endpoints with fake credenti
 
 **`compose-ha` runs only when named.** The CLI still declares it on every provider, so each has a registered scenario, but no `defaultSelection` includes it. `--provider all` is 15 scenarios: compose, k8s and k8s-ha on all five providers. Run compose-ha by naming it: `pnpm test:e2e:batch -- --scenario hetzner/compose-ha`, or on GitHub with the E2E Perf Run workflow, `provider: all` and `scenarios: hetzner/compose-ha,digitalocean/compose-ha,linode/compose-ha,vultr/compose-ha,scaleway/compose-ha`. Each provider's required credentials are declared in its registry entry (`requiredEnv`) and listed in `tests/.env.e2e.example`.
 
-Every provider implements compose, k8s and k8s-ha, and the same set of scenarios runs on each. No provider is a default, and none gates a release.
+Every provider declares all four modes. The default selection runs compose, k8s and k8s-ha on each, and compose-ha runs only when named. No provider is a default, and none gates a release.
 
 **Every run is a stock deploy.** The baseline feature set (`testConfig.e2e.features` in `tests/config.ts`) is empty: every scenario, HA included, deploys the app and its database with no add-ons, not even observability, locally and on GitHub. `--features=observability,redis` deploys add-ons on top for a deliberate run. The add-on checks (Grafana and Prometheus, Redis, `addons_ready`, the HA standby add-on checks) run only there; on a stock run they are off or report `skip`, never `fail`. Nothing a run with add-ons measures is published or calibrated (next section). `tests/e2e/utils/feature-set.js` holds the rule.
 
