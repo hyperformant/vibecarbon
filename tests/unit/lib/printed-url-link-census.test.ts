@@ -112,7 +112,13 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/iac/create-timeout.js status statusUrl',
       'src/lib/deploy/ghcr-pull.js githubTokenScopes READ_PACKAGES_TOKEN_PAGE',
       'src/lib/deploy/ghcr-pull.js pullTokenProblem READ_PACKAGES_TOKEN_PAGE',
+      // The read from the inside's sentence, which ends a NodesNeverJoinedError line.
+      'src/lib/deploy/k8s/node-join-read.js httpsPhrase K3S_INSTALL_URL',
     ],
+  },
+  {
+    why: 'the target of a check the read from the inside ran on a node, named as a fact in its `[node-join]` stderr log line, not a link to open',
+    sites: ['src/lib/deploy/k8s/node-join-read.js nodeReadFacts K3S_INSTALL_URL'],
   },
   {
     why: 'a URL built from a URL constant, returned to callers that print it through link()',

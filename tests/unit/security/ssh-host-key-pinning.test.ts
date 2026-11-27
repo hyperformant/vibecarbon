@@ -23,6 +23,9 @@ const OWNED_SSH_FILES = [
   'src/lib/deploy/k8s/k3s.js',
   'src/lib/deploy/utils.js',
   'src/lib/deploy/k8s/ha/index.js',
+  // The read from the inside: the k3s server pinned through the shared
+  // builders, the node in a throwaway known_hosts with accept-new.
+  'src/lib/deploy/k8s/node-join-read.js',
 ];
 
 /**

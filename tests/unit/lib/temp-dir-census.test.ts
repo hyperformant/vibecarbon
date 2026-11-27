@@ -68,6 +68,8 @@ const NO_SECRET_PREFIXES: Record<string, string> = {
   DELTA_DIR_PREFIX:
     "the app image's layers, under the private per-user root that sweepStaleDeltaDirs clears",
   'vibecarbon-script-': 'runShellScript, which nothing in src/ calls',
+  'vc-node-read-':
+    "the read from the inside's throwaway known_hosts (node-join-read.js): one cluster node's public host key",
   'vibecarbon-pulumi-':
     "a Pulumi workspace: Pulumi.yaml with the state backend URL (the credentials go in the engine's env) and the stack's encryption salt, which the state backend holds too",
 };

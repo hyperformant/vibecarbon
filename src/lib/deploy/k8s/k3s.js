@@ -184,6 +184,7 @@ import {
   nodesNeverJoinedNextStep,
 } from './node-join.js';
 import { clusterProbe } from './node-join-probe.js';
+import { nodeRead, nodeReadOverSsh } from './node-join-read.js';
 import { WORKER_NODE_SELECTOR } from './node-roles.js';
 import {
   removeRetiredObservabilityCertificate,
@@ -6611,7 +6612,10 @@ async function deployK3sSteps(options, inFlight) {
   // A server that never registered, probed from the k3s server it should
   // have joined (node-join-probe.js): one ssh to the master with the deploy's
   // own key and pinned known_hosts, as prePullImages makes, killed at the
-  // probe's bound.
+  // probe's bound. One whose private address answered port 22 is then read
+  // from the inside (node-join-read.js): one ssh to that address through the
+  // master, with the master pinned exactly as here, and the cluster's k3s
+  // token redacted from whatever it prints.
   const probeFromCluster = clusterProbe({
     providerName: Provider.NAME,
     run: (script, { timeoutMs }) =>
@@ -6619,6 +6623,14 @@ async function deployK3sSteps(options, inFlight) {
         ['ssh', '-i', privateKeyPath, ...sshHostKeyOpts(khPath), `root@${masterIp}`, 'sh -s'],
         { silent: true, input: script, timeout: timeoutMs },
       ),
+    readNode: nodeRead({
+      run: nodeReadOverSsh({
+        sshKeyPath: privateKeyPath,
+        hostKeyOpts: sshHostKeyOpts(khPath),
+        masterIp,
+      }),
+      secrets: [infraOutputs.k3sToken],
+    }),
   });
 
   // 4. Wait for cloud-init to finish + k3s to be Ready
