@@ -66,6 +66,7 @@ import {
   NODE_JOIN_BUDGET_MS,
   NODE_JOIN_POLL_MS,
 } from './lib/deploy/k8s/node-join.js';
+import { clusterProbe } from './lib/deploy/k8s/node-join-probe.js';
 import { WORKER_NODE_SELECTOR } from './lib/deploy/k8s/node-roles.js';
 import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
@@ -1645,6 +1646,19 @@ async function _provisionStandbyCapacityImpl({
                 nodes,
               })
           : undefined,
+      // A worker that never registered, probed from the standby's k3s server
+      // (node-join-probe.js), over the same ssh as the worker wait's kubectl.
+      probeFromCluster: !deps.converge
+        ? clusterProbe({
+            providerName: Provider.NAME,
+            run: (script, { timeoutMs }) =>
+              sshRun(servers.standby.ip, sshKeyPathFor(envName), ['sh', '-s'], {
+                input: script,
+                timeout: timeoutMs,
+                transportRetry: false,
+              }),
+          })
+        : undefined,
     });
 
     // Best-effort image pre-pull on the standby nodes, overlapping Task 10's
@@ -1782,7 +1796,9 @@ export async function reapStaleStandbyWorkers(
  * label (isWorkerNode, k8s/node-roles.js), never by name: Linode cuts a long
  * instance label, so a worker's name need not say worker. With
  * `describeServers`, the provider's view of each missing one goes into the
- * failure first. Returns the number of workers it waited for.
+ * failure first, and with `probeFromCluster`, what the standby's k3s server
+ * sees of each one that never registered (node-join-probe.js). Returns the
+ * number of workers it waited for.
  *
  * deps.kubectl (argv) => stdout and deps.sleep (ms) => Promise are injected by
  * tests so no SSH runs and no real 10s waits elapse.
@@ -1794,6 +1810,7 @@ export async function reapStaleStandbyWorkers(
  *   budgetMs?: number,
  *   workerIps?: string[],
  *   describeServers?: Parameters<typeof awaitNodesJoined>[0]['describeServers'],
+ *   probeFromCluster?: Parameters<typeof awaitNodesJoined>[0]['probeFromCluster'],
  *   deps?: { kubectl?: Function, sleep?: Function },
  * }} [opts]
  * @returns {Promise<number>}
@@ -1802,7 +1819,7 @@ export async function waitForWorkersReady(
   masterIp,
   sshKeyPath,
   count,
-  { budgetMs = NODE_JOIN_BUDGET_MS, workerIps, describeServers, deps = {} } = {},
+  { budgetMs = NODE_JOIN_BUDGET_MS, workerIps, describeServers, probeFromCluster, deps = {} } = {},
 ) {
   const kubectl = deps.kubectl ?? ((argv) => sshKubectl(masterIp, sshKeyPath, argv));
   const ips = Array.isArray(workerIps) && workerIps.length === count ? workerIps : null;
@@ -1819,6 +1836,7 @@ export async function waitForWorkersReady(
     // No warnNotReady: the failover scales the app onto these workers, so a
     // NotReady one fails it like one that never registered.
     describeServers,
+    probeFromCluster,
     pollMs: NODE_JOIN_POLL_MS,
     ...(deps.sleep && { sleep: deps.sleep }),
   });

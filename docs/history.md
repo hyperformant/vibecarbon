@@ -1975,6 +1975,44 @@ and must never replace the failure they describe.
 `tests/unit/deploy/node-join.test.ts` and
 `tests/unit/providers/describe-server-for-diagnosis.test.ts`.
 
+#### 2026-11-27: A node that never joins is probed from its own k3s server
+
+At the join deadline, each server that never registered is probed from the
+k3s server it should have joined, in one ssh bounded at 20 s: two pings and a
+3 s connect to port 22 on its private and its public address, and the k3s
+server's ARP entry for the private one. Each address gets a `[node-join] from
+the k3s server:` log line with those facts, and the node's failure line ends
+with one sentence reading them. The provider's view now carries the server's
+public and private addresses as the provider lists them, prints both, and the
+failure says when the public one is not the address the command waited on.
+Linode reads its VPC address with one more bounded GET
+(`/linode/instances/{id}/ips`); Scaleway's server read has none (IPAM holds
+it), so the database node's recorded private address stands in.
+
+**Why:** three servers never became reachable while their provider said they
+were running: Hetzner fsn1 (2026-11-06), Hetzner nbg1 (2026-11-27) and, in
+Vultr run 45956890734, the k8s-ha standby's database node, whose every ssh
+timed out for nine minutes beside a healthy master in the same firewall group
+and VPC. The provider's view could not tell a server that never booted from
+one whose public network was broken, or from a wait on the wrong address, and
+the rig is destroyed at teardown.
+
+**Do not undo:** do not word a silent private address as anything but the
+server not being up there unless the cluster firewall changes with it: the
+sentence relies on every provider's firewall admitting ping and port 22 from
+the private network (DigitalOcean, Linode and Vultr by rule; Hetzner's
+firewall and Scaleway's security group never filter it), and on none
+admitting ping, or port 22 from anyone but the operator, from outside. Do
+not add a retry, a reboot or a replacement here: it is diagnosis, and it never
+throws into the failure it describes.
+
+**Guard:** `tests/unit/deploy/node-join-probe-firewall-census.test.ts` (runs
+every k8s program and checks its firewall says what the probe says it does),
+`tests/unit/deploy/node-join-census.test.ts` (every node wait passes the
+probe, every provider view carries both addresses from its real response
+shape) and `tests/unit/deploy/node-join-probe.test.ts` (the script, run only
+under stub `ping`, `ip` and `timeout`).
+
 #### 2026-11-27: `update`'s check waits for Ubuntu's daily apt job
 
 `update` reads each server's pending updates only after Ubuntu's daily apt

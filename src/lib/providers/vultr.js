@@ -899,8 +899,10 @@ export class VultrProvider extends BaseProvider {
    * BaseProvider.describeServerForDiagnosis): GET /instances/{id} only.
    * `server_status` is the operating system's state (`installingbooting`,
    * `ok`: see waitForServer), and the power and subscription states ride
-   * beside it as `detail`. Vultr's API keeps no history of what it did to an
-   * instance, so there are no recent actions to read.
+   * beside it as `detail`. Its addresses are `main_ip` (getPublicIP, which
+   * reads the '0.0.0.0' placeholder as none) and `internal_ip`, its VPC
+   * address, empty until it has one. Vultr's API keeps no history of what it
+   * did to an instance, so there are no recent actions to read.
    * @param {string} serverId
    * @returns {Promise<import('./base.js').ServerProviderView>}
    */
@@ -914,6 +916,8 @@ export class VultrProvider extends BaseProvider {
       detail: `power ${instance.power_status ?? '?'}, subscription ${instance.status ?? '?'}`,
       created: instance.date_created ?? null,
       location: instance.region ?? null,
+      publicIp: VultrProvider.getPublicIP(instance),
+      privateIp: instance.internal_ip || null,
       events: [],
       eventsNote: "Vultr's API keeps no event history for an instance",
     };

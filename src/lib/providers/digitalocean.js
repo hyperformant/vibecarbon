@@ -1004,9 +1004,10 @@ export class DigitalOceanProvider extends BaseProvider {
   /**
    * DigitalOcean's view of a droplet for the failure log (see
    * BaseProvider.describeServerForDiagnosis): GET /droplets/{id} for its
-   * status (`new`, `active`, `off`), `created_at` and region, and GET
-   * /droplets/{id}/actions for what DigitalOcean did to it (create,
-   * power_on, ...) and whether each completed or errored.
+   * status (`new`, `active`, `off`), `created_at`, region and addresses
+   * (`networks.v4[]` by `type`, public as getPublicIP reads it, private its
+   * VPC address), and GET /droplets/{id}/actions for what DigitalOcean did
+   * to it (create, power_on, ...) and whether each completed or errored.
    * @param {number|string} serverId
    * @returns {Promise<import('./base.js').ServerProviderView>}
    */
@@ -1033,6 +1034,8 @@ export class DigitalOceanProvider extends BaseProvider {
       status: droplet.status ?? null,
       created: droplet.created_at ?? null,
       location: droplet.region?.slug ?? null,
+      publicIp: DigitalOceanProvider.getPublicIP(droplet),
+      privateIp: droplet.networks?.v4?.find((n) => n.type === 'private')?.ip_address ?? null,
       ...history,
     };
   }

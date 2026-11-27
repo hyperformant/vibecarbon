@@ -623,6 +623,36 @@ describe('waitForWorkersReady', () => {
         'Hetzner Cloud says it is off.',
     );
   });
+
+  // Vultr run 45956890734: the provider said running while the server never
+  // answered. The standby's k3s server says what it sees of the worker.
+  it('hands the probe from the k3s server the worker that never registered, and ends its line with what it saw', async () => {
+    const kubectl = readyKubectl(0);
+    const views = new Map();
+    const describeServers = vi.fn(async (missing: Array<{ ip?: string }>) => {
+      for (const n of missing)
+        views.set(n, { line: 'Vultr says it is ok.', privateIp: '10.1.96.7' });
+      return views;
+    });
+    const probeFromCluster = vi.fn(async (missing: object[]) => {
+      return new Map(missing.map((n) => [n, 'From the k3s server, its private address answers.']));
+    });
+    const err = await waitForWorkersReady('10.0.0.9', '/key', 1, {
+      budgetMs: -1,
+      workerIps: ['203.0.113.12'],
+      describeServers,
+      probeFromCluster,
+      deps: { kubectl, sleep: vi.fn(async () => {}) },
+    }).catch((e) => e);
+    expect(probeFromCluster).toHaveBeenCalledTimes(1);
+    expect(probeFromCluster.mock.calls[0][0]).toEqual([
+      { role: 'worker', ip: '203.0.113.12', state: 'unregistered' },
+    ]);
+    expect(probeFromCluster.mock.calls[0][1]).toBe(views);
+    expect(err.message).toMatch(
+      /Vultr says it is ok\. From the k3s server, its private address answers\.$/,
+    );
+  });
 });
 
 describe('waitForStandbyCaughtUp (planned zero-data-loss gate, any transport)', () => {

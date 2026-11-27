@@ -19,6 +19,16 @@
  * database node; a registered worker that is NotReady is a warning line with
  * the same view (DEPLOY_NOT_READY_WARNS). It diagnoses and stops: nothing is
  * retried, rebooted or replaced.
+ *
+ * The provider's view cannot tell a server that never booted from one whose
+ * public network is broken, or from one the command waited on at the wrong
+ * address (Vultr run 45956890734, 2026-11-27: the k8s-ha standby's database
+ * node timed out every ssh for 9 minutes while Vultr said it was running).
+ * So the view carries the provider's own addresses for the server, the
+ * failure says when its public one is not the address waited on, and each
+ * server that never registered is probed from the k3s server it should have
+ * joined (probeFromCluster, node-join-probe.js): ping and port 22 on its
+ * private and public addresses, and the ARP entry for the private one.
  * tests/unit/deploy/node-join-census.test.ts holds every node wait to it.
  */
 
@@ -63,7 +73,12 @@ const PROVIDER_VIEW_BUDGET_MS = 30_000;
 export const DEPLOY_NOT_READY_WARNS = Object.freeze(['worker']);
 
 /** @typedef {'master' | 'db' | 'worker'} NodeRole */
-/** @typedef {{role: NodeRole, ip?: string, id?: string|number}} ExpectedNode */
+/**
+ * `privateIp` is the address the provisioning recorded for it on the
+ * cluster's private network, where its outputs have one (the database node):
+ * the probe's fallback when the provider's view lists none.
+ * @typedef {{role: NodeRole, ip?: string, id?: string|number, privateIp?: string}} ExpectedNode
+ */
 /**
  * @typedef {ExpectedNode & {
  *   state: 'unregistered' | 'notReady',
@@ -87,15 +102,17 @@ const HAS_ROLE = {
 /**
  * The nodes a provisioning made, from its outputs: the k3s server, the
  * database node and every worker. The master is known by its id when the
- * outputs carry one (its address is a reserved IP on some providers).
+ * outputs carry one (its address is a reserved IP on some providers). The
+ * database node carries its private address when the outputs have one: the
+ * probe's fallback on a provider whose server read lists none (Scaleway).
  *
- * @param {{masterIp?: string, masterId?: string|number, dbIp?: string, workerIps?: string[]}} outputs
+ * @param {{masterIp?: string, masterId?: string|number, dbIp?: string, dbPrivateIp?: string, workerIps?: string[]}} outputs
  * @returns {ExpectedNode[]}
  */
-export function clusterNodeExpectations({ masterIp, masterId, dbIp, workerIps }) {
+export function clusterNodeExpectations({ masterIp, masterId, dbIp, dbPrivateIp, workerIps }) {
   return [
     { role: 'master', ip: masterIp, ...(masterId != null && { id: masterId }) },
-    { role: 'db', ip: dbIp },
+    { role: 'db', ip: dbIp, ...(dbPrivateIp && { privateIp: dbPrivateIp }) },
     ...(workerIps ?? []).map((ip) => ({ role: /** @type {const} */ ('worker'), ip })),
   ];
 }
@@ -164,8 +181,10 @@ function firstLine(err) {
 /**
  * `the database node p-db (1.2.3.4)`, `the database node at 1.2.3.4`, or
  * `a worker`: whatever is known of it.
+ * @param {ExpectedNode & {name?: string}} node
+ * @param {string} [name]
  */
-function nodeLabel(node, name) {
+export function nodeLabel(node, name) {
   const role = ROLE_WORDS[node.role];
   const who = name ?? node.name;
   if (who) return `the ${role} ${who}${node.ip ? ` (${node.ip})` : ''}`;
@@ -188,9 +207,19 @@ const ROLE_CONSEQUENCE = {
 export class NodesNeverJoinedError extends Error {
   /**
    * @param {UnjoinedNode[]} missing
-   * @param {{budgetS: number, since?: string, views?: Map<UnjoinedNode, ProviderViewSummary>, nextStep?: string}} opts
+   * @param {{
+   *   budgetS: number,
+   *   since?: string,
+   *   views?: Map<UnjoinedNode, ProviderViewSummary>,
+   *   probes?: Map<UnjoinedNode, string>,
+   *   nextStep?: string,
+   * }} opts - `probes`: the sentence the probe from the k3s server gives each
+   *   node it reached a reading for (probeFromCluster)
    */
-  constructor(missing, { budgetS, since = JOIN_CLOCK_START, views = new Map(), nextStep = '' }) {
+  constructor(
+    missing,
+    { budgetS, since = JOIN_CLOCK_START, views = new Map(), probes = new Map(), nextStep = '' },
+  ) {
     const lines = missing.map((node) => {
       const view = views.get(node);
       const label = nodeLabel(node, view?.name);
@@ -198,7 +227,11 @@ export class NodesNeverJoinedError extends Error {
         node.state === 'unregistered'
           ? `never joined the cluster: ${budgetS}s after ${since} it still had not registered`
           : `joined the cluster but was not Ready ${budgetS}s after ${since}, so its kubelet is not answering`;
-      return `${label} ${what}, and ${ROLE_CONSEQUENCE[node.role]}.${view?.line ? ` ${view.line}` : ''}`;
+      const probe = probes.get(node);
+      return (
+        `${label} ${what}, and ${ROLE_CONSEQUENCE[node.role]}.` +
+        `${view?.line ? ` ${view.line}` : ''}${probe ? ` ${probe}` : ''}`
+      );
     });
     super([...lines, ...(nextStep ? [nextStep] : [])].join('\n'));
     this.name = 'NodesNeverJoinedError';
@@ -270,7 +303,10 @@ function notReadyWarningLine(node, { budgetS, since, view }) {
  * (the happy path costs a single `kubectl get nodes`), then one every
  * `pollMs`. At the deadline it records the provider's view of each node still
  * missing (`describeServers`) before it throws, and a failure there never
- * replaces this one.
+ * replaces this one. Then each node that never registered is probed from the
+ * k3s server (`probeFromCluster`, given those nodes and the views just read),
+ * and each sentence it returns ends that node's line; a probe that fails is
+ * one log line, and the failure is thrown as it would be without it.
  *
  * Reads that fail are no evidence: the last good read decides, and when no
  * read ever succeeded the wait says so instead of guessing.
@@ -282,6 +318,11 @@ function notReadyWarningLine(node, { budgetS, since, view }) {
  * @param {number} [args.budgetS] - the budget the deadline came from, for the message
  * @param {string} [args.since] - what the deadline counts from, for the message
  * @param {(missing: UnjoinedNode[]) => Promise<Map<UnjoinedNode, ProviderViewSummary>>} [args.describeServers]
+ * @param {(
+ *   unregistered: UnjoinedNode[],
+ *   views: Map<UnjoinedNode, ProviderViewSummary>,
+ * ) => Promise<Map<UnjoinedNode, string>>} [args.probeFromCluster] - the probe
+ *   from the k3s server (clusterProbe, node-join-probe.js)
  * @param {string | ((missing: UnjoinedNode[]) => string)} [args.nextStep] - the
  *   failure's last lines: what to do
  * @param {readonly NodeRole[]} [args.warnNotReady] - roles whose registered
@@ -299,6 +340,7 @@ export async function awaitNodesJoined({
   budgetS = NODE_JOIN_BUDGET_MS / 1000,
   since = JOIN_CLOCK_START,
   describeServers,
+  probeFromCluster,
   nextStep = '',
   warnNotReady = [],
   onWarn = (line) => progressLog(line),
@@ -341,6 +383,17 @@ export async function awaitNodesJoined({
       console.error(`[node-join] could not record the provider's view: ${firstLine(err)}`);
     }
   }
+  // A node that registered has a kubelet that answered; only one that never
+  // did needs reading from inside the cluster's network.
+  let probes = new Map();
+  const unregistered = missing.filter((n) => n.state === 'unregistered');
+  if (probeFromCluster && unregistered.length > 0) {
+    try {
+      probes = await probeFromCluster(unregistered, views);
+    } catch (err) {
+      console.error(`[node-join] could not probe from the k3s server: ${firstLine(err)}`);
+    }
+  }
   // A registered node of a tolerated role is a warning; anything that never
   // registered, and a NotReady k3s server or database node, fails.
   const tolerated = (n) => n.state === 'notReady' && warnNotReady.includes(n.role);
@@ -350,12 +403,13 @@ export async function awaitNodesJoined({
   const failing = missing.filter((n) => !tolerated(n));
   if (failing.length === 0) return;
   const step = typeof nextStep === 'function' ? nextStep(failing) : nextStep;
-  throw new NodesNeverJoinedError(failing, { budgetS, since, views, nextStep: step });
+  throw new NodesNeverJoinedError(failing, { budgetS, since, views, probes, nextStep: step });
 }
 
 /**
- * @typedef {{name?: string, line: string}} ProviderViewSummary
+ * @typedef {{name?: string, line: string, publicIp?: string|null, privateIp?: string|null}} ProviderViewSummary
  *   `line` is one sentence for the failure message; the full view is logged.
+ *   The addresses are the provider's own, for the probe from the k3s server.
  */
 
 /** `2026-11-27T02:32:10+00:00` as `2026-11-27 02:32:10 UTC`; anything else as given. */
@@ -366,11 +420,17 @@ function when(ts) {
 }
 
 /**
- * One sentence of the provider's view, for the failure message.
+ * One sentence of the provider's view, for the failure message, and one more
+ * when the public address the provider lists is not the one the command
+ * waited on (`node.ip`): case 3 of a server that never answers, the wrong
+ * address. Not for the k3s server, whose recorded address is the cluster's
+ * reserved IP on some providers (Linode, Scaleway), which need not be the
+ * one the provider lists first.
  * @param {string} providerName
  * @param {import('../../providers/base.js').ServerProviderView} view
+ * @param {ExpectedNode} [node]
  */
-export function providerViewLine(providerName, view) {
+export function providerViewLine(providerName, view, node) {
   const state = [view.status, view.detail].filter(Boolean).join(', ') || 'no status';
   const made = view.created ? `, created ${when(view.created)}` : '';
   const place = view.location ? ` in ${view.location}` : '';
@@ -379,7 +439,20 @@ export function providerViewLine(providerName, view) {
     ? `; its last action, ${last.action}, is ${last.status ?? 'of unknown status'}` +
       (last.error ? ` (${last.error})` : '')
     : '';
-  return `${providerName} says it is ${state}${made}${place}${action}.`;
+  return `${providerName} says it is ${state}${made}${place}${action}.${addressMismatch(providerName, view, node)}`;
+}
+
+/** The sentence providerViewLine adds when the provider's public address is not `node.ip`. */
+function addressMismatch(providerName, view, node) {
+  if (!node?.ip || node.role === 'master' || view.publicIp === undefined) return '';
+  if (view.publicIp === node.ip) return '';
+  if (!view.publicIp) {
+    return ` ${providerName} lists no public address for it, though this command waited on ${node.ip}.`;
+  }
+  return (
+    ` ${providerName} lists its public address as ${view.publicIp}, not ${node.ip}, ` +
+    'the address this command waited on.'
+  );
 }
 
 /**
@@ -393,7 +466,9 @@ function providerViewLogLines(providerName, node, view) {
   const head =
     `[node-join] ${providerName}'s view of ${view.name ?? node.ip} (${node.ip ?? '?'}, ${ROLE_WORDS[node.role]}): ` +
     `status ${view.status ?? '?'}${view.detail ? ` (${view.detail})` : ''}, ` +
-    `created ${view.created ?? '?'}, at ${view.location ?? '?'}, id ${view.id}`;
+    `created ${view.created ?? '?'}, at ${view.location ?? '?'}, id ${view.id}, ` +
+    `public ${view.publicIp ?? 'none'}, ` +
+    `private ${view.privateIp ?? (view.privateIpNote ? `unknown (${view.privateIpNote})` : 'none')}`;
   const events = (view.events ?? []).map(
     (e) =>
       `[node-join]   ${e.action}: ${e.status ?? '?'}, started ${e.started ?? '?'}` +
@@ -454,7 +529,9 @@ export async function describeServersForLog({
           for (const line of providerViewLogLines(providerName, node, view)) log(line);
           views.set(node, {
             ...(view.name && { name: view.name }),
-            line: providerViewLine(providerName, view),
+            line: providerViewLine(providerName, view, node),
+            publicIp: view.publicIp ?? null,
+            privateIp: view.privateIp ?? null,
           });
         } catch (err) {
           log(

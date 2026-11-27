@@ -73,7 +73,16 @@ describe('HetznerProvider.describeServerForDiagnosis', () => {
     name: 'proj-ci4-db',
     status: 'running',
     created: '2026-11-27T02:32:10+00:00',
-    datacenter: { name: 'nbg1-dc3' },
+    datacenter: { name: 'nbg1-dc3', location: { name: 'nbg1' } },
+    public_net: {
+      ipv4: { id: 51, ip: '167.233.172.157', blocked: false, dns_ptr: 'static.example' },
+      ipv6: { id: 52, ip: '2a01:4f8:1c1e::/64', blocked: false, dns_ptr: [] },
+      floating_ips: [],
+      firewalls: [{ id: 7, status: 'applied' }],
+    },
+    private_net: [
+      { network: 4711, ip: '10.0.1.2', alias_ips: [], mac_address: '86:00:00:2a:7d:e0' },
+    ],
   };
 
   it('the server, and its actions newest first with their errors', async () => {
@@ -105,6 +114,8 @@ describe('HetznerProvider.describeServerForDiagnosis', () => {
       status: 'running',
       created: '2026-11-27T02:32:10+00:00',
       location: 'nbg1-dc3',
+      publicIp: '167.233.172.157',
+      privateIp: '10.0.1.2',
       events: [
         {
           action: 'start_server',
@@ -123,6 +134,20 @@ describe('HetznerProvider.describeServerForDiagnosis', () => {
       ],
     });
     expect(fetchSpy.mock.calls[0][1]).toMatchObject({ headers: { Authorization: 'Bearer t' } });
+    expectReadOnly(2);
+  });
+
+  it('a server on no private network has no private address, and no public one is null too', async () => {
+    answer(base, {
+      '/servers/4242': ok({
+        server: { ...server, public_net: { ipv4: null, ipv6: null }, private_net: [] },
+      }),
+      [`/servers/4242/actions?sort=started:desc&per_page=${SERVER_VIEW_EVENTS}`]: ok({
+        actions: [],
+      }),
+    });
+    const view = await new HetznerProvider('t').describeServerForDiagnosis(4242);
+    expect(view).toMatchObject({ publicIp: null, privateIp: null });
     expectReadOnly(2);
   });
 
@@ -161,6 +186,19 @@ describe('DigitalOceanProvider.describeServerForDiagnosis', () => {
           status: 'new',
           created_at: '2026-11-27T02:32:10Z',
           region: { slug: 'nyc3' },
+          // DigitalOcean lists the VPC address first as often as not.
+          networks: {
+            v4: [
+              { ip_address: '10.116.0.3', netmask: '255.255.240.0', gateway: '', type: 'private' },
+              {
+                ip_address: '159.89.40.7',
+                netmask: '255.255.240.0',
+                gateway: '159.89.32.1',
+                type: 'public',
+              },
+            ],
+            v6: [],
+          },
         },
       }),
       [`/droplets/77/actions?per_page=${SERVER_VIEW_EVENTS}`]: ok({
@@ -181,6 +219,8 @@ describe('DigitalOceanProvider.describeServerForDiagnosis', () => {
       status: 'new',
       created: '2026-11-27T02:32:10Z',
       location: 'nyc3',
+      publicIp: '159.89.40.7',
+      privateIp: '10.116.0.3',
       events: [
         {
           action: 'create',
@@ -196,15 +236,49 @@ describe('DigitalOceanProvider.describeServerForDiagnosis', () => {
 });
 
 describe('LinodeProvider.describeServerForDiagnosis', () => {
-  it("the instance, and the account's events for it", async () => {
+  // GET /linode/instances/{id} lists the public IPv4 first in `ipv4`; a VPC
+  // address is not in it. GET /linode/instances/{id}/ips lists it under
+  // `ipv4.vpc` (Linode API, get-linode-ips; linodego InstanceIPv4Response.VPC).
+  const instance = {
+    id: 9001,
+    label: 'proj-ci4-db',
+    status: 'provisioning',
+    created: '2026-11-27T02:32:10',
+    region: 'us-ord',
+    ipv4: ['172.105.12.34'],
+    ipv6: '2600:3c06::f03c:95ff:fe12:3456/128',
+  };
+  const ips = {
+    ipv4: {
+      public: [{ address: '172.105.12.34', type: 'ipv4', public: true, linode_id: 9001 }],
+      private: [],
+      shared: [],
+      reserved: [],
+      vpc: [
+        {
+          address: '10.0.1.3',
+          address_range: null,
+          vpc_id: 123,
+          subnet_id: 456,
+          config_id: 789,
+          interface_id: 1011,
+          linode_id: 9001,
+          active: true,
+          nat_1_1: null,
+          gateway: '10.0.1.1',
+          prefix: 24,
+          subnet_mask: '255.255.255.0',
+          region: 'us-ord',
+        },
+      ],
+    },
+    ipv6: { slaac: null, link_local: null, global: [] },
+  };
+
+  it("the instance, its VPC address, and the account's events for it", async () => {
     answer(LinodeProvider.API_BASE, {
-      '/linode/instances/9001': ok({
-        id: 9001,
-        label: 'proj-ci4-db',
-        status: 'provisioning',
-        created: '2026-11-27T02:32:10',
-        region: 'us-ord',
-      }),
+      '/linode/instances/9001': ok(instance),
+      '/linode/instances/9001/ips': ok(ips),
       '/account/events?page_size=25': ok({
         data: [
           {
@@ -223,11 +297,14 @@ describe('LinodeProvider.describeServerForDiagnosis', () => {
       name: 'proj-ci4-db',
       status: 'provisioning',
       location: 'us-ord',
+      publicIp: '172.105.12.34',
+      privateIp: '10.0.1.3',
       events: [
         { action: 'linode_boot', status: 'failed', error: 'host unavailable' },
         { action: 'linode_create', status: 'finished', error: null },
       ],
     });
+    expect(view.privateIpNote).toBeUndefined();
     // The events are filtered to this instance, newest first.
     const eventsCall = fetchSpy.mock.calls.find(([u]) => String(u).includes('/account/events'));
     expect(eventsCall).toBeDefined();
@@ -239,17 +316,41 @@ describe('LinodeProvider.describeServerForDiagnosis', () => {
       '+order_by': 'created',
       '+order': 'desc',
     });
-    expectReadOnly(2);
+    expectReadOnly(3);
   });
 
   it('a token without the events scope still gets the status', async () => {
     answer(LinodeProvider.API_BASE, {
       '/linode/instances/9001': ok({ id: 9001, label: 'x', status: 'running' }),
+      '/linode/instances/9001/ips': ok(ips),
       '/account/events?page_size=25': { status: 401 },
     });
     const view = await new LinodeProvider('t').describeServerForDiagnosis('9001');
     expect(view.status).toBe('running');
     expect(view.eventsError).toBe('Linode answered HTTP 401 for /account/events');
+  });
+
+  it('addresses it cannot read leave the status, with the reason', async () => {
+    answer(LinodeProvider.API_BASE, {
+      '/linode/instances/9001': ok(instance),
+      '/linode/instances/9001/ips': { status: 403 },
+      '/account/events?page_size=25': ok({ data: [] }),
+    });
+    const view = await new LinodeProvider('t').describeServerForDiagnosis('9001');
+    expect(view).toMatchObject({ status: 'provisioning', publicIp: '172.105.12.34' });
+    expect(view.privateIp).toBeNull();
+    expect(view.privateIpNote).toBe('Linode answered HTTP 403 for /linode/instances/9001/ips');
+  });
+
+  it('an instance on no VPC has no private address', async () => {
+    answer(LinodeProvider.API_BASE, {
+      '/linode/instances/9001': ok(instance),
+      '/linode/instances/9001/ips': ok({ ipv4: { ...ips.ipv4, vpc: [] } }),
+      '/account/events?page_size=25': ok({ data: [] }),
+    });
+    const view = await new LinodeProvider('t').describeServerForDiagnosis('9001');
+    expect(view.privateIp).toBeNull();
+    expect(view.privateIpNote).toBeUndefined();
   });
 });
 
@@ -265,6 +366,10 @@ describe('VultrProvider.describeServerForDiagnosis', () => {
           server_status: 'installingbooting',
           date_created: '2026-11-27T02:32:10+00:00',
           region: 'ewr',
+          main_ip: '137.220.58.74',
+          internal_ip: '10.1.96.4',
+          v6_main_ip: '2001:19f0:5c01:1234:5400:05ff:fe12:3456',
+          vpc_id: '',
         },
       }),
     });
@@ -276,10 +381,30 @@ describe('VultrProvider.describeServerForDiagnosis', () => {
       detail: 'power running, subscription active',
       created: '2026-11-27T02:32:10+00:00',
       location: 'ewr',
+      publicIp: '137.220.58.74',
+      privateIp: '10.1.96.4',
       events: [],
       eventsNote: "Vultr's API keeps no event history for an instance",
     });
     expectReadOnly(1);
+  });
+
+  it('an address Vultr has not assigned yet reads as none: its 0.0.0.0 placeholder and an empty internal_ip', async () => {
+    answer(VultrProvider.API_BASE, {
+      '/instances/abc-123': ok({
+        instance: {
+          id: 'abc-123',
+          label: 'proj-ci4-db',
+          status: 'pending',
+          power_status: 'stopped',
+          server_status: 'none',
+          main_ip: '0.0.0.0',
+          internal_ip: '',
+        },
+      }),
+    });
+    const view = await new VultrProvider('t').describeServerForDiagnosis('abc-123');
+    expect(view).toMatchObject({ publicIp: null, privateIp: null });
   });
 });
 
@@ -291,6 +416,24 @@ describe('ScalewayProvider.describeServerForDiagnosis', () => {
     state_detail: 'provisioning node',
     creation_date: '2026-11-27T02:32:10Z',
     zone: 'nl-ams-1',
+    // Routed-IP era: the flexible IPs, and the Private Network NIC, which
+    // carries no address (IPAM holds it: ipam_ip_ids).
+    public_ip: null,
+    public_ips: [
+      { id: 'ip-6', address: '2001:bc8:1640::1', family: 'inet6', dynamic: false },
+      { id: 'ip-4', address: '51.15.200.7', family: 'inet', dynamic: false },
+    ],
+    private_nics: [
+      {
+        id: 'nic-1',
+        private_network_id: 'pn-1',
+        server_id: 'srv-1',
+        mac_address: '02:00:00:12:34:56',
+        state: 'available',
+        zone: 'nl-ams-1',
+        ipam_ip_ids: ['ipam-1', 'ipam-2'],
+      },
+    ],
   };
 
   it('finds the zone that has the server, one read per zone', async () => {
@@ -309,6 +452,9 @@ describe('ScalewayProvider.describeServerForDiagnosis', () => {
       detail: 'provisioning node',
       created: '2026-11-27T02:32:10Z',
       location: 'nl-ams-1',
+      publicIp: '51.15.200.7',
+      privateIp: null,
+      privateIpNote: "Scaleway's server read carries no private address; its IPAM API holds it",
       events: [],
       eventsNote: "Scaleway's Instance API keeps no event history for a server",
     });

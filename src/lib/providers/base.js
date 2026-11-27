@@ -306,6 +306,14 @@ const DIAGNOSIS_READ_TIMEOUT_MS = 5000;
  * @property {string|null} [detail] - provider state worth reading beside it (Vultr's power and subscription, Scaleway's state_detail)
  * @property {string|null} created - when the provider says it was made
  * @property {string|null} location - datacenter, region or zone
+ * @property {string|null} publicIp - the public IPv4 the provider lists for
+ *   it (the provider's getPublicIP), read from the same server read; null
+ *   when it lists none
+ * @property {string|null} privateIp - its address on the cluster's private
+ *   network, as the provider lists it; null when it lists none or the read
+ *   does not carry it
+ * @property {string} [privateIpNote] - why `privateIp` is not known: a read
+ *   that failed, or a server read that never carries it
  * @property {ServerProviderEvent[]} events - newest first, at most SERVER_VIEW_EVENTS
  * @property {string} [eventsError] - why the recent actions could not be read
  * @property {string} [eventsNote] - why this provider has none to read
@@ -1094,12 +1102,20 @@ export class BaseProvider {
    * failed read of the server throws; a failed read of its history is
    * `eventsError` beside the status that was read (eventsOrWhyNot).
    *
+   * The view also carries the server's public and private addresses as the
+   * provider lists them (`publicIp`, `privateIp`), from the server read it
+   * already makes: the failure says when the public one is not the address
+   * the command waited on, and the probe from the k3s server
+   * (node-join-probe.js) pings the private one (Vultr run 45956890734).
+   *
    * What each provider reads: Hetzner GET /servers/{id} and its
    * /servers/{id}/actions; DigitalOcean GET /droplets/{id} and its
-   * /droplets/{id}/actions; Linode GET /linode/instances/{id} and the
-   * account's /account/events for it; Vultr GET /instances/{id} only and
-   * Scaleway GET /instance/v1/zones/{zone}/servers/{id} only, because
-   * neither API keeps a history per server (their `eventsNote` says so).
+   * /droplets/{id}/actions; Linode GET /linode/instances/{id}, its
+   * /linode/instances/{id}/ips (the instance read carries no VPC address)
+   * and the account's /account/events for it; Vultr GET /instances/{id}
+   * only and Scaleway GET /instance/v1/zones/{zone}/servers/{id} only,
+   * because neither API keeps a history per server (their `eventsNote` says
+   * so).
    * tests/unit/deploy/node-join-census.test.ts holds every registered
    * provider to its own. A provider that cannot read a server's state at all
    * keeps this stub, which says so, and the failure is logged without it.
