@@ -596,6 +596,17 @@ class FakeHetznerProvider {
 }
 const MASTER_ID = '4242';
 
+/**
+ * The deploy's node-join check (deployK3s: awaitNodesJoined), logged into
+ * cmdCalls so it orders against the db wait; `nodesJoinedError` makes it fail
+ * as a database node that never joined does.
+ */
+let nodesJoinedError: Error | null = null;
+async function nodesJoined() {
+  cmdCalls.push(['nodesJoined']);
+  if (nodesJoinedError) throw nodesJoinedError;
+}
+
 function baseArgs(projectDir: string) {
   return {
     kubeconfig: join(projectDir, 'kubeconfig'),
@@ -624,6 +635,7 @@ function baseArgs(projectDir: string) {
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
     perfPrefix: 'k3s',
+    nodesJoined,
   };
 }
 
@@ -680,6 +692,7 @@ function findAppliedSecretConfigJson(secretName: string) {
 beforeEach(() => {
   observabilityApplied = false;
   observabilityRoutesOut = '{"items":[]}';
+  nodesJoinedError = null;
   deliverImage.mockReset();
   deliverImage.mockImplementation(async (opts: { pushAfter?: Promise<unknown> }) => {
     cmdCalls.push(['deliverImage']);
@@ -820,6 +833,46 @@ describe('applyK3sManifests creates an HA db with its replication hostPort (neve
     expect(dbAtBaseApply).not.toBeNull();
     expect(dbAtBaseApply?.kustomization).not.toMatch(/patches/);
     expect(dbAtBaseApply?.hostPortPatch).toBeNull();
+  });
+});
+
+// perf run 45922250720 (hetzner/k8s-ha restore-deploy): the database node
+// never joined, and db-0 sat Pending on its node selector for the db wait's
+// whole 900 s. The node-join check runs first, so its own deadline decides.
+describe('applyK3sManifests checks the nodes joined before it waits for the db', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    installSpawnMock();
+  });
+
+  it('runs the node-join check before the db rollout wait', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const check = cmdCalls.findIndex((a) => a[0] === 'nodesJoined');
+    const dbWait = cmdCalls.findIndex(isDbRolloutWait);
+    expect(check).toBeGreaterThan(-1);
+    expect(dbWait).toBeGreaterThan(check);
+    expect(cmdCalls.filter((a) => a[0] === 'nodesJoined')).toHaveLength(1);
+  });
+
+  it('a node that never joined fails the apply with its error, and the db is never waited on', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    nodesJoinedError = new Error('the database node at 167.233.172.157 never joined the cluster');
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      /database node at 167\.233\.172\.157 never joined/,
+    );
+    expect(cmdCalls.some(isDbRolloutWait)).toBe(false);
+  });
+
+  it('refuses to run without the check', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const { nodesJoined: _omitted, ...args } = baseArgs(makeProjectDir());
+    await expect(applyK3sManifests(args as never)).rejects.toThrow(/nodesJoined required/);
+    expect(cmdCalls).toEqual([]);
   });
 });
 

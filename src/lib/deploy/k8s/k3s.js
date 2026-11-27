@@ -170,6 +170,14 @@ import {
 } from './image-delivery.js';
 import { infraFloatingIp } from './ingress-ip.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
+import {
+  awaitNodesJoined,
+  clusterNodeExpectations,
+  describeServersForLog,
+  NODE_JOIN_BUDGET_MS,
+  NODE_JOIN_POLL_MS,
+  nodesNeverJoinedNextStep,
+} from './node-join.js';
 import { WORKER_NODE_SELECTOR } from './node-roles.js';
 import {
   removeRetiredObservabilityCertificate,
@@ -1347,8 +1355,12 @@ function sshHostKeyOpts(khPath) {
  * @param {string} sshKeyPath
  * @param {string} khPath - per-env known_hosts file path
  * @param {number} [maxWaitSec]
- * @param {{ onStage?: (label: string) => void }} [opts] - called with a plain
- *   description of what the server is doing, when it changes
+ * @param {{ onStage?: (label: string) => void, describeMaster?: () => Promise<string> }} [opts]
+ *   - onStage: called with a plain description of what the server is doing,
+ *     when it changes
+ *   - describeMaster: on a timeout, what the provider says about the master
+ *     (one sentence, logged in full: describeServersForLog, node-join.js);
+ *     its own failure is a log line and never replaces the timeout
  * @returns {Promise<void>}
  */
 export async function waitForK3sReady(
@@ -1356,7 +1368,7 @@ export async function waitForK3sReady(
   sshKeyPath,
   khPath,
   maxWaitSec = 600,
-  { onStage } = {},
+  { onStage, describeMaster } = {},
 ) {
   // One held SSH session returns the moment /tmp/k3s-ready exists. The run
   // wrapper never throws (the helper's contract) and keeps the last SSH error
@@ -1399,9 +1411,13 @@ export async function waitForK3sReady(
     // if the box is unreachable, captureK3sInstallDiag returns an empty string
     // and we surface only the SSH probe error.
     const diag = await captureK3sInstallDiag(masterIp, sshKeyPath, khPath);
+    // The provider's own view of the master: when ssh never reached it, the
+    // only record of whether it crashed or never booted.
+    const view = await (describeMaster?.() ?? Promise.resolve('')).catch(() => '');
     throw new Error(
       `k3s did not become ready on ${masterIp} within ${maxWaitSec}s. ` +
         `Last SSH error: ${err instanceof Error ? err.message : 'unknown'}` +
+        (view ? `\n${view}` : '') +
         (diag ? `\n\n--- install diagnostics from ${masterIp} ---\n${diag}` : ''),
     );
   }
@@ -4629,9 +4645,17 @@ export async function applyK3sManifests({
   // Where this registers what it runs alongside its main chain (the CA
   // rollout), so deployK3s can stop and settle it when the deploy fails.
   inFlight = {},
+  // Resolves once every node the provisioning made has joined, and throws
+  // naming any that has not by its deadline (deployK3s: awaitNodesJoined,
+  // node-join.js). awaitDb runs it before the db wait, which cannot pass
+  // without the database node.
+  nodesJoined,
 }) {
   if (!masterIp) throw new Error('applyK3sManifests: masterIp required');
   if (!sshKeyPath) throw new Error('applyK3sManifests: sshKeyPath required');
+  if (typeof nodesJoined !== 'function') {
+    throw new Error('applyK3sManifests: nodesJoined required');
+  }
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   const master = { ip: masterIp, sshKeyPath };
   // What the autoscaler's provider reads besides the token, for its Secret
@@ -5610,7 +5634,11 @@ export async function applyK3sManifests({
     : DB_ROLLOUT_TIMEOUT_S;
   // The live wal-g role file is not written here: deployK3s writes it on
   // every deploy, outside the k3s-apply skip gate (writeDeployWalgRole).
+  // The nodes first: a database node that never joined leaves db-0 Pending
+  // on its node selector for the whole rollout budget (perf run 45922250720,
+  // hetzner/k8s-ha), and the check names it at its own deadline instead.
   const awaitDb = async () => {
+    await nodesJoined();
     await perfAsync(`deploy.${perfPrefix}.awaitDb`, () =>
       awaitDbRollout({
         env,
@@ -6517,6 +6545,18 @@ async function deployK3sSteps(options, inFlight) {
     );
   }
 
+  // The cluster's nodes as this provisioning made them, and what the
+  // provider says about any that never answers, for the failure log
+  // (node-join.js). Only a failure reads the provider.
+  const clusterNodes = clusterNodeExpectations({
+    masterIp,
+    masterId: infraOutputs.masterId,
+    dbIp,
+    workerIps,
+  });
+  const describeServers = (nodes) =>
+    describeServersForLog({ provider: new Provider(options.apiToken), Provider, nodes });
+
   // 4. Wait for cloud-init to finish + k3s to be Ready
   // Set when this run waited for the master, i.e. on a fresh (re)provision:
   // the nodes' first-boot timing is read back once the host keys are pinned.
@@ -6531,15 +6571,22 @@ async function deployK3sSteps(options, inFlight) {
     // genuine bug surfaces with cloud-init log content, so a longer budget
     // costs us nothing — we still get the same actionable signal on real
     // failures, just don't false-positive on slow apt mornings.
+    const master = { ...clusterNodes[0], state: /** @type {const} */ ('unregistered') };
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
       waitForK3sReady(masterIp, privateKeyPath, khPath, 1200, {
         onStage: (label) => s.message(`Waiting for k3s on master: ${label}`),
+        describeMaster: async () => (await describeServers([master])).get(master)?.line ?? '',
       }),
     );
     bootTimingDue = true;
     state.completeStep('k3s-ready');
     s.stop('k3s reachable');
   }
+
+  // Every other node has NODE_JOIN_BUDGET_MS from here, the k3s server
+  // serving, to register and be Ready: they cannot join before it answers.
+  // Checked by nodesJoined below, before the first wait that needs one.
+  const nodesJoinBy = Date.now() + NODE_JOIN_BUDGET_MS;
 
   // Trusted host-key seed. The SSH opts above pin per-env with accept-new
   // (TOFU on first connect); seeding the known_hosts from a real ssh-keyscan
@@ -6660,6 +6707,42 @@ async function deployK3sSteps(options, inFlight) {
     // that file's writer, so it may bring it up to date; readers never do.
     kubeconfig = await upgradeKubeconfig(state.getStepResult('k3s-kubeconfig').kubeconfig);
   }
+
+  // Every node this provisioning made has registered and is Ready, or the
+  // deploy stops at nodesJoinBy naming the ones that are not, with what the
+  // provider says about each (node-join.js). Run before the first wait that
+  // needs a node other than the k3s server, the db wait (applyK3sManifests'
+  // awaitDb, or awaitDbPodReady below when the apply is skipped): by then a
+  // healthy cluster's nodes have joined, so it is one read. Each read is
+  // bounded by the poll interval, so none outlasts the next.
+  const nodesJoined = () =>
+    perfAsync(`deploy.${perfPrefix}.nodesJoined`, () =>
+      awaitNodesJoined({
+        expected: clusterNodes,
+        readNodes: () =>
+          runCommandAsync(
+            [
+              'kubectl',
+              'get',
+              'nodes',
+              '-o',
+              'json',
+              `--request-timeout=${NODE_JOIN_POLL_MS / 1000}s`,
+            ],
+            {
+              env: { ...process.env, KUBECONFIG: kubeconfig },
+              silent: true,
+              timeout: NODE_JOIN_POLL_MS,
+            },
+          ),
+        deadline: nodesJoinBy,
+        describeServers,
+        nextStep: nodesNeverJoinedNextStep({
+          providerName: Provider.NAME,
+          env: options.operatorEnv ?? options.environment,
+        }),
+      }),
+    );
 
   // 5b. The cluster's restore marker decides what this deploy may do (a
   //     pending restore stops a plain deploy; a running database stops
@@ -6844,6 +6927,9 @@ async function deployK3sSteps(options, inFlight) {
         // from infraOutputs (destructured above with its resume-compat
         // fallback).
         vpcCidr,
+        // Every node joined, or the deploy stops naming the one that did
+        // not: awaitDb runs it before the db wait.
+        nodesJoined,
       }),
     );
     tlsRestoredAt = applied?.tlsRestoredAt ?? null;
@@ -6863,8 +6949,10 @@ async function deployK3sSteps(options, inFlight) {
   //     vibecarbon-db-role already proves needs no exec. A skipped apply
   //     waited for no db and rolled none, so it waits on the pod's Ready from
   //     the API: the write never races a starting pod, and a deploy with
-  //     nothing to do does not exec only to ask if the db is up.
+  //     nothing to do does not exec only to ask if the db is up. The db pod
+  //     needs its node, so the nodes are checked first, as awaitDb does.
   if (skipApply) {
+    await nodesJoined();
     await awaitDbPodReady({ env: { ...process.env, KUBECONFIG: kubeconfig } });
   }
   await perfAsync(`deploy.${perfPrefix}.walgRole`, () =>

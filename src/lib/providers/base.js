@@ -275,6 +275,68 @@ export function normalizePublicKey(publicKey) {
   return `${type || ''} ${body || ''}`.trim();
 }
 
+/**
+ * How many of a server's recent actions the failure log records: a server
+ * made minutes before (the case it exists for) has a handful (create, start,
+ * a volume attach), so ten holds its whole life.
+ */
+export const SERVER_VIEW_EVENTS = 10;
+
+/**
+ * The hard abort on each read of a server's provider view: the one
+ * getServerSummary's probe uses (_serverSummaryAt).
+ */
+const DIAGNOSIS_READ_TIMEOUT_MS = 5000;
+
+/**
+ * @typedef {object} ServerProviderEvent
+ * @property {string} action - the provider's name for it (Hetzner `create_server`, DigitalOcean `create`, Linode `linode_boot`)
+ * @property {string|null} status - in the provider's words (`success`, `completed`, `finished`, `failed`, ...)
+ * @property {string|null} started
+ * @property {string|null} finished
+ * @property {string|null} error - what the provider said went wrong, when it did
+ */
+
+/**
+ * What the provider itself says about one server (describeServerForDiagnosis).
+ * @typedef {object} ServerProviderView
+ * @property {string|number} id
+ * @property {string|null} name
+ * @property {string|null} status - the provider's own state word (Hetzner `running`, DigitalOcean `active`, Vultr `ok`, ...)
+ * @property {string|null} [detail] - provider state worth reading beside it (Vultr's power and subscription, Scaleway's state_detail)
+ * @property {string|null} created - when the provider says it was made
+ * @property {string|null} location - datacenter, region or zone
+ * @property {ServerProviderEvent[]} events - newest first, at most SERVER_VIEW_EVENTS
+ * @property {string} [eventsError] - why the recent actions could not be read
+ * @property {string} [eventsNote] - why this provider has none to read
+ */
+
+/**
+ * Events newest first by their start, at most SERVER_VIEW_EVENTS. A provider
+ * whose listing order its API does not promise sorts here.
+ * @param {ServerProviderEvent[]} events
+ * @returns {ServerProviderEvent[]}
+ */
+function newestEventsFirst(events) {
+  const at = (e) => Date.parse(e.started ?? '') || 0;
+  return [...events].sort((a, b) => at(b) - at(a)).slice(0, SERVER_VIEW_EVENTS);
+}
+
+/**
+ * Read a server's recent actions for its provider view, never failing the
+ * view: a refused or failed read comes back as `eventsError`, beside the
+ * status the server read already has.
+ * @param {Promise<ServerProviderEvent[]>} read
+ * @returns {Promise<{events: ServerProviderEvent[], eventsError?: string}>}
+ */
+export async function eventsOrWhyNot(read) {
+  try {
+    return { events: newestEventsFirst(await read) };
+  } catch (err) {
+    return { events: [], eventsError: String(err?.message ?? err).slice(0, 200) };
+  }
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")
@@ -1015,6 +1077,41 @@ export class BaseProvider {
    */
   async getServerSummary(_serverId) {
     throw new Error('getServerSummary() must be implemented by subclass');
+  }
+
+  /**
+   * What the provider itself says about one server, for the failure log of a
+   * command whose cluster node never joined or stopped answering
+   * (describeServersForLog, src/lib/deploy/k8s/node-join.js): its status,
+   * when and where it was made, and its recent actions. Twice a Hetzner
+   * database node was lost with nothing recorded of the server's own state
+   * (2026-11-06, 2026-11-27), and only the provider could have told a crash
+   * from a server that never booted or lost its network.
+   *
+   * Read-only and cheap: GETs only, each one attempt under
+   * DIAGNOSIS_READ_TIMEOUT_MS (_readForDiagnosis), never retried, since it
+   * runs on a failure path that must not wait on the API it describes. A
+   * failed read of the server throws; a failed read of its history is
+   * `eventsError` beside the status that was read (eventsOrWhyNot).
+   *
+   * What each provider reads: Hetzner GET /servers/{id} and its
+   * /servers/{id}/actions; DigitalOcean GET /droplets/{id} and its
+   * /droplets/{id}/actions; Linode GET /linode/instances/{id} and the
+   * account's /account/events for it; Vultr GET /instances/{id} only and
+   * Scaleway GET /instance/v1/zones/{zone}/servers/{id} only, because
+   * neither API keeps a history per server (their `eventsNote` says so).
+   * tests/unit/deploy/node-join-census.test.ts holds every registered
+   * provider to its own. A provider that cannot read a server's state at all
+   * keeps this stub, which says so, and the failure is logged without it.
+   *
+   * @param {string|number} _serverId
+   * @returns {Promise<ServerProviderView>}
+   */
+  async describeServerForDiagnosis(_serverId) {
+    throw new Error(
+      `${this.constructor.NAME || 'This provider'} has no read of a server's own status, ` +
+        'so the failure log cannot record what the provider says about it',
+    );
   }
 
   /**
@@ -2002,6 +2099,30 @@ export class BaseProvider {
   async deleteGone(endpoint) {
     const response = await this.bareRequest(endpoint, { method: 'DELETE' });
     return response.ok || response.status === 404;
+  }
+
+  /**
+   * One read of a server's provider view (describeServerForDiagnosis): a
+   * single raw GET under DIAGNOSIS_READ_TIMEOUT_MS, never retried, its JSON
+   * body on a 2xx. Any other status throws with the status on it.
+   * @param {string} endpoint - path under API_BASE
+   * @param {{headers?: Record<string, string>}} [init]
+   * @returns {Promise<any>}
+   */
+  async _readForDiagnosis(endpoint, { headers } = {}) {
+    const response = await fetch(`${this.constructor.API_BASE}${endpoint}`, {
+      headers: { ...this.authHeaders(), ...headers },
+      signal: AbortSignal.timeout(DIAGNOSIS_READ_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw Object.assign(
+        new Error(
+          `${this.constructor.NAME} answered HTTP ${response.status} for ${endpoint.split('?')[0]}`,
+        ),
+        { status: response.status },
+      );
+    }
+    return response.json();
   }
 
   /**

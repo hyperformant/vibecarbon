@@ -20,8 +20,10 @@ import {
   deleteFailure,
   deleteRefused,
   deleteVpcByName,
+  eventsOrWhyNot,
   normalizePublicKey,
   replaceWireguardPeerRules,
+  SERVER_VIEW_EVENTS,
   standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
@@ -1049,6 +1051,52 @@ export class LinodeProvider extends BaseProvider {
       status: instance.status,
       serverType: instance.type || null,
     }));
+  }
+
+  /**
+   * Linode's view of an instance for the failure log (see
+   * BaseProvider.describeServerForDiagnosis): GET /linode/instances/{id} for
+   * its status (`provisioning`, `booting`, `running`, `offline`), `created`
+   * and region, and the account's events for that instance (GET
+   * /account/events, filtered to it, newest first: linode_create,
+   * linode_boot, ...), with whether each finished or failed. 25 is the
+   * smallest page Linode serves; the view keeps the newest
+   * SERVER_VIEW_EVENTS of it. A token without the events scope still gets
+   * the status, with the refusal as `eventsError`.
+   * @param {number|string} serverId
+   * @returns {Promise<import('./base.js').ServerProviderView>}
+   */
+  async describeServerForDiagnosis(serverId) {
+    const filter = JSON.stringify({
+      'entity.id': Number(serverId),
+      'entity.type': 'linode',
+      '+order_by': 'created',
+      '+order': 'desc',
+    });
+    const [instance, history] = await Promise.all([
+      this._readForDiagnosis(`/linode/instances/${serverId}`),
+      eventsOrWhyNot(
+        this._readForDiagnosis('/account/events?page_size=25', {
+          headers: { 'X-Filter': filter },
+        }).then(({ data }) =>
+          (data ?? []).slice(0, SERVER_VIEW_EVENTS).map((e) => ({
+            action: e.action,
+            status: e.status ?? null,
+            started: e.created ?? null,
+            finished: null,
+            error: e.status === 'failed' ? e.message || 'the event failed' : null,
+          })),
+        ),
+      ),
+    ]);
+    return {
+      id: instance.id,
+      name: instance.label ?? null,
+      status: instance.status ?? null,
+      created: instance.created ?? null,
+      location: instance.region ?? null,
+      ...history,
+    };
   }
 
   /**

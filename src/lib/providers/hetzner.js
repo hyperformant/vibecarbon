@@ -14,7 +14,9 @@ import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  eventsOrWhyNot,
   replaceWireguardPeerRules,
+  SERVER_VIEW_EVENTS,
   standbyPairOrNeighbour,
   sweepLabels,
   waitUntilServerUp,
@@ -1063,6 +1065,43 @@ export class HetznerProvider extends BaseProvider {
       status: server.status,
       serverType: server.server_type?.name || null,
     }));
+  }
+
+  /**
+   * Hetzner's view of a server for the failure log (see
+   * BaseProvider.describeServerForDiagnosis): GET /servers/{id} for its
+   * status, `created` and datacenter, and GET /servers/{id}/actions, newest
+   * first, for what Hetzner did to it (create_server, start_server,
+   * attach_volume, ...) and whether each succeeded.
+   * @param {number|string} serverId
+   * @returns {Promise<import('./base.js').ServerProviderView>}
+   */
+  async describeServerForDiagnosis(serverId) {
+    const [{ server }, history] = await Promise.all([
+      this._readForDiagnosis(`/servers/${serverId}`),
+      eventsOrWhyNot(
+        this._readForDiagnosis(
+          `/servers/${serverId}/actions?sort=started:desc&per_page=${SERVER_VIEW_EVENTS}`,
+        ).then(({ actions }) =>
+          (actions ?? []).map((a) => ({
+            action: a.command,
+            status: a.status ?? null,
+            started: a.started ?? null,
+            finished: a.finished ?? null,
+            error: a.error ? `${a.error.code}: ${a.error.message}` : null,
+          })),
+        ),
+      ),
+    ]);
+    if (!server) throw new Error(`Hetzner returned no server for ${serverId}`);
+    return {
+      id: server.id,
+      name: server.name ?? null,
+      status: server.status ?? null,
+      created: server.created ?? null,
+      location: server.datacenter?.name ?? null,
+      ...history,
+    };
   }
 
   /**

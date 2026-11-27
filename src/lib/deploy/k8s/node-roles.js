@@ -31,17 +31,3 @@ export function isWorkerNode(labels) {
   const l = labels ?? {};
   return !('node-role.kubernetes.io/control-plane' in l) && l.dedicated !== 'db';
 }
-
-/**
- * How many rows of `kubectl get nodes --no-headers` are Ready. The STATUS
- * column is `Ready`, `NotReady`, or either with `,SchedulingDisabled`.
- *
- * @param {string} out
- * @returns {number}
- */
-export function countReadyNodes(out) {
-  return String(out ?? '')
-    .split('\n')
-    .map((line) => line.trim().split(/\s+/)[1] ?? '')
-    .filter((status) => status.split(',').includes('Ready')).length;
-}

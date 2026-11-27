@@ -16,11 +16,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import {
-  countReadyNodes,
-  isWorkerNode,
-  WORKER_NODE_SELECTOR,
-} from '../../../src/lib/deploy/k8s/node-roles.js';
+import { isWorkerNode, WORKER_NODE_SELECTOR } from '../../../src/lib/deploy/k8s/node-roles.js';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   DB_LABELS,
@@ -130,16 +126,5 @@ describe('worker nodes are picked by label', () => {
       expect(text, script).toContain('--node-label="dedicated=db"');
     }
     expect(WORKER_NODE_SELECTOR).toContain('dedicated!=db');
-  });
-
-  it('counts Ready rows, not NotReady ones', () => {
-    const out = [
-      'a   Ready   <none>   5m   v1',
-      'b   NotReady   <none>   5m   v1',
-      'c   Ready,SchedulingDisabled   <none>   5m   v1',
-      '',
-    ].join('\n');
-    expect(countReadyNodes(out)).toBe(2);
-    expect(countReadyNodes('')).toBe(0);
   });
 });

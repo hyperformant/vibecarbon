@@ -60,7 +60,13 @@ import {
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import { clusterIngressIp } from './lib/deploy/k8s/ingress-ip.js';
-import { countReadyNodes, WORKER_NODE_SELECTOR } from './lib/deploy/k8s/node-roles.js';
+import {
+  awaitNodesJoined,
+  describeServersForLog,
+  NODE_JOIN_BUDGET_MS,
+  NODE_JOIN_POLL_MS,
+} from './lib/deploy/k8s/node-join.js';
+import { WORKER_NODE_SELECTOR } from './lib/deploy/k8s/node-roles.js';
 import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
   k8sTlsRestoreLine,
@@ -1624,8 +1630,22 @@ async function _provisionStandbyCapacityImpl({
     const up = await converge(convergeArgs({ minWorkers: count, workerServerType: serverType }));
 
     // Gate on the freshly-provisioned workers registering Ready before the
-    // caller scales the app tier onto them.
-    await waitForWorkersReady(servers.standby.ip, sshKeyPathFor(envName), count, { deps });
+    // caller scales the app tier onto them. One that never does is named,
+    // with what the provider says about it, before the revert deletes it.
+    const Provider = providerFor(envConfig);
+    await waitForWorkersReady(servers.standby.ip, sshKeyPathFor(envName), count, {
+      deps,
+      workerIps: up?.outputs?.workerIps,
+      describeServers:
+        creds && !deps.converge
+          ? (nodes) =>
+              describeServersForLog({
+                provider: new Provider(resolveProviderToken(providerIdFor(envConfig))),
+                Provider,
+                nodes,
+              })
+          : undefined,
+    });
 
     // Best-effort image pre-pull on the standby nodes, overlapping Task 10's
     // app scale-up. Never awaited into the failover critical path; every
@@ -1662,6 +1682,10 @@ async function _provisionStandbyCapacityImpl({
     // Generic abort: ANY provisioning failure converges the standby back to 0
     // workers (the primary is still serving and was never touched), then aborts.
     const cause = firstErrorLine(err);
+    // A worker that never joined: each further one is a line of its own.
+    if (err?.name === 'NodesNeverJoinedError') {
+      for (const line of err.message.split('\n').slice(1)) p.log.error(line);
+    }
     const revertNotice =
       `Provisioning failed (${cause}). Converging the standby back to 0 workers, ` +
       `the primary is untouched.`;
@@ -1751,11 +1775,14 @@ export async function reapStaleStandbyWorkers(
 }
 
 /**
- * Poll the standby master's node list until at least `count` worker nodes are
- * Ready, or the budget is exceeded. Workers are picked by label
- * (WORKER_NODE_SELECTOR, k8s/node-roles.js), never by name: Linode cuts a long
- * instance label, so a worker's name need not say worker. Returns the Ready
- * worker count on success; throws once the budget elapses.
+ * Wait until the standby's `count` new workers have registered and are Ready,
+ * or throw NodesNeverJoinedError naming each one that has not once the budget
+ * has passed (awaitNodesJoined, k8s/node-join.js): by its address when the
+ * converge's outputs list `workerIps`, otherwise any `count` nodes picked by
+ * label (isWorkerNode, k8s/node-roles.js), never by name: Linode cuts a long
+ * instance label, so a worker's name need not say worker. With
+ * `describeServers`, the provider's view of each missing one goes into the
+ * failure first. Returns the number of workers it waited for.
  *
  * deps.kubectl (argv) => stdout and deps.sleep (ms) => Promise are injected by
  * tests so no SSH runs and no real 10s waits elapse.
@@ -1763,34 +1790,37 @@ export async function reapStaleStandbyWorkers(
  * @param {string} masterIp
  * @param {string} sshKeyPath
  * @param {number} count
- * @param {{ budgetMs?: number, deps?: { kubectl?: Function, sleep?: Function } }} [opts]
+ * @param {{
+ *   budgetMs?: number,
+ *   workerIps?: string[],
+ *   describeServers?: Parameters<typeof awaitNodesJoined>[0]['describeServers'],
+ *   deps?: { kubectl?: Function, sleep?: Function },
+ * }} [opts]
  * @returns {Promise<number>}
  */
 export async function waitForWorkersReady(
   masterIp,
   sshKeyPath,
   count,
-  { budgetMs = 600_000, deps = {} } = {},
+  { budgetMs = NODE_JOIN_BUDGET_MS, workerIps, describeServers, deps = {} } = {},
 ) {
   const kubectl = deps.kubectl ?? ((argv) => sshKubectl(masterIp, sshKeyPath, argv));
-  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const deadline = Date.now() + budgetMs;
-  for (;;) {
-    let out = '';
-    try {
-      out = await kubectl(['get', 'nodes', '-l', WORKER_NODE_SELECTOR, '--no-headers']);
-    } catch {
-      out = '';
-    }
-    const ready = countReadyNodes(typeof out === 'string' ? out : '');
-    if (ready >= count) return ready;
-    if (Date.now() > deadline) {
-      throw new Error(
-        `standby workers not Ready: ${ready}/${count} after ${Math.round(budgetMs / 1000)}s`,
-      );
-    }
-    await sleep(10_000);
-  }
+  const ips = Array.isArray(workerIps) && workerIps.length === count ? workerIps : null;
+  const expected = Array.from({ length: count }, (_, i) => ({
+    role: /** @type {const} */ ('worker'),
+    ...(ips && { ip: ips[i] }),
+  }));
+  await awaitNodesJoined({
+    expected,
+    readNodes: async () => String((await kubectl(['get', 'nodes', '-o', 'json'])) ?? ''),
+    deadline: Date.now() + budgetMs,
+    budgetS: Math.round(budgetMs / 1000),
+    since: 'the converge created its server',
+    describeServers,
+    pollMs: NODE_JOIN_POLL_MS,
+    ...(deps.sleep && { sleep: deps.sleep }),
+  });
+  return count;
 }
 
 // ============================================================================
