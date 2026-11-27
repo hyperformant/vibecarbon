@@ -1939,6 +1939,34 @@ type the programs declare is classified, with the measured bodies as fixtures),
 `src` runs after the check), `tests/unit/iac/vultr-gone-prune-wiring.test.ts`
 and `tests/integration/iac/vultr-refresh-prune.test.ts`.
 
+#### 2026-11-27: A cluster node that never joins fails the deploy, with the provider's view (#600)
+
+Every node a k8s provisioning made, the k3s server, the database node and
+every worker, has 600 s from the moment the k3s server serves to register and
+be Ready. The deploy checks that before the first wait that needs one of them
+(`awaitNodesJoined`, run by `applyK3sManifests`' db wait and by the
+skipped-apply db pod wait). The failover's worker wait is the same check. At
+the deadline the command stops, naming each missing server, with what the
+provider says about it: its status, when and where it was made, and its recent
+actions (`describeServerForDiagnosis`, implemented for all five providers).
+Nothing is retried, rebooted or replaced.
+
+**Why:** twice a Hetzner database node was lost with nothing recorded. On
+2026-11-06 one died after its volume attached. On 2026-11-27 (perf run
+45922250720) one was created and never came up. Nothing waited for it to
+join, so db-0 sat Pending on its node selector for the db wait's whole 900 s,
+the failure named only the pod, and the rig was destroyed before anyone read
+the provider's view of the server.
+
+**Do not undo:** do not add a retry or an automatic replacement for a node
+that never joins (no retry ladders). The provider reads are GETs, one attempt
+each under a 5 s abort and 30 s in all, because they run on a failure path
+and must never replace the failure they describe.
+
+**Guard:** `tests/unit/deploy/node-join-census.test.ts`, with
+`tests/unit/deploy/node-join.test.ts` and
+`tests/unit/providers/describe-server-for-diagnosis.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
