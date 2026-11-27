@@ -209,6 +209,36 @@ export interface ClassifyResult {
 }
 
 /**
+ * The db rollout failure quotes each not-Ready db pod's newest Warning event
+ * (summarizeDbPods in src/lib/deploy/k8s/k3s.js), as
+ * `db-0 (Pending; last warning FailedAttachVolume: <the event's message>)`.
+ * That message is the cluster's free text, not a finding of ours, and any
+ * word in it could match a rule above: a sandbox warning that says "TLS
+ * handshake timeout" would make a stuck db pod read as infra and be
+ * auto-retried. Its length could also push the node clause past the
+ * NotReady rule's 400-character reach. So the clause is masked before any
+ * rule runs, and the message classifies exactly as it did without it. The
+ * clause holds no parentheses (k3s.js writes them as brackets), so it ends
+ * at the first `)`; its reason and message together stay under 400.
+ */
+const POD_WARNING_CLAUSE = /; last warning[^()]{0,400}\)/g;
+
+/**
+ * The last `max` characters of a failed deploy's output, for the error the
+ * step throws and classifyFailure reads. Over budget, the last-warning
+ * clauses go first: they are masked anyway, so the cut falls where it fell
+ * before they existed and leaves the same words to classify. A plain tail
+ * cut would not: a k8s-ha standby's db rollout failure already runs about
+ * 990 characters (its rebuild hint is half of it), so a clause in front
+ * would push "never became Ready" out of the tail, and the node NotReady
+ * rule would stop firing on a dead database node.
+ */
+export function classifiableTail(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.replace(POD_WARNING_CLAUSE, ')').slice(-max);
+}
+
+/**
  * Classify a failure based on the error message and (optionally) exit
  * code or stderr. Returns 'unknown' when nothing matches — better to
  * surface "I don't know" than to mis-tag as 'infra' and hide a bug.
@@ -221,7 +251,8 @@ export function classifyFailure(args: {
 }): ClassifyResult {
   const haystack = [args.errorMessage, args.errorStack, args.stderr, args.stdout]
     .filter(Boolean)
-    .join('\n');
+    .join('\n')
+    .replace(POD_WARNING_CLAUSE, ')');
 
   // Check code patterns FIRST — they outrank infra. A JS exception inside
   // an HTTP response should classify as code, not as "network error".

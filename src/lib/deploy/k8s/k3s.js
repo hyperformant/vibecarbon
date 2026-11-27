@@ -161,6 +161,7 @@ import { awaitAcmeChallengesSettled, challengeWaitLine } from './acme-challenges
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { DEPLOY_OWNED_CERTIFICATES } from './acme-order-recovery.js';
 import { carbonAutoscalerSecretYaml } from './autoscaler-secret.js';
+import { podWarningClause, readDbPodWarnings } from './db-pod-warning.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -3151,6 +3152,8 @@ export async function assertDbStorageClass({ storageClass, namespace = 'vibecarb
  * any add-ons, and the wait was not on those). PHASE and the READY condition
  * are both read because `rollout status` gates on READY, not on phase — a
  * Running-but-not-Ready pod times the wait out exactly like a Pending one.
+ * UID ties each pod to its own events (latestPodWarnings): a db-0 that an
+ * earlier deploy replaced leaves its events behind under the same name.
  *
  * @returns {string[]}
  */
@@ -3164,9 +3167,28 @@ export function dbPodListArgs() {
     '-l',
     DB_POD_SELECTOR,
     '-o',
-    'custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status',
+    'custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status,UID:.metadata.uid',
     '--no-headers',
   ];
+}
+
+/**
+ * `dbPodListArgs`' output, one entry per pod. Pure.
+ *
+ * @param {string} raw - `kubectl get pods … --no-headers` stdout
+ * @returns {{name: string, phase: string, ready: boolean, uid: string}[]}
+ */
+function parseDbPods(raw) {
+  return String(raw ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      // custom-columns pads with spaces and writes `<none>` for a condition
+      // that does not exist yet (an unscheduled pod has no Ready condition).
+      const [name, phase = 'Unknown', ready = '<none>', uid = '<none>'] = line.split(/\s+/);
+      return { name, phase, ready: ready === 'True', uid: uid === '<none>' ? '' : uid };
+    });
 }
 
 /**
@@ -3175,20 +3197,19 @@ export function dbPodListArgs() {
  * tests/e2e/utils/classify-failure.ts pairs it with summarizeNotReadyNodes'
  * clause to tell a dead host from our own bug.
  *
+ * `warnings` (latestPodWarnings) adds each not-Ready pod's newest Warning
+ * event to its entry, `db-0 (Pending; last warning FailedAttachVolume: …)`,
+ * because the phase alone never says why (perf run 45940611622, vultr/k8s: a
+ * volume Vultr refused to attach left only "db-0 (Pending)"). A pod with no
+ * warning keeps its entry exactly as before. classify-failure.ts masks the
+ * clause, so the cluster's words never decide how a run is classified.
+ *
  * @param {string} raw - `kubectl get pods … --no-headers` stdout
+ * @param {Map<string, {reason: string, message: string}>} [warnings]
  * @returns {string}
  */
-export function summarizeDbPods(raw) {
-  const pods = String(raw ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      // custom-columns pads with spaces and writes `<none>` for a condition
-      // that does not exist yet (an unscheduled pod has no Ready condition).
-      const [name, phase = 'Unknown', ready = '<none>'] = line.split(/\s+/);
-      return { name, phase, ready: ready === 'True' };
-    });
+export function summarizeDbPods(raw, warnings = new Map()) {
+  const pods = parseDbPods(raw);
 
   if (pods.length === 0) {
     return `No db pod exists in the namespace; the ${DB_STATEFULSET} StatefulSet never created one.`;
@@ -3203,7 +3224,9 @@ export function summarizeDbPods(raw) {
     );
   }
 
-  const named = notReady.map((p) => `${p.name} (${p.phase})`);
+  const named = notReady.map(
+    (p) => `${p.name} (${p.phase}${podWarningClause(warnings.get(p.name))})`,
+  );
   return `The db pod never became Ready: ${named.join(', ')}.`;
 }
 
@@ -3273,7 +3296,8 @@ export function summarizeNotReadyNodes(raw) {
 async function describeDbPods(env) {
   try {
     const raw = await runCommandAsync(dbPodListArgs(), { env, silent: true });
-    const podSummary = summarizeDbPods(raw);
+    const notReady = parseDbPods(raw).filter((p) => !p.ready);
+    const podSummary = summarizeDbPods(raw, await readDbPodWarnings(env, notReady));
     // Node readiness rides along, best-effort: a stuck pod on a dead node
     // is an infrastructure event, and only the node line makes it read as
     // one (see summarizeNotReadyNodes). A failure to list nodes never

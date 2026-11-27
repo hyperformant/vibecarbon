@@ -176,6 +176,10 @@ const SPAWNERS: Record<string, Spawner> = {
     side: 'operator',
     kubeconfig: "its caller's env (k3s.js, orchestrator.js); failover uses its ssh runner",
   },
+  'src/lib/deploy/k8s/db-pod-warning.js': {
+    side: 'operator',
+    kubeconfig: "its caller's env: k3s.js's describeDbPods, readiness.js's awaitDbPodReady",
+  },
   'src/lib/deploy/k8s/mirror-pull-diagnosis.js': {
     side: 'operator',
     kubeconfig: 'an argv k3s.js runs with its own env',
