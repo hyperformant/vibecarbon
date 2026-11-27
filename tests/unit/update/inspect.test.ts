@@ -442,18 +442,19 @@ describe('a failed dry run says why', () => {
 });
 
 describe('inspectTarget and inspectAll', () => {
-  it('sends the script on stdin with a bound past both waits and no transport retry', async () => {
+  it('sends the script on stdin with a bound past every wait and no transport retry', async () => {
     const sshRun = vi.fn().mockResolvedValue(FIXTURE);
     await inspectTarget(target('master'), { sshRun, envName: 'prod' });
     // The script waits up to APT_DAILY_UNITS_WAIT_SECONDS for the daily apt
-    // units, then apt up to APT_LOCK_TIMEOUT_SECONDS for the lock: the ssh bound
-    // is 120 s past both, so a daily job that runs longer reads as a failed apt
-    // check, never as an ssh timeout. 720 s: 300 + 300 + 120.
+    // units, then each apt-get (two on compose) up to APT_LOCK_TIMEOUT_SECONDS
+    // for the lock: the ssh bound is 120 s past them all, so a daily job that
+    // runs longer reads as a failed apt check, never as an ssh timeout.
+    // 1020 s: 300 + 2 x 300 + 120.
     expect(APT_DAILY_UNITS_WAIT_SECONDS).toBe(300);
     expect(APT_LOCK_TIMEOUT_SECONDS).toBe(300);
     expect(sshRun).toHaveBeenCalledWith('10.0.0.6', expect.any(String), ['sh', '-s'], {
       input: INSPECT_SCRIPT('compose'),
-      timeout: 720_000,
+      timeout: 1_020_000,
       transportRetry: false,
     });
   });

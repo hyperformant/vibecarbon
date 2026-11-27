@@ -14,6 +14,7 @@
 
 import { sshRun } from '../ssh.js';
 import {
+  APT_DAILY_UNITS_WAIT_SECONDS,
   APT_LOCK_TIMEOUT_SECONDS,
   APT_TRIMMED_INDEXES,
   aptGet,
@@ -307,8 +308,12 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     // 300s window (reproduced three times on vultr restore re-deploys,
     // 2026-09-01/02 — the re-deploy reaches this step while first-boot
     // unattended-upgrades still holds dpkg; fresh deploys pass because the
-    // lock has cleared by the time WG setup runs). 120s of headroom covers
-    // the update + install themselves after the lock clears.
+    // lock has cleared by the time WG setup runs). The script can sit
+    // through three waits: the daily apt units (APT_DAILY_UNITS_WAIT_SECONDS),
+    // then the refresh and the install, each up to APT_LOCK_TIMEOUT_SECONDS
+    // for the lock. 120s of headroom covers the update + install themselves
+    // after the waits. tests/unit/deploy/apt-daily-wait-census.test.ts checks
+    // the sum against the script.
     await sshRun(
       ip,
       sshKeyPath,
@@ -326,7 +331,7 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
           `umask 077; [ -f ${WG_KEY_PATH} ] || mv ${WG_OLD_KEY_PATH} ${WG_KEY_PATH} 2>/dev/null || ` +
           `wg genkey > ${WG_KEY_PATH}`,
       ],
-      { timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
+      { timeout: (APT_DAILY_UNITS_WAIT_SECONDS + 2 * APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
     );
     return (await sshRun(ip, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])).trim();
   };

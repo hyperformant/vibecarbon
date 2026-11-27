@@ -73,10 +73,12 @@ const REPORTER_TIMEOUT_MS = 60_000;
 /** 1200 s: up to 300 s for the daily apt units to finish, then 900 s to install. */
 const INSTALL_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + 900) * 1000;
 /**
- * 900 s: up to 300 s for the daily apt units, apt's own 300 s wait for the
- * dpkg lock, then 300 s to refresh and install.
+ * 1200 s: up to 300 s for the daily apt units, then apt's own wait of up to
+ * 300 s for the dpkg lock in the refresh and again in the install, then 300 s
+ * to refresh and install.
  */
-const DOCKER_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + APT_LOCK_TIMEOUT_SECONDS + 300) * 1000;
+const DOCKER_TIMEOUT_MS =
+  (APT_DAILY_UNITS_WAIT_SECONDS + 2 * APT_LOCK_TIMEOUT_SECONDS + 300) * 1000;
 /** From the reboot command to a new boot id over ssh. */
 const COME_BACK_BUDGET_MS = 600_000;
 /** Each wait after the server is back: the app, the API, the node, its lease, its pods. */
@@ -102,7 +104,7 @@ const APP_READY_PATH = '/api/health/ready';
  * Installs the security updates the daily job would, the same way it does,
  * once the daily apt units are done, so the two never run apt at once.
  */
-export const UPGRADE_ARGV = [
+const UPGRADE_ARGV = [
   'env',
   'DEBIAN_FRONTEND=noninteractive',
   'sh',
@@ -143,7 +145,7 @@ const BOOT_ARGV = [
  *
  * @returns {string[]}
  */
-export function dockerUpdateArgv() {
+function dockerUpdateArgv() {
   const install = aptGet(
     `install -y --only-upgrade -o Dpkg::Options::=--force-confold ${DOCKER_PACKAGES.join(' ')}`,
   );

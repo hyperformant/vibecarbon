@@ -22,12 +22,15 @@ const REPORTER_EOF = 'VC_INSPECT_REPORTER_EOF';
 const REPORTER_UNIT = '/etc/systemd/system/vibecarbon-host-reporter.path';
 /**
  * The script first waits up to APT_DAILY_UNITS_WAIT_SECONDS for Ubuntu's daily
- * apt units to finish, then apt waits up to APT_LOCK_TIMEOUT_SECONDS for a
- * dpkg lock. The ssh call outlasts both waits by 120 s, so a server whose daily
- * job runs longer than that reads as a failed apt check (with its "daily
- * security updates may be running" hint), never as an ssh timeout.
+ * apt units to finish. Then each of its apt-get commands may wait up to
+ * APT_LOCK_TIMEOUT_SECONDS for a dpkg lock: two on compose (Ubuntu's lists and
+ * Docker's), one on k8s. The ssh call outlasts all of them by 120 s, so a
+ * server whose daily job runs longer than that reads as a failed apt check
+ * (with its "daily security updates may be running" hint), never as an ssh
+ * timeout. tests/unit/deploy/apt-daily-wait-census.test.ts checks the sum.
  */
-const INSPECT_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
+const INSPECT_TIMEOUT_MS =
+  (APT_DAILY_UNITS_WAIT_SECONDS + 2 * APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
 
 /**
  * @typedef {{ host: import('../host-state.js').HostState, bootId: string, ubuntu: string[], docker: { packages: Array<{ name: string, from: string, to: string }> } | null, reporter: boolean | null }} TargetState
@@ -36,9 +39,7 @@ const INSPECT_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + APT_LOCK_TIMEOUT_SECO
  */
 
 /**
- * Print a failed step's `@@error` line and end the script. Each apt step may
- * wait up to APT_LOCK_TIMEOUT_SECONDS for the lock, and the ssh bound allows
- * one such wait after the daily units' wait: after a failure no later step
+ * Print a failed step's `@@error` line and end the script, so no later step
  * waits again. Exit 0, so the output is parsed and the error read as a failed
  * apt check. printf, not echo: dash's echo turns a backslash in the text (the
  * server's own output, in $why) into a newline or a control character.
