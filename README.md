@@ -291,12 +291,12 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | Hetzner Cloud | `compose` | 1m 52s | 16.4s | 4.6s | 2m 32s | 2m 22s | 15.2s | — |
 | | `k8s` | 5m 36s | 15.0s | 25.8s | 1m 34s | 2m 18s | 1m 26s | — |
 | | `k8s-ha` | 3m 29s | 29.6s | 24.3s | 2m 11s | 4m 23s | 1m 20s | 3m 18s |
-| DigitalOcean | `compose` | 2m 27s | 24.4s | 4.6s | 2m 23s | 2m 20s | 26.4s | — |
-| | `k8s` | 3m 9s | 10.6s | 34.0s | 1m 30s | 2m 20s | 1m 9s | — |
-| | `k8s-ha` | 3m 19s | 21.5s | 45.1s | 1m 53s | 4m 8s | 1m 26s | 2m 58s |
-| Linode | `compose` | 3m 36s | 23.6s | 4.6s | 3m 49s | 4m 31s | 14.5s | — |
-| | `k8s` | 5m 2s | 8.6s | 44.5s | 1m 35s | 8m 36s | 1m 22s | — |
-| | `k8s-ha` | 5m 12s | 21.2s | 17.7s | 2m 12s | 15m 40s | 1m 30s | 4m 1s |
+| DigitalOcean | `compose` | 1m 59s | 16.7s | 5.7s | 2m 20s | 2m 29s | 27.9s | — |
+| | `k8s` | 3m 2s | 18.2s | 33.3s | 1m 40s | 2m 11s | 1m 1s | — |
+| | `k8s-ha` | 3m 47s | 27.0s | 33.9s | 2m 10s | 3m 54s | 1m 8s | 3m 10s |
+| Linode | `compose` | 2m 55s | 16.5s | 4.4s | 2m 45s | 3m 55s | 10.0s | — |
+| | `k8s` | 4m 22s | 4.9s | 22.1s | 1m 10s | 8m 42s | 1m 10s | — |
+| | `k8s-ha` | 4m 23s | 21.0s | 37.2s | 1m 41s | 15m 48s | 1m 20s | 3m 0s |
 | Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
 | | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
@@ -304,7 +304,7 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 
-_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `aaa073b` (2026-11-27) · Linode `84ef6ef` (2026-11-27) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on all five providers today.

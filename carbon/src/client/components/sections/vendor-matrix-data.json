@@ -45,69 +45,69 @@
     },
     "digitalocean": {
       "run": {
-        "id": "f505645",
-        "date": "2026-11-25",
+        "id": "aaa073b",
+        "date": "2026-11-27",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 146613,
-          "warm-deploy": 24353,
-          "scale": 139951,
-          "backup": 4606,
-          "destroy": 26435,
-          "restore": 142606
+          "deploy": 118897,
+          "warm-deploy": 16662,
+          "scale": 148747,
+          "backup": 5697,
+          "destroy": 27945,
+          "restore": 139783
         },
         "k8s": {
-          "deploy": 188513,
-          "warm-deploy": 10649,
-          "scale": 140233,
-          "backup": 33966,
-          "destroy": 69360,
-          "restore": 89990
+          "deploy": 182091,
+          "warm-deploy": 18198,
+          "scale": 131287,
+          "backup": 33303,
+          "destroy": 61097,
+          "restore": 100011
         },
         "k8s-ha": {
-          "deploy": 198625,
-          "warm-deploy": 21451,
-          "scale": 248275,
-          "backup": 45085,
-          "destroy": 85543,
-          "restore": 112954,
-          "failover": 178190
+          "deploy": 227134,
+          "warm-deploy": 26952,
+          "scale": 233734,
+          "backup": 33857,
+          "destroy": 68265,
+          "restore": 129884,
+          "failover": 189851
         }
       }
     },
     "linode": {
       "run": {
-        "id": "c7cfa3a",
-        "date": "2026-11-26",
+        "id": "84ef6ef",
+        "date": "2026-11-27",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 216428,
-          "warm-deploy": 23553,
-          "scale": 271124,
-          "backup": 4615,
-          "destroy": 14543,
-          "restore": 229018
+          "deploy": 174775,
+          "warm-deploy": 16506,
+          "scale": 235095,
+          "backup": 4363,
+          "destroy": 9962,
+          "restore": 164764
         },
         "k8s": {
-          "deploy": 301600,
-          "warm-deploy": 8627,
-          "scale": 516281,
-          "backup": 44545,
-          "destroy": 81801,
-          "restore": 94848
+          "deploy": 262298,
+          "warm-deploy": 4947,
+          "scale": 521834,
+          "backup": 22077,
+          "destroy": 70234,
+          "restore": 69966
         },
         "k8s-ha": {
-          "deploy": 312222,
-          "warm-deploy": 21226,
-          "scale": 940000,
-          "backup": 17722,
-          "destroy": 90463,
-          "restore": 131935,
-          "failover": 240727
+          "deploy": 262913,
+          "warm-deploy": 21008,
+          "scale": 947634,
+          "backup": 37178,
+          "destroy": 79564,
+          "restore": 100686,
+          "failover": 180361
         }
       }
     },
