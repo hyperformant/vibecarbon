@@ -1975,7 +1975,7 @@ and must never replace the failure they describe.
 `tests/unit/deploy/node-join.test.ts` and
 `tests/unit/providers/describe-server-for-diagnosis.test.ts`.
 
-#### 2026-11-27: A node that never joins is probed from its own k3s server
+#### 2026-11-27: A node that never joins is probed from its own k3s server (#606)
 
 At the join deadline, each server that never registered is probed from the
 k3s server it should have joined, in one ssh bounded at 20 s: two pings and a
