@@ -141,7 +141,7 @@ describe('on the 2026-10-22 catalogs', () => {
       'digitalocean',
       '| DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |',
     ],
-    [VultrProvider, 'vultr', '| Vultr | $20 (ewr) | $53.92 (ewr) | $87.84 (ewr + ord) |'],
+    [VultrProvider, 'vultr', '| Vultr | $20 (ewr) | $51 (ewr) | $82 (ewr + ord) |'],
     [
       LinodeProvider,
       'linode',
@@ -216,16 +216,15 @@ describe('on the 2026-10-22 catalogs', () => {
       monthly: 40,
       locations: ['ewr', 'ord'],
     });
-    // Servers 20 + 10 + 20, plus per cluster the reserved IP (0.004 an hour,
-    // 730 hours) and the 10 GB NVMe db volume at 0.10: 50 + 2.92 + 1 = 53.92.
+    // Servers 20 + 10 + 20, plus per cluster the 10 GB NVMe db volume at
+    // 0.10 and no reserved IP: 50 + 1 = 51.
     expect(computeEnvMonthly(VultrProvider, 'k8s')).toEqual({
-      monthly: 53.92,
+      monthly: 51,
       locations: ['ewr'],
     });
-    // Standby master and db 20 + 10, plus its own reserved IP and volume:
-    // 53.92 + 30 + 3.92.
+    // Standby master and db 20 + 10, plus its own volume: 51 + 30 + 1.
     expect(computeEnvMonthly(VultrProvider, 'k8s-ha')).toEqual({
-      monthly: 87.84,
+      monthly: 82,
       locations: ['ewr', 'ord'],
     });
     expect(computeEnvMonthly(LinodeProvider, 'compose')).toEqual({
@@ -355,14 +354,10 @@ describe('billing extras', () => {
     expect(volume).toMatchObject({ perGbMonthly: 0.1, gb: 10 });
   });
 
-  it('the Vultr reserved IP and NVMe db volume name their sources and dates', () => {
-    const ip = BILLING_EXTRAS.vultr.reservedIp as Record<string, unknown>;
-    expect(ip).toMatchObject({
-      perHour: 0.004,
-      hoursPerMonth: 730,
-      source: 'https://docs.vultr.com/support/products/network/are-reserved-ips-free',
-      checked: '2026-11-26',
-    });
+  it('the Vultr NVMe db volume names its source and date, and a cluster bills no ingress IP', () => {
+    // The domain points at the master, as on DigitalOcean.
+    expect(BILLING_EXTRAS.vultr).not.toHaveProperty('reservedIp');
+    expect(VultrProvider.K8S_FLOATING_IP).toBe(false);
     const volume = BILLING_EXTRAS.vultr.volume as Record<string, unknown>;
     expect(volume).toMatchObject({
       perGbMonthly: 0.1,
@@ -376,10 +371,8 @@ describe('billing extras', () => {
     expect(String(volume.note)).toMatch(/403/);
     expect(String(volume.note)).toMatch(/2026-11-25 and 2026-11-26/);
     expect(String(volume.note)).toMatch(/not yet read from this page/);
-    // The reserved IP rate was read from its page on 2026-11-26.
-    expect(ip).not.toHaveProperty('verified');
-    // The same per-cluster rule as Linode's, taken from the table's shape.
-    expect(extrasFor(VultrProvider).perCluster('ewr')).toBeCloseTo(0.004 * 730 + 0.1 * 10, 10);
+    // The same per-cluster rule as DigitalOcean's: the db volume alone.
+    expect(extrasFor(VultrProvider).perCluster('ewr')).toBe(0.1 * 10);
     expect(extrasFor(VultrProvider).perServer).toBe(0);
   });
 

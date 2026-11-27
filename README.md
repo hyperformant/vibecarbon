@@ -330,7 +330,7 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 |---|---|---|---|
 | Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
 | DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |
-| Vultr | $20 (ewr) | $53.92 (ewr) | $87.84 (ewr + ord) |
+| Vultr | $20 (ewr) | $51 (ewr) | $82 (ewr + ord) |
 | Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
 | Scaleway | €21.84 (fr-par-1) | €58.27 (fr-par-1) | €94.71 (fr-par-1 + nl-ams-1) |
 

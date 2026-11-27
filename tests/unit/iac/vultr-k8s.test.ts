@@ -37,7 +37,7 @@ vi.mock('@ediri/vultr', async (orig) => {
   // Only the classes the program builds: one it reached for beyond these is
   // undefined here, and fails loudly.
   return Object.fromEntries(
-    ['SSHKey', 'Vpc', 'FirewallGroup', 'FirewallRule', 'ReservedIp', 'Instance'].map((k) => [
+    ['SSHKey', 'Vpc', 'FirewallGroup', 'FirewallRule', 'Instance'].map((k) => [
       k,
       recording(actual[k]),
     ]),
@@ -47,11 +47,7 @@ vi.mock('@ediri/vultr', async (orig) => {
 import { buildVultrK8sProgram } from '../../../src/lib/iac/programs/vultr-k8s.js';
 import { vpcCidrForCluster } from '../../../src/lib/iac/vpc-cidr.js';
 import { firewallName } from '../../../src/lib/operator-ip.js';
-import {
-  decodeLabels,
-  reservedIpLabelOwner,
-  VultrProvider,
-} from '../../../src/lib/providers/vultr.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { ruleFields, vultrFirewallApi } from '../../_shared/vultr-firewall-api.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: mock inputs of every resource shape
@@ -62,7 +58,8 @@ const captured: Captured[] = [];
 let instanceCounter = 0;
 /** The master's VPC address the mocks report; a test sets it empty. */
 let masterInternalIp = '10.181.32.3';
-const RESERVED_IP = '203.0.113.250';
+/** The master's own public address, where the cluster's domain points. */
+const MASTER_IP = '203.0.113.250';
 
 pulumi.runtime.setMocks(
   {
@@ -76,16 +73,13 @@ pulumi.runtime.setMocks(
             id: `instance-${instanceCounter}`,
             state: {
               ...args.inputs,
-              // A reserved IP given at create is the instance's main IP.
-              mainIp: isMaster ? RESERVED_IP : `198.51.100.${instanceCounter % 250}`,
+              mainIp: isMaster ? MASTER_IP : `198.51.100.${instanceCounter % 250}`,
               internalIp: isMaster ? masterInternalIp : `10.181.32.${10 + (instanceCounter % 200)}`,
             },
           };
         }
         case 'vultr:index/vpc:Vpc':
           return { id: 'vpc-uuid', state: { ...args.inputs } };
-        case 'vultr:index/reservedIp:ReservedIp':
-          return { id: 'rip-uuid', state: { ...args.inputs, subnet: RESERVED_IP, subnetSize: 32 } };
         case 'vultr:index/sSHKey:SSHKey':
           return { id: 'key-uuid', state: { ...args.inputs } };
         case 'vultr:index/firewallGroup:FirewallGroup':
@@ -129,7 +123,6 @@ const INSTANCE = 'vultr:index/instance:Instance';
 const RULE = 'vultr:index/firewallRule:FirewallRule';
 const GROUP = 'vultr:index/firewallGroup:FirewallGroup';
 const VPC = 'vultr:index/vpc:Vpc';
-const RESERVED = 'vultr:index/reservedIp:ReservedIp';
 const SSH_KEY = 'vultr:index/sSHKey:SSHKey';
 
 const NO_VPC_ADDRESS =
@@ -166,12 +159,6 @@ describe('buildVultrK8sProgram config guard', () => {
     );
   });
 
-  it('refuses a project or environment its reserved IP label cannot spell', () => {
-    expect(() => buildVultrK8sProgram({ ...baseConfig, environment: 'Prod' })).toThrow(
-      "Vultr cannot label this cluster's reserved IP for project acme and environment Prod",
-    );
-  });
-
   it('requires the k3s token the CLI hands it', () => {
     expect(() => buildVultrK8sProgram({ ...baseConfig, k3sToken: '' })).toThrow(
       /k3sToken required/,
@@ -205,7 +192,7 @@ describe('buildVultrK8sProgram resource graph', () => {
     ({ outputs, resources, objects } = await run(baseConfig));
   });
 
-  it("exports exactly Linode's output names", () => {
+  it("exports DigitalOcean's output names: no floatingIp, the domain points at the master", () => {
     expect(Object.keys(outputs).sort()).toEqual(
       [
         'masterIp',
@@ -215,7 +202,6 @@ describe('buildVultrK8sProgram resource graph', () => {
         'dbIp',
         'dbPrivateIp',
         'workerIps',
-        'floatingIp',
         'networkId',
         'sshKeyId',
         'k3sToken',
@@ -224,8 +210,10 @@ describe('buildVultrK8sProgram resource graph', () => {
       ].sort(),
     );
     expect(outputs.clusterName).toBe(CLUSTER);
-    expect(outputs.masterIp).toBe(RESERVED_IP);
-    expect(outputs.floatingIp).toBe(RESERVED_IP);
+    // The master's own address (clusterIngressIp, lib/deploy/k8s/ingress-ip.js).
+    expect(outputs).not.toHaveProperty('floatingIp');
+    expect(VultrProvider.K8S_FLOATING_IP).toBe(false);
+    expect(outputs.masterIp).toBe(MASTER_IP);
     expect(outputs.masterPrivateIp).toBe(masterInternalIp);
     // The db's own addresses, not the master's.
     expect(outputs.dbIp).toMatch(/^198\.51\.100\.\d+$/);
@@ -238,56 +226,37 @@ describe('buildVultrK8sProgram resource graph', () => {
     expect(outputs.k3sToken).toBe('SENTINEL-k3s-token');
   });
 
-  it('registers one key, VPC, group, reserved IP, master, db and two workers, plus seven rules', () => {
+  it('registers one key, VPC, group, master, db and two workers, plus seven rules, and no reserved IP', () => {
     const count = (t: string) => byType(resources, t).length;
     expect(count(SSH_KEY)).toBe(1);
     expect(count(VPC)).toBe(1);
     expect(count(GROUP)).toBe(1);
-    expect(count(RESERVED)).toBe(1);
+    expect(resources.filter((r) => /reservedIp/i.test(r.type))).toEqual([]);
     expect(
       byType(resources, INSTANCE)
         .map((i) => i.name)
         .sort(),
     ).toEqual(['db', 'master', 'worker-1', 'worker-2']);
     expect(count(RULE)).toBe(7);
-    expect(resources).toHaveLength(1 + 1 + 1 + 1 + 4 + 7);
+    expect(resources).toHaveLength(1 + 1 + 1 + 4 + 7);
   });
 
-  it('gives the master the reserved IP at create, replaces it delete-first, and names its host', () => {
-    // Review Focus 2: a ForceNew change must free the reserved IP before the
-    // new master asks for it, so the cluster keeps its public address.
+  // The master holds no address of its own to free, so nothing makes it
+  // replace delete-first (DigitalOcean's master doesn't either).
+  it('gives the master no reserved IP, replaces it create-first, and names its host', () => {
     const master = instance(resources, 'master');
-    expect(master.inputs.reservedIpId).toBe('rip-uuid');
+    expect(master.inputs).not.toHaveProperty('reservedIpId');
     expect(master.inputs.label).toBe(`${CLUSTER}-master`);
     expect(master.inputs.hostname).toBe(master.inputs.label);
     const opts = objects.find((o) => o.name === 'master')?.opts;
-    expect(opts?.deleteBeforeReplace).toBe(true);
+    expect(opts?.deleteBeforeReplace).toBeUndefined();
     // Every other node takes its label as its hostname too (the k8s node name).
     for (const i of byType(resources, INSTANCE)) {
       expect(i.inputs.hostname, i.name).toBe(i.inputs.label);
+      expect(i.inputs, i.name).not.toHaveProperty('reservedIpId');
     }
     expect(instance(resources, 'db').inputs.label).toBe(`${CLUSTER}-db`);
     expect(instance(resources, 'worker-2').inputs.label).toBe(`${CLUSTER}-worker-2`);
-  });
-
-  it('asks for a v4 reserved IP in the region, labelled for the stack, bound to nothing', () => {
-    const ip = byType(resources, RESERVED)[0].inputs;
-    expect(ip).toEqual({
-      region: 'ewr',
-      ipType: 'v4',
-      label: 'project:acme:environment:prod',
-    });
-  });
-
-  // Destroy tells whose an assigned reserved IP is by the tags of the
-  // instance holding it (VultrProvider._reservedIpHolder), so the master
-  // must carry the project and environment its IP's label names.
-  it("tags the master with the project and environment its reserved IP's label names", () => {
-    const { label } = byType(resources, RESERVED)[0].inputs as { label: string };
-    const owner = reservedIpLabelOwner(label);
-    expect(owner).toEqual({ project: 'acme', environment: 'prod' });
-    const tags = decodeLabels(instance(resources, 'master').inputs.tags as string[]);
-    expect({ project: tags.project, environment: tags.environment }).toEqual(owner);
   });
 
   it('puts every instance on exactly the one VPC, behind the firewall group, on Ubuntu 26.04', () => {

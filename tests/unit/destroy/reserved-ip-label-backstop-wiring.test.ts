@@ -69,7 +69,6 @@ import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
-import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 
 /**
  * The providers whose compose program makes no IP but whose class has the
@@ -80,7 +79,6 @@ const NO_COMPOSE_IP: Array<
 > = [
   ['Hetzner', HetznerProvider],
   ['Linode', LinodeProvider],
-  ['Vultr', VultrProvider],
 ];
 
 const spinner = { start: () => {}, stop: () => {}, message: () => {} };

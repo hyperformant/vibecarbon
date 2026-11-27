@@ -578,8 +578,12 @@ export async function inventory(
       ['load-balancers', 'load_balancers', 'load-balancer', 'label'],
       ['vpcs', 'vpcs', 'network', 'description'],
       ['ssh-keys', 'ssh_keys', 'ssh-key', 'name'],
-      // `project:<project>:environment:<env>` (reservedIpLabel): TEST_NAME
-      // finds the scratch project after its `project:`.
+      // No Vultr program makes a reserved IP (the k8s one was removed before
+      // release, 2026-11-27), and the e2e sweep no longer looks for one, so
+      // this listing is where any reserved IP on the account is seen. One
+      // the removed program made is labelled
+      // `project:<project>:environment:<env>`: TEST_NAME finds the scratch
+      // project after its `project:`.
       ['reserved-ips', 'reserved_ips', 'ip', 'label'],
       ['object-storage', 'object_storages', 'object-storage', 'label'],
     ];

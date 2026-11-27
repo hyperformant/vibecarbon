@@ -26,7 +26,7 @@
  *     clusterResult = deployK3s's return { masterIp, floatingIp?, dbIp,
  *                     dbPrivateIp, workerIps, networkId, kubeconfig,
  *                     sshKeyPath, imageTag } — read back into deployResult
- *                     (no floatingIp on DigitalOcean, K8S_FLOATING_IP).
+ *                     (no floatingIp on DigitalOcean or Vultr, K8S_FLOATING_IP).
  */
 import { perfAsync } from '../../perf.js';
 

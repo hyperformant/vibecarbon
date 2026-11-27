@@ -41,8 +41,10 @@
  * deploy. A release that fails keeps the record, and the next deploy or
  * `vibecarbon destroy` releases it (destroy's backstop reads the same keys).
  *
- * Never on Hetzner, Linode or Vultr: their recorded floating IP is the cluster's live
- * ingress (retiredReservedIps returns nothing there).
+ * Never on Hetzner, Linode or Scaleway: their recorded floating IP is the
+ * cluster's live ingress (retiredReservedIps returns nothing there). Vultr
+ * clusters have no reserved IP either, but no release of vibecarbon made
+ * one there, so no Vultr environment has one on record.
  *
  * REMOVE AFTER 2027-02-13, with lib/iac/retired-resources.js: three months
  * after 0.53.0, the first release that made no reserved IP. A stack that

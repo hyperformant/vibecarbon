@@ -1,14 +1,15 @@
 /**
  * The address a k8s cluster's domain records point at.
  *
- * Hetzner, Linode and Vultr give each cluster a floating (reserved) IP, which the
- * program outputs as `floatingIp`. A DigitalOcean cluster has none
- * (`K8S_FLOATING_IP = false`): its records point at the master droplet's own
- * public IPv4, as DigitalOcean compose's do. On DigitalOcean a reserved IP
+ * Hetzner, Linode and Scaleway give each cluster a floating (reserved) IP,
+ * which the program outputs as `floatingIp`. A DigitalOcean or Vultr cluster
+ * has none (`K8S_FLOATING_IP = false`): its records point at the master's own
+ * public IPv4, as that provider's compose records do. There a reserved IP
  * never moved: failover flips DNS between the two clusters and a resize keeps
- * the droplet's address, so it bought nothing, and assigning it could fail on
- * an event the API never shows (`422 Droplet already has a pending event`,
- * run 42401297085).
+ * the master's address, so it bought nothing. Assigning one on DigitalOcean
+ * could fail on an event the API never shows (`422 Droplet already has a
+ * pending event`, run 42401297085), and on Vultr, where it was the master's
+ * main IP, every `pulumi destroy` failed on it (vultr-k8s.js says why).
  *
  * One definition for every reader: the DNS writers (single k8s,
  * k8s/dns-record.js, and k8s-ha, effects/k8s-ha.js), the success save that

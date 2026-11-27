@@ -4,8 +4,8 @@
  *
  * Review focus: a deploy that failed after the master was created but before
  * the cluster was ready has no kubeconfig. The backstop must still remove the
- * reserved IP, VPC, firewall and SSH key by name or address, never through
- * the cluster.
+ * reserved IP (where the provider's clusters have one), VPC, firewall and SSH
+ * key by name or address, never through the cluster.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -28,7 +28,7 @@ import {
   ScalewayProvider,
   encodeLabels as scalewayLabels,
 } from '../../../src/lib/providers/scaleway.js';
-import { reservedIpLabel, VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import {
   SCALEWAY_OTHER_PROJECT,
@@ -151,49 +151,13 @@ describe('sweepK8sBackstopTargets on Linode', () => {
   });
 });
 
-// Review focus 1, on Vultr: a deploy that failed partway, the reserved IP and
-// VPC made and the master never ready, so there is no kubeconfig. Nothing goes
-// through the cluster: the firewall group and SSH key by name, the reserved IP
-// by address once its label says it is still this stack's, any IP labelled for
-// the stack that no record names, and the VPC last, by name (Vultr refuses to
-// delete a VPC an instance is still in).
+// Review focus 1, on Vultr: a deploy that failed partway, the VPC made and
+// the master never ready, so there is no kubeconfig. Nothing goes through the
+// cluster: the firewall group and SSH key by name, and the VPC last, by name
+// (Vultr refuses to delete a VPC an instance is still in). A Vultr cluster
+// has no reserved IP (K8S_FLOATING_IP false, vultr-k8s.js), so none is
+// listed, looked up or released.
 describe('sweepK8sBackstopTargets on Vultr', () => {
-  type VultrIp = { id: string; subnet: string; label: string; instance_id?: string };
-  /** The label vultr-k8s.js gives the stack's reserved IP. */
-  const label = (project: string, environment: string) =>
-    reservedIpLabel({ project, environment }) as string;
-  /** The ownership tags vultr-k8s.js gives the stack's instances. */
-  const tags = (project: string, environment: string) => [
-    `project:${project}`,
-    `environment:${environment}`,
-  ];
-  /**
-   * GET /reserved-ips answers with `ips`, GET /instances/{id} with the tags
-   * in `instances` (404 for any other id); a DELETE succeeds.
-   */
-  const vultrReservedIps = (ips: VultrIp[], instances: Record<string, string[]> = {}) =>
-    fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
-      if (init?.method === 'DELETE') return { ok: true, status: 204 };
-      const instance = /\/instances\/([^/?]+)$/.exec(url)?.[1];
-      if (instance) {
-        const found = instances[instance];
-        return found
-          ? {
-              ok: true,
-              status: 200,
-              json: async () => ({ instance: { id: instance, tags: found } }),
-            }
-          : { ok: false, status: 404, json: async () => ({}) };
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          reserved_ips: ips.map((ip) => ({ instance_id: '', region: 'ewr', ...ip })),
-          meta: { links: { next: '' } },
-        }),
-      };
-    });
   const vultr = () => {
     const provider = new VultrProvider('token');
     const byName = {
@@ -207,108 +171,38 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
     };
     return { provider, byName };
   };
-  const sweepSingle = async (
-    provider: VultrProvider,
-    floatingIp?: string,
-    { projectName = 'proj', stackEnv = 'prod' } = {},
-  ) => {
+
+  it('deletes the firewall group, SSH key and VPC once each, the VPC last, and reads no reserved IP', async () => {
+    const { provider, byName } = vultr();
     const results = makeResults();
-    const targets = planK8sBackstopTargets({
-      plan: { tier: 'k8s', stackEnvs: [stackEnv] },
-      envConfig: { provider: 'vultr', region: 'ewr', ...(floatingIp ? { floatingIp } : {}) },
-      projectConfig: { projectName },
-    });
     await sweepK8sBackstopTargets({
       provider,
-      targets,
+      targets: planK8sBackstopTargets({
+        plan: { tier: 'k8s', stackEnvs: ['prod'] },
+        envConfig: { provider: 'vultr', region: 'ewr', ingressIp: '203.0.113.7' },
+        projectConfig: { projectName: 'proj' },
+      }),
       results,
       s: spinner(),
-      projectName,
-      environment: stackEnv,
+      projectName: 'proj',
+      environment: 'prod',
     });
-    return results;
-  };
-
-  it('deletes the firewall group, SSH key, reserved IP and VPC once each, the VPC last', async () => {
-    const { provider, byName } = vultr();
-    const byAddress = vi.spyOn(provider, 'deleteReservedIpByAddress');
-    const byLabel = vi.spyOn(provider, 'deleteReservedIpsByLabels');
-    vultrReservedIps([{ id: 'rip-7', subnet: '203.0.113.7', label: label('proj', 'prod') }]);
-
-    const results = await sweepSingle(provider, '203.0.113.7');
 
     expect(byName.firewall).toHaveBeenCalledExactlyOnceWith('proj-prod-firewall');
     expect(byName.sshKey).toHaveBeenCalledExactlyOnceWith('proj-prod-ewr-key');
-    expect(byAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
     expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network', PROD);
-    // The label sweep leaves the recorded address to the address path.
-    expect(byLabel).toHaveBeenCalledExactlyOnceWith(
-      { project: 'proj', environment: 'prod' },
-      { except: ['203.0.113.7'] },
-    );
-    expect(deleteUrls()).toEqual(['https://api.vultr.com/v2/reserved-ips/rip-7']);
     const vpcAt = byName.network.mock.invocationCallOrder[0];
-    for (const spy of [byName.firewall, byName.sshKey, byAddress, byLabel]) {
+    for (const spy of [byName.firewall, byName.sshKey]) {
       expect(spy.mock.invocationCallOrder[0]).toBeLessThan(vpcAt);
     }
+    // The master's own address (ingressIp) is never a reserved IP to release.
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
     expect(results.leaks.entries).toHaveLength(0);
-  });
-
-  it('a reserved IP no record names is released by its label, and no other', async () => {
-    const { provider } = vultr();
-    vultrReservedIps([
-      { id: 'rip-8', subnet: '203.0.113.8', label: label('proj', 'prod') },
-      { id: 'rip-9', subnet: '203.0.113.9', label: label('proj', 'prod2') },
-      { id: 'rip-10', subnet: '203.0.113.10', label: label('other', 'prod') },
-    ]);
-    const results = await sweepSingle(provider);
-    expect(deleteUrls()).toEqual(['https://api.vultr.com/v2/reserved-ips/rip-8']);
-    expect(results.leaks.entries).toHaveLength(0);
-  });
-
-  it('a recorded address now labelled for another stack is left alone, and reported', async () => {
-    const { provider } = vultr();
-    vultrReservedIps([
-      { id: 'rip-7', subnet: '203.0.113.7', label: label('proj', 'prod-standby') },
-    ]);
-    const results = await sweepSingle(provider, '203.0.113.7');
-    expect(deleteUrls()).toEqual([]);
-    expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual(['foreign']);
-    expect(results.leaks.entries[0].reason).toContain(
-      'it carries project:proj:environment:prod-standby',
-    );
     expect(results.unreleasedReservedIps).toEqual([]);
   });
 
-  it('a recorded address of ours still assigned to an instance is never released, and keeps the record', async () => {
-    const { provider } = vultr();
-    vultrReservedIps(
-      [
-        {
-          id: 'rip-7',
-          subnet: '203.0.113.7',
-          label: label('proj', 'prod'),
-          instance_id: 'inst-42',
-        },
-      ],
-      { 'inst-42': tags('proj', 'prod') },
-    );
-    const results = await sweepSingle(provider, '203.0.113.7');
-    expect(deleteUrls()).toEqual([]);
-    expect(results.leaks.entries).toHaveLength(1);
-    expect(results.leaks.entries[0]).toMatchObject({ severity: 'leak', resource: '203.0.113.7' });
-    expect(results.leaks.entries[0].reason).toBe(
-      'not released: it is still assigned to instance inst-42, which was not deleted',
-    );
-    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
-  });
-
-  it('k8s-ha: each side releases the IP labelled for its own stack', async () => {
+  it("k8s-ha: each side's firewall group and VPC by its own stack's names", async () => {
     const { provider, byName } = vultr();
-    vultrReservedIps([
-      { id: 'rip-1', subnet: '203.0.113.1', label: label('proj', 'prod-primary') },
-      { id: 'rip-2', subnet: '203.0.113.2', label: label('proj', 'prod-standby') },
-    ]);
     const results = makeResults();
     await sweepK8sBackstopTargets({
       provider,
@@ -318,8 +212,8 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
           provider: 'vultr',
           region: 'ewr',
           ha: {
-            primary: { stack: 'prod-primary', floatingIp: '203.0.113.1', region: 'ewr' },
-            standby: { stack: 'prod-standby', floatingIp: '203.0.113.2', region: 'ord' },
+            primary: { stack: 'prod-primary', ingressIp: '203.0.113.1', region: 'ewr' },
+            standby: { stack: 'prod-standby', ingressIp: '203.0.113.2', region: 'ord' },
           },
         },
         projectConfig: { projectName: 'proj' },
@@ -329,118 +223,18 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
       projectName: 'proj',
       environment: 'prod',
     });
-    expect(deleteUrls()).toEqual([
-      'https://api.vultr.com/v2/reserved-ips/rip-1',
-      'https://api.vultr.com/v2/reserved-ips/rip-2',
+    expect(byName.firewall.mock.calls).toEqual([
+      ['proj-prod-primary-firewall'],
+      ['proj-prod-standby-firewall'],
     ]);
     expect(byName.network.mock.calls).toEqual([
       ['proj-prod-primary-network', { project: 'proj', environment: 'prod-primary' }],
       ['proj-prod-standby-network', { project: 'proj', environment: 'prod-standby' }],
     ]);
+    // The HA key is shared and swept by its own block, not here.
+    expect(byName.sshKey).not.toHaveBeenCalled();
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
     expect(results.leaks.entries).toHaveLength(0);
-  });
-
-  describe('stacks whose names join to the same string', () => {
-    // Project proj's k8s-ha stack prod-primary and project proj-prod's
-    // environment primary: `<cluster>-ingress` labelled both
-    // `proj-prod-primary-ingress`, so either destroy could release the other's
-    // unassigned IP (during a master replacement, or before the master
-    // existed) and hold its own destroy on the other's assigned one.
-    const HA = { projectName: 'proj', stackEnv: 'prod-primary' };
-    const OTHER = { projectName: 'proj-prod', stackEnv: 'primary' };
-    const IPS = [
-      { id: 'rip-1', subnet: '203.0.113.1', label: label('proj', 'prod-primary') },
-      { id: 'rip-2', subnet: '203.0.113.2', label: label('proj-prod', 'primary') },
-    ];
-    const HOLDERS = {
-      'i-ha': tags('proj', 'prod-primary'),
-      'i-other': tags('proj-prod', 'primary'),
-    };
-    const assigned = () => [
-      { ...IPS[0], instance_id: 'i-ha' },
-      { ...IPS[1], instance_id: 'i-other' },
-    ];
-
-    it.each([
-      ['proj prod-primary', HA, 'rip-1'],
-      ['proj-prod primary', OTHER, 'rip-2'],
-    ])(
-      'unassigned: the %s destroy releases its own IP and not the other',
-      async (_, stack, own) => {
-        const { provider } = vultr();
-        vultrReservedIps(IPS);
-        const results = await sweepSingle(provider, undefined, stack);
-        expect(deleteUrls()).toEqual([`https://api.vultr.com/v2/reserved-ips/${own}`]);
-        expect(results.leaks.entries).toHaveLength(0);
-      },
-    );
-
-    it.each([
-      ['proj prod-primary', HA, '203.0.113.1', 'i-ha'],
-      ['proj-prod primary', OTHER, '203.0.113.2', 'i-other'],
-    ])(
-      'assigned: the %s destroy reports only its own IP held, and deletes nothing',
-      async (_, stack, own, holder) => {
-        const { provider } = vultr();
-        vultrReservedIps(assigned(), HOLDERS);
-        const results = await sweepSingle(provider, undefined, stack);
-        expect(deleteUrls()).toEqual([]);
-        expect(
-          results.leaks.entries.map((e: { severity: string; resource: string }) => [
-            e.severity,
-            e.resource,
-          ]),
-        ).toEqual([['leak', own]]);
-        expect(results.leaks.entries[0].reason).toContain(`assigned to instance ${holder}`);
-        expect(results.unreleasedReservedIps).toEqual([own]);
-      },
-    );
-
-    it("assigned: a saved address that is the other stack's IP is foreign, never held", async () => {
-      const { provider } = vultr();
-      vultrReservedIps(assigned(), HOLDERS);
-      // proj-prod's record names proj's address (a reissue, or a bad record).
-      const results = await sweepSingle(provider, '203.0.113.1', OTHER);
-      expect(deleteUrls()).toEqual([]);
-      const severities = results.leaks.entries.map((e: { severity: string; resource: string }) => [
-        e.severity,
-        e.resource,
-      ]);
-      expect(severities).toContainEqual(['foreign', '203.0.113.1']);
-      expect(severities).not.toContainEqual(['leak', '203.0.113.1']);
-      expect(results.unreleasedReservedIps).not.toContain('203.0.113.1');
-    });
-  });
-
-  describe("an IP labelled ours, held by another stack's instance", () => {
-    const ip = {
-      id: 'rip-7',
-      subnet: '203.0.113.7',
-      label: label('proj', 'prod'),
-      instance_id: 'i-9',
-    };
-
-    it('a recorded address is foreign, not held, and keeps no record', async () => {
-      const { provider } = vultr();
-      vultrReservedIps([ip], { 'i-9': tags('other', 'prod') });
-      const results = await sweepSingle(provider, '203.0.113.7');
-      expect(deleteUrls()).toEqual([]);
-      expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual([
-        'foreign',
-      ]);
-      expect(results.leaks.entries[0].reason).toContain(
-        'held by instance i-9, which is project other, environment prod',
-      );
-      expect(results.unreleasedReservedIps).toEqual([]);
-    });
-
-    it('an unrecorded one is left out of the label sweep: no delete, no entry', async () => {
-      const { provider } = vultr();
-      vultrReservedIps([ip], { 'i-9': tags('other', 'prod') });
-      const results = await sweepSingle(provider);
-      expect(deleteUrls()).toEqual([]);
-      expect(results.leaks.entries).toHaveLength(0);
-    });
   });
 });
 

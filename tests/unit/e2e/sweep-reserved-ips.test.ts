@@ -1,15 +1,14 @@
 /**
- * The reserved-IP passes of the DigitalOcean, Linode and Vultr sweeps.
+ * The reserved-IP passes of the DigitalOcean and Linode sweeps.
  *
  * A reserved IP bills while unassigned and outlives the server it was on, so
  * these passes are the only thing that looks for one after a failed destroy.
  * Until this file they were pinned by source text only
  * (sweep-reserved-ip-coverage.test.ts); these tests run them.
  *
- *   - Vultr deletes a reserved IP whose label names a project starting with
- *     the scratch prefix (reservedIpLabel).
- *   - DigitalOcean and Linode cannot attribute an unassigned reserved IP, so
- *     they delete nothing, report it and mark the sweep incomplete.
+ * DigitalOcean and Linode cannot attribute an unassigned reserved IP, so
+ * they delete nothing, report it and mark the sweep incomplete. Vultr makes
+ * no reserved IP, and its sweep never asks for one.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepOrphanedDigitalOceanResources } from '../../e2e/utils/sweep-digitalocean.js';
@@ -85,81 +84,23 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('Vultr sweep: reserved IPs', () => {
-  const vultrEmpty = { meta: { links: { next: '' } } };
-  const run = async (served: Served) => {
+describe('Vultr sweep: no reserved IPs', () => {
+  it('never lists reserved IPs, and reads clean without them', async () => {
     const out = capture();
-    const api = fakeApi('/v2/reserved-ips', vultrEmpty, served);
-    const result = await sweepOrphanedVultrResources(TAG, PROJECT, {
+    const api = fakeApi('/v2/reserved-ips', { meta: { links: { next: '' } } }, { listing: 503 });
+    const { counts, enumFailed } = await sweepOrphanedVultrResources(TAG, PROJECT, {
       provider,
       objectStorage: noBuckets,
       fetchImpl: api.impl,
     });
-    return { ...result, deleted: api.deleted, warned: out.warned(), logged: out.logged() };
-  };
-  const listing = (rows: Json[]) => ({ reserved_ips: rows, ...vultrEmpty });
-  const OURS = `project:${PROJECT}:environment:prod`;
-
-  it("deletes the one whose label names this run's project and leaves the others", async () => {
-    const { counts, enumFailed, deleted } = await run({
-      listing: listing([
-        { id: 'rip-1', label: OURS, subnet: '203.0.113.7' },
-        { id: 'rip-2', label: 'project:someone-else:environment:prod', subnet: '203.0.113.8' },
-        { id: 'rip-3', subnet: '203.0.113.9' },
-        // Starts with the project name, but names no project: not ours.
-        { id: 'rip-4', label: `${PROJECT}-prod-ingress`, subnet: '203.0.113.10' },
-      ]),
-    });
-    expect(deleted).toEqual(['/v2/reserved-ips/rip-1']);
-    expect(counts.floatingIps).toBe(1);
-    expect(enumFailed).toBe(false);
-  });
-
-  it('a sweep that deleted only a reserved IP reports a destroy regression, not a clean run', async () => {
-    const { warned, logged } = await run({
-      listing: listing([{ id: 'rip-1', label: OURS }]),
-    });
-    expect(warned).toContain('REGRESSION: destroy left 1 Vultr orphan resource(s)');
-    expect(warned).toContain('reserved-ips=1');
-    expect(logged).not.toContain('No Vultr orphans found');
-  });
-
-  it('a 404 on delete counts as swept (already released)', async () => {
-    const { counts, enumFailed } = await run({
-      listing: listing([{ id: 'rip-1', label: OURS }]),
-      deleteStatus: 404,
-    });
-    expect(counts.floatingIps).toBe(1);
-    expect(enumFailed).toBe(false);
-  });
-
-  it('a refused delete is not counted and fails the sweep', async () => {
-    const { counts, enumFailed, warned } = await run({
-      listing: listing([{ id: 'rip-1', label: OURS }]),
-      deleteStatus: 500,
-    });
-    expect(counts.floatingIps).toBe(0);
-    expect(enumFailed).toBe(true);
-    expect(warned).toContain(`Reserved IP ${OURS} delete failed (500)`);
-  });
-
-  it('an unreadable listing marks the sweep incomplete', async () => {
-    const { enumFailed, warned } = await run({ listing: 503 });
-    expect(enumFailed).toBe(true);
-    expect(warned).toContain('reserved-ip list enumeration incomplete');
-  });
-
-  it('a listing that throws marks the sweep incomplete', async () => {
-    const { enumFailed, warned } = await run({ listing: 'throw' });
-    expect(enumFailed).toBe(true);
-    expect(warned).toContain('reserved-ip list enumeration incomplete');
-  });
-
-  it('no reserved IPs reads clean', async () => {
-    const { counts, enumFailed, logged } = await run({ listing: listing([]) });
+    const asked = (api.impl as unknown as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([url]) => new URL(String(url)).pathname,
+    );
+    expect(asked).not.toContain('/v2/reserved-ips');
     expect(counts.floatingIps).toBe(0);
     expect(enumFailed).toBe(false);
-    expect(logged).toContain('No Vultr orphans found');
+    expect(out.logged()).toContain('No Vultr orphans found');
+    expect(out.warned()).not.toContain('reserved-ip');
   });
 });
 

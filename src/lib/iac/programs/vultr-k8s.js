@@ -9,13 +9,17 @@
  *     `internal_ip` only when an instance holds one VPC (terraform-provider-
  *     vultr issue 173). It picks the addresses itself, so as on DigitalOcean
  *     the db and worker user data wait on the master's VPC address.
- *   - The ingress address is a `vultr.ReservedIp`, given to the master at
- *     create as its main IP (`reservedIpId`), so it never moves to another
- *     instance and needs no assignment resource. `reservedIpId` is
- *     ForceNew: the master is replaced delete-first, so the old instance
- *     frees the address before the new one asks for it. A reserved IP takes
- *     no tags, so its label names the stack's project and environment
- *     (reservedIpLabel).
+ *   - No reserved IP, as on DigitalOcean: the cluster's domain points at the
+ *     master's own public IPv4 (clusterIngressIp, lib/deploy/k8s/ingress-ip.js),
+ *     as Vultr compose's does. A reserved IP would never move: failover flips
+ *     DNS between the two clusters, a resize keeps the instance's address,
+ *     and scale and failover never replace the master (priorMaster). Given
+ *     to the master as its main IP, it also broke every destroy: Vultr
+ *     refuses to detach a main IP until its server is gone ("The server must
+ *     be closed to detach this IP because it is being used as the main IP",
+ *     400), and the provider's instance delete returns before the server is
+ *     gone, so `pulumi destroy` deleted the master and then failed on the IP
+ *     (e2e run 45922250720, vultr k8s and k8s-ha).
  *   - The firewall is a `vultr.FirewallGroup` whose rules are separate
  *     `vultr.FirewallRule` resources, one per (rule, source), as on compose
  *     (vultr-compose.js). Instances attach the group at create
@@ -38,17 +42,14 @@
  *     k8s node name, so every instance sets `hostname` to its label.
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp, workerIps,
- * floatingIp, networkId, sshKeyId, k3sToken, clusterName, vpcCidr, masterId.
+ * networkId, sshKeyId, k3sToken, clusterName, vpcCidr, masterId. No
+ * `floatingIp`: VultrProvider.K8S_FLOATING_IP is false, and the domain points
+ * at masterIp.
  */
 
 import * as vultr from '@ediri/vultr';
 import * as pulumi from '@pulumi/pulumi';
-import {
-  cidrToVultrRuleFields,
-  encodeLabels,
-  reservedIpLabel,
-  VultrProvider,
-} from '../../providers/vultr.js';
+import { cidrToVultrRuleFields, encodeLabels, VultrProvider } from '../../providers/vultr.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
 import {
@@ -60,21 +61,6 @@ import {
 import { vpcCidrForCluster } from '../vpc-cidr.js';
 
 const INSTANCE = 'vultr:index/instance:Instance';
-
-/**
- * The reserved IP's label for the stack's project and environment, the
- * same two labels every instance here is tagged with.
- * @param {Record<string, string>} labels - stackIdentity's labels
- * @returns {string}
- */
-function requireReservedIpLabel(labels) {
-  const label = reservedIpLabel({ project: labels.project, environment: labels.environment });
-  if (label) return label;
-  throw new Error(
-    `Vultr cannot label this cluster's reserved IP for project ${labels.project} and ` +
-      `environment ${labels.environment}: each must be spelled with a-z, 0-9 and -.`,
-  );
-}
 
 /**
  * @typedef {Object} K8sStackConfig
@@ -120,9 +106,6 @@ export function buildVultrK8sProgram(config) {
   requireOperatorCidrs(config, { k8sApi: true });
   // Every node's hostname is its k8s node name (see the boot scripts).
   requireK8sNodeNamesFit(clusterName, VultrProvider.NAME);
-  // The reserved IP's one attribution, refused here, before any server
-  // exists, for a name it cannot spell.
-  const reservedIpLabelText = requireReservedIpLabel(labels);
   // Always the CLI's: the stack's recorded token or the one derived from the
   // state passphrase (lib/iac/k3s-token.js). Never made here.
   const k3sToken = requireK3sToken(config, 'buildVultrK8sProgram');
@@ -196,15 +179,6 @@ export function buildVultrK8sProgram(config) {
       });
     });
 
-    // Labelled with the stack's project and environment, the one way destroy
-    // can tell this cluster's IP from another's (reservedIpLabel): a Vultr
-    // reserved IP takes no tags.
-    const reservedIp = new vultr.ReservedIp('ingress', {
-      region: config.location,
-      ipType: 'v4',
-      label: reservedIpLabelText,
-    });
-
     /** What every instance shares: region, image, key, the one VPC, the group. */
     const node = (label, plan) => ({
       label,
@@ -218,7 +192,9 @@ export function buildVultrK8sProgram(config) {
     });
 
     // Master. Its boot script reads its own addresses and instance id from
-    // Vultr's metadata, so its user data needs neither.
+    // Vultr's metadata, so its user data needs neither. Replaced
+    // create-first, as on DigitalOcean: it holds no address a successor needs
+    // freed first, and Vultr picks every VPC address itself.
     const masterUserData = await VultrProvider.getK8sMasterUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
@@ -227,11 +203,10 @@ export function buildVultrK8sProgram(config) {
       'master',
       {
         ...node(`${clusterName}-master`, config.masterServerType),
-        reservedIpId: reservedIp.id,
         userData: pulumi.secret(masterUserData),
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
       },
-      serverResourceOptions(INSTANCE, { deleteBeforeReplace: true, dependsOn: rules }),
+      serverResourceOptions(INSTANCE, { dependsOn: rules }),
     );
 
     // The master's private address, and what its db and workers wait on. A
@@ -317,14 +292,14 @@ export function buildVultrK8sProgram(config) {
     }
 
     return {
-      masterIp: reservedIp.subnet,
+      // The cluster's ingress: its domain points here (clusterIngressIp).
+      masterIp: master.mainIp,
       // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
       masterId: master.id,
       masterPrivateIp,
       dbIp: dbServer.mainIp,
       dbPrivateIp: dbServer.internalIp,
       workerIps: workers.map((w) => w.mainIp),
-      floatingIp: reservedIp.subnet,
       networkId: network.id,
       sshKeyId: sshKeyIdOutput(sshKeyId),
       k3sToken: pulumi.secret(k3sToken),

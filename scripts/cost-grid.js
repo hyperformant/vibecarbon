@@ -89,6 +89,9 @@ export const BILLING_EXTRAS = {
     },
   },
   vultr: {
+    // No ingress IP, as on DigitalOcean: a Vultr cluster's domain points at
+    // its master's own address (its billed IPv4 is the server's, which
+    // setMonthly already counts).
     // The db PVC, 10Gi on NVMe block storage (vultr-block-storage-vibecarbon,
     // which Vultr sells from 10 GB), one per cluster. $1 per 10 GB a month is
     // the price the plan states, not yet read from this page: it refused
@@ -100,14 +103,6 @@ export const BILLING_EXTRAS = {
       checked: '2026-11-26',
       verified: false,
       note: 'www.vultr.com refused automated reads (403) on 2026-11-25 and 2026-11-26; $1 per 10 GB not yet read from this page',
-    },
-    // The ingress reserved IP, one per cluster: "billed at $0.004 per hour,
-    // which amounts to $3 per month".
-    reservedIp: {
-      perHour: 0.004,
-      hoursPerMonth: 730,
-      source: 'https://docs.vultr.com/support/products/network/are-reserved-ips-free',
-      checked: '2026-11-26',
     },
     objectStorage: {
       text: '$18',
@@ -234,10 +229,11 @@ export function extrasFor(Provider, live = {}) {
       perServer: 0,
     };
   }
-  if (id === 'digitalocean') {
+  // No ingress IP (K8S_FLOATING_IP false), only the db volume: DigitalOcean and Vultr.
+  if (id === 'digitalocean' || id === 'vultr') {
     return { perCluster: () => table.volume.perGbMonthly * table.volume.gb, perServer: 0 };
   }
-  // A reserved ingress IP billed by the hour, and the db volume: Linode and Vultr.
+  // A reserved ingress IP billed by the hour, and the db volume: Linode.
   if (table.reservedIp && table.volume) {
     const ip = table.reservedIp;
     return {
