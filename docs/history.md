@@ -2040,7 +2040,7 @@ Do not shorten a bound below the waits its script holds.
 **Guard:** `tests/unit/deploy/apt-daily-wait-census.test.ts`, with the wait and
 reason cases in `tests/unit/update/inspect.test.ts`.
 
-#### 2026-11-27: A volume the provider refuses to attach stops the db wait, with the provider's view (#PR)
+#### 2026-11-27: A volume the provider refuses to attach stops the db wait, with the provider's view (#607)
 
 A db rollout wait now stops, with VolumeAttachRefusedError, once the db pod's
 FailedAttachVolume event carries a refusal its provider class declares
