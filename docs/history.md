@@ -1975,6 +1975,33 @@ and must never replace the failure they describe.
 `tests/unit/deploy/node-join.test.ts` and
 `tests/unit/providers/describe-server-for-diagnosis.test.ts`.
 
+#### 2026-11-27: `update`'s check waits for Ubuntu's daily apt job
+
+`update` reads each server's pending updates only after Ubuntu's daily apt
+units are done (`aptWaitForDailyUnits()`, at most 300 s). When the dry run
+still fails, the reason names the last line it printed. Every ssh call that
+runs apt now has a timeout of at least the waits in its own script (300 s for
+the daily units, 300 s for each apt-get's lock wait) plus 120 s: 1,020 s for
+the check and the WireGuard install, 1,200 s for the Docker upgrade.
+
+**Why:** perf run 45940611622 (vultr/k8s-ha) checked both database nodes about
+4 minutes after they booted, while Ubuntu's apt-daily-upgrade was installing
+there. unattended-upgrade exits 1 at once when another one holds its lock, so
+both nodes were skipped with "unattended-upgrade exited 1" and nothing more.
+`update`'s install and Docker upgrade, and the WireGuard install, already
+waited; the check was the one post-boot apt script that did not. Two of those
+that waited had bounds shorter than their waits: the WireGuard install had
+420 s for up to 900 s, the Docker upgrade 900 s for 900 s with no time to
+work. This is the outer-timeout rule of 2026-09-01 (#46) again.
+
+**Do not undo:** do not drop the wait for a retry of the check. Every apt
+refresh or unattended-upgrade we run over ssh waits first; only cloud-init,
+which runs before apt-daily, and a command we print for a person go without.
+Do not shorten a bound below the waits its script holds.
+
+**Guard:** `tests/unit/deploy/apt-daily-wait-census.test.ts`, with the wait and
+reason cases in `tests/unit/update/inspect.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

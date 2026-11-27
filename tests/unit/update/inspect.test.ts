@@ -1,8 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { APT_LOCK_TIMEOUT_SECONDS } from '../../../src/lib/deploy/apt.js';
+import {
+  APT_DAILY_UNITS_WAIT_SECONDS,
+  APT_LOCK_TIMEOUT_SECONDS,
+  aptGet,
+  aptWaitForDailyUnits,
+  UNATTENDED_UPGRADE,
+} from '../../../src/lib/deploy/apt.js';
 import {
   INSPECT_SCRIPT,
   inspectAll,
@@ -228,8 +234,12 @@ describe('a failed apt check is never read as nothing pending', () => {
     );
     const offenders = outside
       .split('\n')
-      // An @@error line names apt in its text: `{ echo "..."; exit 0; }` reads nothing.
-      .filter((l) => /apt-get|apt-cache|unattended-upgrade/.test(l) && !/^\s*(\{ )?echo /.test(l))
+      // An @@error line names apt in its text: `{ printf ... "@@error ..."; exit 0; }` reads nothing.
+      .filter(
+        (l) =>
+          /apt-get|apt-cache|unattended-upgrade|systemd-run/.test(l) &&
+          !/^\s*\{ printf '%s\\n' "@@error /.test(l),
+      )
       .filter((l) => !l.includes('</dev/null'));
     expect(offenders).toEqual([]);
   });
@@ -258,8 +268,8 @@ describe('INSPECT_SCRIPT', () => {
     expect(INSPECT_SCRIPT('k8s')).toContain('--print');
   });
 
-  // The ssh bound is one apt lock wait plus 120 s: after a failed apt step the
-  // script stops, so a second step never waits for the lock again.
+  // The ssh bound is the daily units' wait, one apt lock wait and 120 s: after
+  // a failed apt step the script stops, so a second step never waits again.
   it.each(['compose', 'k8s'] as const)(
     '%s: every @@error ends the script at once, with exit 0 so the error is read',
     (kind) => {
@@ -267,7 +277,10 @@ describe('INSPECT_SCRIPT', () => {
         .split('\n')
         .filter((l) => l.includes('@@error'));
       expect(lines.length).toBe(kind === 'compose' ? 4 : 3);
-      for (const line of lines) expect(line).toMatch(/echo "@@error [^"]*"; exit 0\b/);
+      // printf, not echo: dash's echo would turn a backslash in $why into a
+      // newline or a control character.
+      for (const line of lines)
+        expect(line).toMatch(/\{ printf '%s\\n' "@@error [^"]*"; exit 0; \}/);
     },
   );
 
@@ -280,16 +293,168 @@ describe('INSPECT_SCRIPT', () => {
   });
 });
 
+/** Where a tool really lives, for a link next to the stubs. */
+function realTool(name: string): string {
+  const found = spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf-8' }).stdout.trim();
+  if (!found.startsWith('/')) throw new Error(`${name} not found`);
+  return found;
+}
+
+/**
+ * Runs the script's own lines from the daily units' wait through the Ubuntu
+ * check, in their order, under stubs: PATH holds only the stubs and links to
+ * sed, tr, tail and cut, so no real systemd-run, apt-get or unattended-upgrade
+ * can run. Cut out: the PATH line, and the host's own reporter and boot id
+ * between @@host and @@ubuntu. Each stub logs its argv; unattended-upgrade
+ * prints `out` exactly and exits `rc`.
+ */
+function runUbuntuCheck(dryRun: { out: string; rc: number }) {
+  const dir = createTempDir('vc-inspect-run-');
+  const log = join(dir, 'calls.log');
+  const stub = (name: string, body: string) => {
+    writeFileSync(join(dir, name), `#!/bin/sh\necho "${name} $*" >> "${log}"\n${body}\n`);
+    chmodSync(join(dir, name), 0o755);
+  };
+  stub('timeout', 'shift\nexec "$@"');
+  stub('systemd-run', 'echo "Running as unit: run-u7.service"');
+  stub('apt-get', 'exit 0');
+  stub(
+    'unattended-upgrade',
+    `printf '%s' '${dryRun.out.replaceAll("'", "'\\''")}'\nexit ${dryRun.rc}`,
+  );
+  for (const tool of ['sed', 'tr', 'tail', 'cut']) symlinkSync(realTool(tool), join(dir, tool));
+
+  const lines = INSPECT_SCRIPT('k8s').split('\n');
+  expect(lines[0]).toMatch(/^PATH=/);
+  const host = lines.indexOf('echo @@host');
+  const ubuntu = lines.indexOf('echo @@ubuntu');
+  const end = lines.indexOf('fi', ubuntu);
+  expect([host, ubuntu, end].every((i) => i > 0)).toBe(true);
+  const fragment = [...lines.slice(1, host), ...lines.slice(ubuntu, end + 1)].join('\n');
+  expect(fragment).not.toContain('PATH=');
+
+  const r = spawnSync('/bin/sh', ['-c', fragment], {
+    env: { PATH: dir },
+    encoding: 'utf-8',
+    timeout: 10_000,
+  });
+  const calls = existsSync(log) ? readFileSync(log, 'utf-8').trim().split('\n') : [];
+  return { status: r.status, stdout: r.stdout, calls };
+}
+
+describe('the check waits for the daily apt job first', () => {
+  it.each(['compose', 'k8s'] as const)(
+    '%s: one wait, before the restart state and every apt command',
+    (kind) => {
+      const script = INSPECT_SCRIPT(kind);
+      const wait = script.indexOf(aptWaitForDailyUnits());
+      expect(script.split(aptWaitForDailyUnits())).toHaveLength(2);
+      expect(wait).toBeGreaterThan(-1);
+      for (const later of [
+        'echo @@host',
+        aptGet('update -qq'),
+        `${UNATTENDED_UPGRADE} --dry-run`,
+        ...(kind === 'compose' ? ['apt-get -c '] : []),
+      ]) {
+        expect(script.indexOf(later), later).toBeGreaterThan(wait);
+      }
+    },
+  );
+
+  it('the wait runs before apt, and none of its output reaches the read', () => {
+    const r = runUbuntuCheck({ out: 'Packages that will be upgraded: libc6 openssl\n', rc: 0 });
+    const wait =
+      'systemd-run --quiet --wait --property=After=apt-daily.service --property=After=apt-daily-upgrade.service true';
+    expect(r.calls).toEqual([
+      `timeout 300 ${wait}`,
+      wait,
+      aptGet('update -qq'),
+      `${UNATTENDED_UPGRADE} --dry-run --verbose`,
+    ]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('@@ubuntu\nlibc6 openssl\n');
+  });
+});
+
+describe('a failed dry run says why', () => {
+  const ubuntuHead = FIXTURE.slice(0, FIXTURE.indexOf('@@ubuntu'));
+  const reasonOf = (stdout: string) => {
+    try {
+      parseInspectOutput(`${ubuntuHead}${stdout}`, 'k8s');
+    } catch (err) {
+      return (err as Error).message;
+    }
+    throw new Error('parsed as a passed check');
+  };
+
+  it('the @@error names the last line of output that has text', async () => {
+    const r = runUbuntuCheck({
+      out: 'Starting unattended upgrades script\nLock could not be acquired (another package manager running?)\n\n  \n',
+      rc: 1,
+    });
+    expect(r.stdout).toBe(
+      '@@ubuntu\n@@error unattended-upgrade exited 1: Lock could not be acquired (another package manager running?)\n',
+    );
+    const reason =
+      'could not check for updates: unattended-upgrade exited 1: Lock could not be acquired (another package manager running?)';
+    expect(reasonOf(r.stdout)).toBe(reason);
+    // The same reason reaches the skipped list update prints.
+    const sshRun = vi.fn(async () => `${ubuntuHead}${r.stdout}`);
+    const res = await inspectAll([target('db')], { sshRun, envName: 'prod' });
+    expect(res.skipped).toEqual([{ name: 'db', ip: '10.0.0.2', reason }]);
+  });
+
+  it('a last line of nothing but control characters is passed over', () => {
+    const r = runUbuntuCheck({ out: 'dpkg was interrupted\n\u001b\u0007\r\n', rc: 1 });
+    expect(r.stdout).toBe('@@ubuntu\n@@error unattended-upgrade exited 1: dpkg was interrupted\n');
+  });
+
+  it.each([
+    ['no output', ''],
+    ['blank lines', '\n  \n\t\n'],
+    ['nothing but control characters', '\r\n\u001b\u0007\n\u0001'],
+  ])('%s: the line reads as it did before', (_name, out) => {
+    const r = runUbuntuCheck({ out, rc: 1 });
+    expect(r.stdout).toBe('@@ubuntu\n@@error unattended-upgrade exited 1\n');
+    expect(reasonOf(r.stdout)).toBe('could not check for updates: unattended-upgrade exited 1');
+  });
+
+  it('keeps printable ASCII only, without leading blanks, at most 200 characters', () => {
+    const long = 'a'.repeat(250);
+    const r = runUbuntuCheck({
+      out: `first\n   \u001b]52;c;ZXZpbA==\u0007\u001b[2Jcafé\t${long}\n`,
+      rc: 100,
+    });
+    const why = `]52;c;ZXZpbA==[2Jcaf${long}`.slice(0, 200);
+    expect(r.stdout).toBe(`@@ubuntu\n@@error unattended-upgrade exited 100: ${why}\n`);
+    const reason = reasonOf(r.stdout);
+    expect(reason).toBe(`could not check for updates: unattended-upgrade exited 100: ${why}`);
+    expect([...reason].every((ch) => ch >= ' ' && ch <= '~')).toBe(true);
+  });
+
+  it('a backslash in the output stays a backslash: printf, never echo', () => {
+    // dash's echo would end the line at \c, break it at \n and turn \0033
+    // into an escape.
+    const line = String.raw`E: open C:\new\cache \0033[2J \c done`;
+    const r = runUbuntuCheck({ out: `${line}\n`, rc: 1 });
+    expect(r.stdout).toBe(`@@ubuntu\n@@error unattended-upgrade exited 1: ${line}\n`);
+  });
+});
+
 describe('inspectTarget and inspectAll', () => {
-  it('sends the script on stdin with a bound past apt lock wait and no transport retry', async () => {
+  it('sends the script on stdin with a bound past every wait and no transport retry', async () => {
     const sshRun = vi.fn().mockResolvedValue(FIXTURE);
     await inspectTarget(target('master'), { sshRun, envName: 'prod' });
-    // apt waits up to APT_LOCK_TIMEOUT_SECONDS for the lock: the ssh bound is
-    // 120 s past it, so a busy daily job reads as a failed apt check.
+    // The script waits up to APT_DAILY_UNITS_WAIT_SECONDS for the daily apt
+    // units, then each apt-get (two on compose) up to APT_LOCK_TIMEOUT_SECONDS
+    // for the lock: the ssh bound is 120 s past them all, so a daily job that
+    // runs longer reads as a failed apt check, never as an ssh timeout.
+    // 1020 s: 300 + 2 x 300 + 120.
+    expect(APT_DAILY_UNITS_WAIT_SECONDS).toBe(300);
     expect(APT_LOCK_TIMEOUT_SECONDS).toBe(300);
     expect(sshRun).toHaveBeenCalledWith('10.0.0.6', expect.any(String), ['sh', '-s'], {
       input: INSPECT_SCRIPT('compose'),
-      timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000,
+      timeout: 1_020_000,
       transportRetry: false,
     });
   });

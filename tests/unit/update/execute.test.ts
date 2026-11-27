@@ -815,8 +815,9 @@ describe('executeUpdatePlan on compose', () => {
       'docker-buildx-plugin',
       'docker-compose-plugin',
     ]);
-    // 900 s: the daily units' own 300 s, apt's 300 s lock wait, 300 s to work.
-    expect(call.opts).toMatchObject({ timeout: 900_000, input: '' });
+    // 1200 s: the daily units' own 300 s, apt's 300 s lock wait in the
+    // refresh and in the install, 300 s to work.
+    expect(call.opts).toMatchObject({ timeout: 1_200_000, input: '' });
     expect(w.deps.verifyAppHealth).toHaveBeenCalledWith('10.0.0.1', KEY, 'shop', {
       domain: 'app.example.test',
       budgetMs: 300_000,

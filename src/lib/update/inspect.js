@@ -4,9 +4,11 @@
  * ever runs on a server or inside a container.
  */
 import {
+  APT_DAILY_UNITS_WAIT_SECONDS,
   APT_LOCK_TIMEOUT_SECONDS,
   aptGet,
   aptQuietUpdate,
+  aptWaitForDailyUnits,
   UNATTENDED_UPGRADE,
 } from '../deploy/apt.js';
 import { hostReporterScript } from '../host-reporter.js';
@@ -19,12 +21,16 @@ const REPORTER_EOF = 'VC_INSPECT_REPORTER_EOF';
 /** The reporter's path unit: on disk once the installer has run. */
 const REPORTER_UNIT = '/etc/systemd/system/vibecarbon-host-reporter.path';
 /**
- * apt waits up to APT_LOCK_TIMEOUT_SECONDS for a lock the daily job holds; the
- * ssh call outlasts that wait by 120 s, so a busy server reads as a failed apt
- * check (with its "daily security updates may be running" hint), never as an
- * ssh timeout.
+ * The script first waits up to APT_DAILY_UNITS_WAIT_SECONDS for Ubuntu's daily
+ * apt units to finish. Then each of its apt-get commands may wait up to
+ * APT_LOCK_TIMEOUT_SECONDS for a dpkg lock: two on compose (Ubuntu's lists and
+ * Docker's), one on k8s. The ssh call outlasts all of them by 120 s, so a
+ * server whose daily job runs longer than that reads as a failed apt check
+ * (with its "daily security updates may be running" hint), never as an ssh
+ * timeout. tests/unit/deploy/apt-daily-wait-census.test.ts checks the sum.
  */
-const INSPECT_TIMEOUT_MS = (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
+const INSPECT_TIMEOUT_MS =
+  (APT_DAILY_UNITS_WAIT_SECONDS + 2 * APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
 
 /**
  * @typedef {{ host: import('../host-state.js').HostState, bootId: string, ubuntu: string[], docker: { packages: Array<{ name: string, from: string, to: string }> } | null, reporter: boolean | null }} TargetState
@@ -33,14 +39,25 @@ const INSPECT_TIMEOUT_MS = (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
  */
 
 /**
- * Print a failed step's `@@error` line and end the script. Each apt step may
- * wait up to APT_LOCK_TIMEOUT_SECONDS for the lock, and the ssh bound allows
- * one such wait: after a failure no later step waits again. Exit 0, so the
- * output is parsed and the error read as a failed apt check.
+ * Print a failed step's `@@error` line and end the script, so no later step
+ * waits again. Exit 0, so the output is parsed and the error read as a failed
+ * apt check. printf, not echo: dash's echo turns a backslash in the text (the
+ * server's own output, in $why) into a newline or a control character.
  *
- * @param {string} message sh double-quoted text, may use $?/$rc
+ * @param {string} message sh double-quoted text, may use $?/$rc/$why
  */
-const stopWith = (message) => `{ echo "@@error ${message}"; exit 0; }`;
+const stopWith = (message) => `{ printf '%s\\n' "@@error ${message}"; exit 0; }`;
+
+/**
+ * Sets $why to why a command failed, from its output in $out: ": " and the
+ * last line that has text, or nothing when it printed none. The server wrote
+ * it and the person running update reads it, so it keeps printable ASCII only
+ * (tr in the C locale), without leading blanks, and at most 200 characters.
+ * Control characters go before the lines are picked, so a line of nothing but
+ * escapes counts as blank.
+ */
+const WHY_FROM_OUT =
+  "why=$(export LC_ALL=C; printf '%s\\n' \"$out\" | tr -cd '[:print:]\\n' | sed -e 's/^[[:space:]]*//' -e '/^$/d' | tail -n 1 | cut -c1-200 | sed 's/^/: /')";
 
 /**
  * @param {'compose' | 'k8s'} kind
@@ -49,6 +66,13 @@ const stopWith = (message) => `{ echo "@@error ${message}"; exit 0; }`;
 export function INSPECT_SCRIPT(kind) {
   const lines = [
     'PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH',
+    // Ubuntu's daily apt job (apt-daily, then apt-daily-upgrade, which runs
+    // unattended-upgrade) often runs in a server's first minutes. Neither
+    // `apt-get update` (the lists lock) nor unattended-upgrade (its own lock)
+    // waits for it: they exit 100 and 1 at once. So the whole read waits for
+    // it first, which also gives a restart state that counts what it installed.
+    // Bounded and fails open (apt.js); its output is the wait's, not the read's.
+    `${aptWaitForDailyUnits()} >/dev/null 2>&1 </dev/null`,
     'echo @@host',
     `sh -s -- --print <<'${REPORTER_EOF}'`,
     hostReporterScript().trimEnd(),
@@ -60,7 +84,8 @@ export function INSPECT_SCRIPT(kind) {
     'if command -v unattended-upgrade >/dev/null 2>&1 </dev/null; then',
     `  out=$(${UNATTENDED_UPGRADE} --dry-run --verbose 2>&1 </dev/null); rc=$?`,
     '  if [ "$rc" -ne 0 ]; then',
-    `    ${stopWith('unattended-upgrade exited $rc')}`,
+    `    ${WHY_FROM_OUT}`,
+    `    ${stopWith('unattended-upgrade exited $rc$why')}`,
     '  fi',
     `  printf '%s\\n' "$out" | sed -n 's/^Packages that will be upgraded: *//p'`,
     'else',
