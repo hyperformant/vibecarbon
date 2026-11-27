@@ -74,6 +74,12 @@ describe('clusterNodeExpectations', () => {
       { role: 'db', ip: DB_IP },
     ]);
   });
+
+  it("carries the database node's private address when the outputs have it, for the probe", () => {
+    expect(
+      clusterNodeExpectations({ masterIp: MASTER_IP, dbIp: DB_IP, dbPrivateIp: '10.0.1.3' })[1],
+    ).toEqual({ role: 'db', ip: DB_IP, privateIp: '10.0.1.3' });
+  });
 });
 
 describe('parseNodeList', () => {
@@ -291,6 +297,106 @@ describe('awaitNodesJoined', () => {
   });
 });
 
+describe('awaitNodesJoined probes a server that never registered from its k3s server', () => {
+  const VIEW_LINE = 'Vultr says it is ok, power running, subscription active in ord.';
+  const PROBE_SENTENCE =
+    'From the k3s server, its private address 10.1.96.4 answers (2 of 2 pings came back and ' +
+    'port 22 is open), so the server is up: its public network or its boot is the problem.';
+
+  it('at the deadline, after the provider view, for the unregistered nodes only, with their views', async () => {
+    const clock = fakeClock();
+    const order: string[] = [];
+    const views = new Map();
+    const describeServers = vi.fn(async (missing: Parameters<typeof unjoinedNodes>[1]) => {
+      order.push('view');
+      for (const n of missing) views.set(n, { line: VIEW_LINE, privateIp: '10.1.96.4' });
+      return views;
+    });
+    const probeFromCluster = vi.fn(async (nodes: Parameters<typeof unjoinedNodes>[1]) => {
+      order.push('probe');
+      return new Map(nodes.map((n) => [n, PROBE_SENTENCE]));
+    });
+    const err = await awaitNodesJoined({
+      expected,
+      // The worker registered and is NotReady; the database node never registered.
+      readNodes: async () => json([master, { ...worker, status: 'NotReady' }]),
+      deadline: clock.now() + NODE_JOIN_BUDGET_MS,
+      describeServers,
+      probeFromCluster,
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(order).toEqual(['view', 'probe']);
+    expect(probeFromCluster).toHaveBeenCalledTimes(1);
+    const [probed, passedViews] = probeFromCluster.mock.calls[0] as unknown as [
+      Array<{ role: string; state: string }>,
+      Map<unknown, unknown>,
+    ];
+    expect(probed).toEqual([{ role: 'db', ip: DB_IP, state: 'unregistered' }]);
+    expect(passedViews).toBe(views);
+    const lines = err.message.split('\n');
+    expect(lines[0]).toBe(
+      `the database node at ${DB_IP} never joined the cluster: 600s after the k3s server came ` +
+        `up it still had not registered, and the database runs only on that node. ${VIEW_LINE} ` +
+        PROBE_SENTENCE,
+    );
+    // The NotReady worker's line carries its view and no probe.
+    expect(lines[1]).toMatch(/^the worker p-worker-1 .* was not Ready/);
+    expect(lines[1]).toContain(VIEW_LINE);
+    expect(lines[1]).not.toContain('From the k3s server');
+    expect(err.message).not.toMatch(DASHES);
+  });
+
+  it('a probe that throws is one log line, and the failure is thrown as it was', async () => {
+    const clock = fakeClock();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const err = await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, worker]),
+      deadline: clock.now(),
+      probeFromCluster: async () => {
+        throw new Error('ssh: connect to host 10.0.0.9 port 22: Connection timed out\nmore');
+      },
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(err.missing).toEqual([{ role: 'db', ip: DB_IP, state: 'unregistered' }]);
+    expect(err.message.split('\n')[0]).toBe(
+      `the database node at ${DB_IP} never joined the cluster: 600s after the k3s server came ` +
+        'up it still had not registered, and the database runs only on that node.',
+    );
+    const said = error.mock.calls.map(([s]) => String(s)).filter((s) => s.includes('probe'));
+    expect(said).toEqual([
+      '[node-join] could not probe from the k3s server: ssh: connect to host 10.0.0.9 port 22: Connection timed out',
+    ]);
+  });
+
+  it('is not run when every node left is registered: a NotReady node gets no probe', async () => {
+    const clock = fakeClock();
+    const probeFromCluster = vi.fn(async () => new Map());
+    const err = await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, { ...db, status: 'NotReady' }, worker]),
+      deadline: clock.now(),
+      probeFromCluster,
+      ...clock,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NodesNeverJoinedError);
+    expect(probeFromCluster).not.toHaveBeenCalled();
+  });
+
+  it('is not run when every node joined', async () => {
+    const probeFromCluster = vi.fn(async () => new Map());
+    await awaitNodesJoined({
+      expected,
+      readNodes: async () => json([master, db, worker]),
+      deadline: Date.now(),
+      probeFromCluster,
+    });
+    expect(probeFromCluster).not.toHaveBeenCalled();
+  });
+});
+
 describe('nodesNeverJoinedNextStep', () => {
   it('a registered node is a server that still exists: restart it, or delete it and its node', () => {
     const step = nodesNeverJoinedNextStep({ providerName: 'Linode', env: 'prod' })([
@@ -481,6 +587,46 @@ describe('providerViewLine', () => {
       }),
     ).toBe('Vultr says it is installingbooting, power running, subscription active in ewr.');
   });
+
+  // Case 3 of a node that never joins: the command waited on another address.
+  // Vultr run 45956890734: every ssh to the standby database node's address
+  // timed out while Vultr said it was running.
+  const vultrView = (publicIp: string | null) => ({
+    id: 'abc',
+    name: 'p-civ4-standby-db',
+    status: 'ok',
+    detail: 'power running, subscription active',
+    created: null,
+    location: 'ord',
+    publicIp,
+    privateIp: '10.1.96.4',
+    events: [],
+  });
+  const dbAt = { role: 'db' as const, ip: '137.220.58.74', state: 'unregistered' as const };
+
+  it('says so when the public address the provider lists is not the one the command waited on', () => {
+    expect(providerViewLine('Vultr', vultrView('45.76.1.2'), dbAt)).toBe(
+      'Vultr says it is ok, power running, subscription active in ord. Vultr lists its public ' +
+        'address as 45.76.1.2, not 137.220.58.74, the address this command waited on.',
+    );
+    expect(providerViewLine('Vultr', vultrView(null), dbAt)).toBe(
+      'Vultr says it is ok, power running, subscription active in ord. Vultr lists no public ' +
+        'address for it, though this command waited on 137.220.58.74.',
+    );
+  });
+
+  it('says nothing more when they match, or for the k3s server, whose address may be the cluster reserved IP', () => {
+    expect(providerViewLine('Vultr', vultrView('137.220.58.74'), dbAt)).toBe(
+      'Vultr says it is ok, power running, subscription active in ord.',
+    );
+    expect(
+      providerViewLine('Linode', vultrView('172.105.1.2'), {
+        role: 'master',
+        ip: '172.105.9.9',
+        state: 'unregistered',
+      }),
+    ).toBe('Linode says it is ok, power running, subscription active in ord.');
+  });
 });
 
 describe('describeServersForLog', () => {
@@ -490,6 +636,8 @@ describe('describeServersForLog', () => {
     status: 'running',
     created: '2026-11-27T02:32:10+00:00',
     location: 'nbg1-dc3',
+    publicIp: id === 222 ? DB_IP : MASTER_IP,
+    privateIp: id === 222 ? '10.0.1.2' : '10.0.1.1',
     events: [
       {
         action: 'create_server',
@@ -538,10 +686,12 @@ describe('describeServersForLog', () => {
     expect(views.get(dbNode)).toEqual({
       name: 'proj-ci4-db',
       line: 'Hetzner Cloud says it is running, created 2026-11-27 02:32:10 UTC in nbg1-dc3; its last action, create_server, is success.',
+      publicIp: DB_IP,
+      privateIp: '10.0.1.2',
     });
     expect(lines).toContain(
       `[node-join] Hetzner Cloud's view of proj-ci4-db (${DB_IP}, database node): status running, ` +
-        'created 2026-11-27T02:32:10+00:00, at nbg1-dc3, id 222',
+        `created 2026-11-27T02:32:10+00:00, at nbg1-dc3, id 222, public ${DB_IP}, private 10.0.1.2`,
     );
     expect(lines).toContain(
       '[node-join]   create_server: success, started 2026-11-27T02:32:10+00:00, finished 2026-11-27T02:32:40+00:00',
@@ -570,6 +720,36 @@ describe('describeServersForLog', () => {
         `[node-join] could not read Hetzner Cloud's view of ${DB_IP}: HTTP 401: unauthorized`,
         `[node-join] could not read Hetzner Cloud's view of ${MASTER_IP}: Hetzner Cloud answered HTTP 404 for /servers/111`,
       ]),
+    );
+  });
+
+  it("prints the provider's addresses, why a private one is unknown, and a public one that is not the node's", async () => {
+    const lines: string[] = [];
+    const views = await describeServersForLog({
+      provider: {
+        listServersDetailed: vi.fn(),
+        describeServerForDiagnosis: async () => ({
+          ...view(222, 'proj-ci4-db'),
+          publicIp: '51.15.200.7',
+          privateIp: null,
+          privateIpNote: "Scaleway's server read carries no private address; its IPAM API holds it",
+          events: [],
+          eventsNote: "Scaleway's Instance API keeps no event history for a server",
+        }),
+      } as never,
+      Provider: { ...Provider, NAME: 'Scaleway' } as never,
+      nodes: [{ ...dbNode, id: 222 }],
+      log: (l) => lines.push(l),
+    });
+    expect(lines[0]).toBe(
+      `[node-join] Scaleway's view of proj-ci4-db (${DB_IP}, database node): status running, ` +
+        'created 2026-11-27T02:32:10+00:00, at nbg1-dc3, id 222, public 51.15.200.7, private ' +
+        "unknown (Scaleway's server read carries no private address; its IPAM API holds it)",
+    );
+    const [summary] = [...views.values()];
+    expect(summary).toMatchObject({ publicIp: '51.15.200.7', privateIp: null });
+    expect(summary.line).toContain(
+      `Scaleway lists its public address as 51.15.200.7, not ${DB_IP}, the address this command waited on.`,
     );
   });
 

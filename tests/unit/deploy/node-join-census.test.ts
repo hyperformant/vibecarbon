@@ -26,12 +26,22 @@
  *     else does;
  *   - every function that reads the node list (`kubectl get nodes`) is in
  *     NODE_READERS: the check itself, or a single read that is not a wait. A
- *     new hand-rolled node poll lands here and must go through the check.
+ *     new hand-rolled node poll lands here and must go through the check;
+ *   - every call of the check passes `probeFromCluster`, the probe from the
+ *     k3s server (node-join-probe.js), or is in PROBE_EXEMPT with why, and
+ *     every call of the failover's worker wait hands it one (Vultr run
+ *     45956890734: the provider said running while the server never
+ *     answered, and nothing told a dead server from a broken network);
+ *   - every provider's view carries its own public and private address for
+ *     the server (`publicIp`, `privateIp`), driven by a fixture of that
+ *     provider's real response (VIEW_FIXTURES), so the probe has the private
+ *     address and the failure can say when the public one is not the
+ *     address waited on.
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
@@ -59,6 +69,158 @@ const FILES: Parsed[] = sourceFiles(SRC, { exts: ['.js'] }).map((abs) => ({
  * Empty: all five read it. An entry here is listed in the PR that adds it.
  */
 const NO_SERVER_VIEW: Record<string, string> = {};
+
+/**
+ * Each provider's server read in its API's own shape, by path (query cut),
+ * with the addresses its view must report. A path not listed answers 404.
+ * Sources: Hetzner GET /servers/{id} (`public_net.ipv4.ip`,
+ * `private_net[].ip`); DigitalOcean GET /droplets/{id} (`networks.v4[]` by
+ * `type`); Linode GET /linode/instances/{id} (`ipv4`, public first) and GET
+ * /linode/instances/{id}/ips (`ipv4.vpc[].address`, get-linode-ips); Vultr GET
+ * /instances/{id} (`main_ip`, `internal_ip`); Scaleway GET
+ * /instance/v1/zones/{zone}/servers/{id} (`public_ips[]`, and `private_nics[]`,
+ * which carry no address: IPAM holds it, so the view says why it has none).
+ */
+const VIEW_FIXTURES: Record<
+  string,
+  {
+    id: string | number;
+    routes: Record<string, unknown>;
+    publicIp: string | null;
+    privateIp: string | null;
+  }
+> = {
+  hetzner: {
+    id: 4242,
+    routes: {
+      '/servers/4242': {
+        server: {
+          id: 4242,
+          name: 'p-db',
+          status: 'running',
+          created: '2026-11-27T02:32:10+00:00',
+          datacenter: { name: 'nbg1-dc3' },
+          public_net: {
+            ipv4: { id: 1, ip: '167.233.172.157', blocked: false, dns_ptr: 'x' },
+            ipv6: { id: 2, ip: '2a01:4f8:1c1e::/64', blocked: false, dns_ptr: [] },
+            floating_ips: [],
+            firewalls: [],
+          },
+          private_net: [{ network: 7, ip: '10.0.1.2', alias_ips: [], mac_address: '86:00:00:01' }],
+        },
+      },
+      '/servers/4242/actions': { actions: [] },
+    },
+    publicIp: '167.233.172.157',
+    privateIp: '10.0.1.2',
+  },
+  digitalocean: {
+    id: 77,
+    routes: {
+      '/droplets/77': {
+        droplet: {
+          id: 77,
+          name: 'p-db',
+          status: 'active',
+          created_at: '2026-11-27T02:32:10Z',
+          region: { slug: 'nyc3' },
+          networks: {
+            v4: [
+              { ip_address: '10.116.0.3', netmask: '255.255.240.0', gateway: '', type: 'private' },
+              {
+                ip_address: '159.89.40.7',
+                netmask: '255.255.240.0',
+                gateway: '159.89.32.1',
+                type: 'public',
+              },
+            ],
+            v6: [],
+          },
+        },
+      },
+      '/droplets/77/actions': { actions: [] },
+    },
+    publicIp: '159.89.40.7',
+    privateIp: '10.116.0.3',
+  },
+  linode: {
+    id: 9001,
+    routes: {
+      '/linode/instances/9001': {
+        id: 9001,
+        label: 'p-db',
+        status: 'running',
+        created: '2026-11-27T02:32:10',
+        region: 'us-ord',
+        ipv4: ['172.105.12.34'],
+        ipv6: '2600:3c06::1/128',
+      },
+      '/linode/instances/9001/ips': {
+        ipv4: {
+          public: [{ address: '172.105.12.34', type: 'ipv4', public: true }],
+          private: [],
+          shared: [],
+          reserved: [],
+          vpc: [{ address: '10.0.1.3', vpc_id: 1, subnet_id: 2, linode_id: 9001, active: true }],
+        },
+      },
+      '/account/events': { data: [] },
+    },
+    publicIp: '172.105.12.34',
+    privateIp: '10.0.1.3',
+  },
+  vultr: {
+    id: 'abc-123',
+    routes: {
+      '/instances/abc-123': {
+        instance: {
+          id: 'abc-123',
+          label: 'p-db',
+          status: 'active',
+          power_status: 'running',
+          server_status: 'ok',
+          date_created: '2026-11-27T08:04:10+00:00',
+          region: 'ord',
+          main_ip: '137.220.58.74',
+          internal_ip: '10.1.96.4',
+        },
+      },
+    },
+    publicIp: '137.220.58.74',
+    privateIp: '10.1.96.4',
+  },
+  scaleway: {
+    id: 'srv-1',
+    routes: {
+      '/instance/v1/zones/fr-par-1/servers/srv-1': {
+        server: {
+          id: 'srv-1',
+          name: 'p-db',
+          state: 'running',
+          state_detail: 'booted',
+          creation_date: '2026-11-27T02:32:10Z',
+          zone: 'fr-par-1',
+          public_ip: null,
+          public_ips: [
+            { id: 'ip-6', address: '2001:bc8:1640::1', family: 'inet6' },
+            { id: 'ip-4', address: '51.15.200.7', family: 'inet' },
+          ],
+          private_nics: [
+            {
+              id: 'nic-1',
+              private_network_id: 'pn-1',
+              mac_address: '02:00:00:12:34:56',
+              state: 'available',
+              ipam_ip_ids: ['ipam-1'],
+            },
+          ],
+        },
+      },
+    },
+    publicIp: '51.15.200.7',
+    privateIp: null,
+  },
+};
 
 /** The provider ids whose class neither owns the method nor is excused. */
 function providersWithoutView(
@@ -141,6 +303,52 @@ describe('every provider can say what it knows about a server that never joined'
     // provider-contract.test.ts treats "must be implemented" as abstract and
     // would demand an override; NO_SERVER_VIEW is where an excuse lives.
     expect(source).not.toContain('must be implemented');
+  });
+
+  // The probe from the k3s server (node-join-probe.js) reads the server's
+  // private address from this view, and the failure says when its public one
+  // is not the address the command waited on (Vultr run 45956890734). So
+  // every provider's view carries both keys, from its own API's real shape.
+  it("each view carries the provider's public and private address, read from its real response shape", async () => {
+    expect(
+      Object.entries(PROVIDERS)
+        .filter(([, C]) => Object.hasOwn(C.prototype, 'describeServerForDiagnosis'))
+        .filter(([id]) => !(id in VIEW_FIXTURES))
+        .map(([id]) => id),
+    ).toEqual([]);
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    try {
+      for (const [id, Class] of Object.entries(PROVIDERS)) {
+        if (!Object.hasOwn(Class.prototype, 'describeServerForDiagnosis')) continue;
+        const fixture = VIEW_FIXTURES[id];
+        const base = (Class as unknown as { API_BASE: string }).API_BASE;
+        fetchSpy.mockImplementation(async (url: string | URL | Request) => {
+          const path = String(url).slice(base.length).split('?')[0];
+          const body = fixture.routes[path];
+          return {
+            ok: body !== undefined,
+            status: body === undefined ? 404 : 200,
+            json: async () => body,
+          } as Response;
+        });
+        const view = await new (
+          Class as unknown as new (
+            t: string,
+          ) => { describeServerForDiagnosis: (id: unknown) => Promise<Record<string, unknown>> }
+        )('t').describeServerForDiagnosis(fixture.id);
+        expect(Object.hasOwn(view, 'publicIp'), `${id}: publicIp`).toBe(true);
+        expect(Object.hasOwn(view, 'privateIp'), `${id}: privateIp`).toBe(true);
+        expect({ publicIp: view.publicIp, privateIp: view.privateIp }, id).toEqual({
+          publicIp: fixture.publicIp,
+          privateIp: fixture.privateIp,
+        });
+        if (fixture.privateIp === null) {
+          expect(String(view.privateIpNote ?? ''), `${id}: why no private address`).not.toBe('');
+        }
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   describe('the checks bite', () => {
@@ -302,6 +510,50 @@ function nodeReaders(files: Parsed[]): string[] {
   return [...keys].sort();
 }
 
+/**
+ * awaitNodesJoined calls that may go without `probeFromCluster`, each with
+ * why. Empty: the deploy and the failover both probe.
+ */
+const PROBE_EXEMPT: Record<string, string> = {};
+
+/** The options object a call passes as its argument `at`, when it is a literal. */
+function optionKeys(call: Node, at: number): string[] | null {
+  const arg = call.arguments[at];
+  if (arg?.type !== 'ObjectExpression') return null;
+  return arg.properties.map((p: Node) => p.key?.name).filter(Boolean);
+}
+
+/** Every awaitNodesJoined call without `probeFromCluster`, unless `exempt` names its function. */
+function probeFindings(files: Parsed[], exempt: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const { path, ast } of files) {
+    walkAst(ast, (n, ancestors) => {
+      if (n.type !== 'CallExpression' || calleeName(n) !== 'awaitNodesJoined') return;
+      const { key } = enclosing(path, ancestors);
+      if (Object.hasOwn(exempt, key)) return;
+      if (!optionKeys(n, 0)?.includes('probeFromCluster')) {
+        out.push(`${key} calls awaitNodesJoined without probeFromCluster`);
+      }
+    });
+  }
+  return out;
+}
+
+/** Every call of waitForWorkersReady, and whether its options pass the probe. */
+function workerWaitCalls(files: Parsed[]): Array<{ key: string; passes: boolean }> {
+  const out: Array<{ key: string; passes: boolean }> = [];
+  for (const { path, ast } of files) {
+    walkAst(ast, (n, ancestors) => {
+      if (n.type !== 'CallExpression' || calleeName(n) !== 'waitForWorkersReady') return;
+      out.push({
+        key: enclosing(path, ancestors).key,
+        passes: Boolean(optionKeys(n, 3)?.includes('probeFromCluster')),
+      });
+    });
+  }
+  return out;
+}
+
 /** Parse a synthetic source as if it were a file under src/. */
 const fake = (path: string, code: string): Parsed[] => [{ path, ast: parseAst(code) }];
 
@@ -377,6 +629,20 @@ describe('every wait that needs a node other than the k3s server checks the node
     });
   });
 
+  // A server that never registered is probed from its own k3s server at the
+  // deadline (node-join-probe.js, Vultr run 45956890734): every check passes
+  // the probe, or is listed here with why it cannot.
+  it('each awaitNodesJoined call passes the probe from the k3s server, or says why not', () => {
+    expect(probeFindings(FILES, PROBE_EXEMPT)).toEqual([]);
+    for (const why of Object.values(PROBE_EXEMPT)) expect(why.length).toBeGreaterThan(20);
+  });
+
+  it("each call of the failover's worker wait hands it the probe", () => {
+    const calls = workerWaitCalls(FILES);
+    expect(calls.length, 'no call of waitForWorkersReady found').toBeGreaterThan(0);
+    expect(calls.filter((c) => !c.passes).map((c) => c.key)).toEqual([]);
+  });
+
   it('every reader of the node list is classified, and none is stale', () => {
     const readers = nodeReaders(FILES);
     expect(readers.filter((k) => !Object.hasOwn(NODE_READERS, k))).toEqual([]);
@@ -425,6 +691,38 @@ describe('every wait that needs a node other than the k3s server checks the node
         ),
       );
       expect(siteFinding(ok, registry)).toBeNull();
+    });
+
+    it('a check without the probe, or a worker wait not handed it, is flagged', () => {
+      expect(
+        probeFindings(
+          fake('lib/new.js', 'async function grow() { await awaitNodesJoined({ expected }); }'),
+          {},
+        ),
+      ).toEqual(['lib/new.js:grow calls awaitNodesJoined without probeFromCluster']);
+      expect(
+        probeFindings(
+          fake('lib/new.js', 'async function grow() { await awaitNodesJoined({ expected }); }'),
+          { 'lib/new.js:grow': 'a reason long enough to read as one' },
+        ),
+      ).toEqual([]);
+      expect(
+        probeFindings(
+          fake(
+            'lib/new.js',
+            'async function grow() { await awaitNodesJoined({ expected, probeFromCluster }); }',
+          ),
+          {},
+        ),
+      ).toEqual([]);
+      expect(
+        workerWaitCalls(
+          fake(
+            'lib/new.js',
+            'async function grow() { await waitForWorkersReady(ip, key, 2, { deps }); }',
+          ),
+        ),
+      ).toEqual([{ key: 'lib/new.js:grow', passes: false }]);
     });
 
     it('a new node-list poll is found', () => {

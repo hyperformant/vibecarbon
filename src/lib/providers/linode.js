@@ -1063,6 +1063,13 @@ export class LinodeProvider extends BaseProvider {
    * smallest page Linode serves; the view keeps the newest
    * SERVER_VIEW_EVENTS of it. A token without the events scope still gets
    * the status, with the refusal as `eventsError`.
+   *
+   * The public address is the instance's own (getPublicIP, `ipv4[0]`). Its
+   * VPC address, which the k8s program gives each node on eth1, is not in
+   * the instance read: GET /linode/instances/{id}/ips lists it under
+   * `ipv4.vpc[]` (Linode API get-linode-ips), one more read beside the
+   * others, bounded and read once the same way. A refusal there leaves the
+   * status, with the reason as `privateIpNote`.
    * @param {number|string} serverId
    * @returns {Promise<import('./base.js').ServerProviderView>}
    */
@@ -1073,8 +1080,12 @@ export class LinodeProvider extends BaseProvider {
       '+order_by': 'created',
       '+order': 'desc',
     });
-    const [instance, history] = await Promise.all([
+    const [instance, vpcAddress, history] = await Promise.all([
       this._readForDiagnosis(`/linode/instances/${serverId}`),
+      this._readForDiagnosis(`/linode/instances/${serverId}/ips`).then(
+        ({ ipv4 }) => ({ privateIp: ipv4?.vpc?.find((v) => v?.address)?.address ?? null }),
+        (err) => ({ privateIp: null, privateIpNote: String(err?.message ?? err).slice(0, 200) }),
+      ),
       eventsOrWhyNot(
         this._readForDiagnosis('/account/events?page_size=25', {
           headers: { 'X-Filter': filter },
@@ -1095,6 +1106,8 @@ export class LinodeProvider extends BaseProvider {
       status: instance.status ?? null,
       created: instance.created ?? null,
       location: instance.region ?? null,
+      publicIp: LinodeProvider.getPublicIP(instance),
+      ...vpcAddress,
       ...history,
     };
   }

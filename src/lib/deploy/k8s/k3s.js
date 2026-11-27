@@ -180,6 +180,7 @@ import {
   NODE_JOIN_POLL_MS,
   nodesNeverJoinedNextStep,
 } from './node-join.js';
+import { clusterProbe } from './node-join-probe.js';
 import { WORKER_NODE_SELECTOR } from './node-roles.js';
 import {
   removeRetiredObservabilityCertificate,
@@ -6577,10 +6578,23 @@ async function deployK3sSteps(options, inFlight) {
     masterIp,
     masterId: infraOutputs.masterId,
     dbIp,
+    dbPrivateIp,
     workerIps,
   });
   const describeServers = (nodes) =>
     describeServersForLog({ provider: new Provider(options.apiToken), Provider, nodes });
+  // A server that never registered, probed from the k3s server it should
+  // have joined (node-join-probe.js): one ssh to the master with the deploy's
+  // own key and pinned known_hosts, as prePullImages makes, killed at the
+  // probe's bound.
+  const probeFromCluster = clusterProbe({
+    providerName: Provider.NAME,
+    run: (script, { timeoutMs }) =>
+      runCommandAsync(
+        ['ssh', '-i', privateKeyPath, ...sshHostKeyOpts(khPath), `root@${masterIp}`, 'sh -s'],
+        { silent: true, input: script, timeout: timeoutMs },
+      ),
+  });
 
   // 4. Wait for cloud-init to finish + k3s to be Ready
   // Set when this run waited for the master, i.e. on a fresh (re)provision:
@@ -6763,6 +6777,7 @@ async function deployK3sSteps(options, inFlight) {
           ),
         deadline: nodesJoinBy,
         describeServers,
+        probeFromCluster,
         // A worker that registered and went NotReady warns and the deploy
         // goes on; a server that never registered, or a NotReady master or
         // database node, fails it.

@@ -1748,9 +1748,13 @@ export class ScalewayProvider extends BaseProvider {
    * BaseProvider.describeServerForDiagnosis): GET
    * /instance/v1/zones/{zone}/servers/{id} only, one attempt per zone until
    * one has it (the zone cache first, as getServerSummary does): `state`
-   * with its `state_detail`, `creation_date` and zone. The Instance API
-   * keeps no history of what it did to a server, so there are no recent
-   * actions to read.
+   * with its `state_detail`, `creation_date`, zone and public address
+   * (getPublicIP). No private address: the server's `private_nics[]` carry a
+   * MAC and IPAM ids, never the address, which only the IPAM API lists
+   * (scaleway-k8s.js reads it there, through the Pulumi provider), so
+   * `privateIp` is null and `privateIpNote` says why. The Instance API keeps
+   * no history of what it did to a server, so there are no recent actions to
+   * read.
    * @param {string} serverId
    * @returns {Promise<import('./base.js').ServerProviderView>}
    */
@@ -1777,6 +1781,9 @@ export class ScalewayProvider extends BaseProvider {
         detail: server.state_detail || null,
         created: server.creation_date ?? null,
         location: server.zone ?? zone,
+        publicIp: ScalewayProvider.getPublicIP(server),
+        privateIp: null,
+        privateIpNote: "Scaleway's server read carries no private address; its IPAM API holds it",
         events: [],
         eventsNote: "Scaleway's Instance API keeps no event history for a server",
       };
