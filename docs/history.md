@@ -2040,6 +2040,47 @@ Do not shorten a bound below the waits its script holds.
 **Guard:** `tests/unit/deploy/apt-daily-wait-census.test.ts`, with the wait and
 reason cases in `tests/unit/update/inspect.test.ts`.
 
+#### 2026-11-27: A volume the provider refuses to attach stops the db wait, with the provider's view (#PR)
+
+A db rollout wait now stops, with VolumeAttachRefusedError, once the db pod's
+FailedAttachVolume event carries a refusal its provider class declares
+permanent (`ATTACH_REFUSALS_PERMANENT`) and has held 120 s, the same rule as
+the stale attachment. The error quotes the provider's words, the volume, how
+many times and over how long, and says waiting does not change it. Only
+Vultr declares one: `Block storage is not compatible with this server`. In
+the deploy path the failure first logs `[db]` lines with the provider's view
+of the database server, its plan now included, and of the volume (Vultr:
+`GET /v2/blocks/{id}`, the PV's CSI handle). The restore, failover, reseed and
+retired-fence waits stop the same way, without the provider view.
+
+**Why:** Vultr runs 45940611622 and 45966805225 (vultr/k8s restore-deploy):
+each time a fresh vc2-4c-8gb database server in ewr took no NVMe volume, every
+ControllerPublishVolume answering `{"error":"Block storage is not compatible
+with this server","status":400}` until awaitDbRollout's 900 s ran out. Across
+the last three Vultr runs a fresh vc2-4c-8gb in ewr got it 2 times in 4, a
+fresh vc2-1c-2gb 0 times in about 10, and the one vc2-4c-8gb in ord attached.
+It never cleared within a server, Vultr's docs and the vultr-csi issues say
+nothing of it, and the rig was destroyed with nothing recorded of the server
+or the volume.
+
+**Do not undo:** do not add a wording to a provider's list without a run that
+measured it; an unlisted refusal keeps the wait's own timeout. Do not turn
+the stop into a retry, a server replacement, an HDD fallback or another
+StorageClass: our code does not choose where the provider places a server,
+and the error names no command because no CLI step is proven to give the db
+role a new server that takes the volume back. The e2e classifier reads it as infra (`provider refused the db volume
+attach`, class `provider-volume-attach-refusal`) by our own sentence, never
+by the cluster event.
+
+**Guard:** `tests/unit/deploy/db-attach-watch.test.ts` (the detector on both
+event shapes, the watch under and over 120 s and with an unlisted wording,
+every listed pattern held to a measured message, and the census that every
+watched db wait is handed its provider's list),
+`tests/unit/deploy/attach-refusal-view.test.ts` (bounded reads that never
+throw, named fields only) and the refusal cases in
+`tests/unit/deploy/k8s-db-statefulset.test.ts` and
+`tests/unit/e2e/classify-failure.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
@@ -2112,6 +2153,7 @@ reason cases in `tests/unit/update/inspect.test.ts`.
 | Linode | Two VPCs may share a range | No range allocation is needed, unlike DigitalOcean |
 | Vultr | Nameservers remember that a name did not exist | Same rule: never look up before create |
 | Vultr | A main IP cannot be detached until its server is gone, and the provider's instance delete returns first | k8s clusters have no reserved IP; the domain points at the master |
+| Vultr | A fresh server can refuse NVMe block storage for good ("not compatible with this server", 400), seen on vc2-4c-8gb in ewr | The db wait stops on it after 120 s and logs Vultr's view; nothing retries |
 | Vultr | Its 404 wording differs from what the provider's Read looks for, for instances, VPCs, reserved IPs and firewall rules | Those are read by id and dropped from the state before each refresh |
 | All | A fresh server may inherit a spent Docker Hub quota | Core images come from the GHCR mirror |
 

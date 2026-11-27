@@ -1748,7 +1748,8 @@ export class ScalewayProvider extends BaseProvider {
    * BaseProvider.describeServerForDiagnosis): GET
    * /instance/v1/zones/{zone}/servers/{id} only, one attempt per zone until
    * one has it (the zone cache first, as getServerSummary does): `state`
-   * with its `state_detail`, `creation_date`, zone and public address
+   * with its `state_detail`, `creation_date`, zone, `commercial_type` (as
+   * getServerSummary reads it) and public address
    * (getPublicIP). No private address: the server's `private_nics[]` carry a
    * MAC and IPAM ids, never the address, which only the IPAM API lists
    * (scaleway-k8s.js reads it there, through the Pulumi provider), so
@@ -1781,6 +1782,7 @@ export class ScalewayProvider extends BaseProvider {
         detail: server.state_detail || null,
         created: server.creation_date ?? null,
         location: server.zone ?? zone,
+        plan: server.commercial_type ?? null,
         publicIp: ScalewayProvider.getPublicIP(server),
         privateIp: null,
         privateIpNote: "Scaleway's server read carries no private address; its IPAM API holds it",

@@ -99,6 +99,19 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     pattern: /never became Ready[\s\S]{0,400}?Node\(s\) NotReady:/,
     reason: 'k8s node NotReady (host died)',
   },
+  // The provider refused to attach the db volume to the database node, in
+  // words its provider class declares permanent, and the refusal held two
+  // minutes (VolumeAttachRefusedError, watchDbAttach). Vultr runs
+  // 45940611622 and 45966805225 (2026-11-27): a fresh vc2-4c-8gb in ewr
+  // answered "Block storage is not compatible with this server" (400) for
+  // the whole 900 s, a placement nothing in the CLI chooses. Matched on OUR
+  // sentence, which only that error writes, never on the cluster event: the
+  // same event under a plain timeout stays unknown, and a wording no class
+  // declares never gets here.
+  {
+    pattern: /refused to attach the db volume \S+ to the database node/,
+    reason: 'provider refused the db volume attach',
+  },
   // Network / DNS / TLS / generic fetch noise
   {
     pattern: /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|ENETUNREACH|EAI_AGAIN/i,

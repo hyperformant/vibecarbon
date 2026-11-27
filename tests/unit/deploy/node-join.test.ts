@@ -753,6 +753,30 @@ describe('describeServersForLog', () => {
     );
   });
 
+  it("prints the plan the provider gave the server, under the caller's tag", async () => {
+    for (const [tag, prefix] of [
+      [undefined, '[node-join]'],
+      ['db', '[db]'],
+    ] as const) {
+      const lines: string[] = [];
+      await describeServersForLog({
+        provider: {
+          listServersDetailed: vi.fn(),
+          describeServerForDiagnosis: async () => ({ ...view(222, 'proj-ci4-db'), plan: 'cx33' }),
+        } as never,
+        Provider: Provider as never,
+        nodes: [{ ...dbNode, id: 222 }],
+        log: (l) => lines.push(l),
+        ...(tag && { tag }),
+      });
+      expect(lines[0]).toBe(
+        `${prefix} Hetzner Cloud's view of proj-ci4-db (${DB_IP}, database node): status running, ` +
+          `created 2026-11-27T02:32:10+00:00, at nbg1-dc3, id 222, public ${DB_IP}, private 10.0.1.2, plan cx33`,
+      );
+      expect(lines.slice(1).every((l) => l.startsWith(`${prefix}   `))).toBe(true);
+    }
+  });
+
   it('a server the listing does not have is said plainly', async () => {
     const lines: string[] = [];
     await describeServersForLog({

@@ -80,6 +80,7 @@ import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
   assertLiveDbGuardSupportsReseed,
   assertStandbyNotWriteFenced,
+  attachRefusalsOf,
   DbGuardMissingError,
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
@@ -366,13 +367,15 @@ async function promoteStandbyDatabase(standbyIp, sshKeyPath) {
  * @param {object} servers
  * @param {string} sshKeyPath
  * @param {{ start: Function, stop: Function }} s
- * @param {{ onSeeded?: (systemIdentifier: string) => void }} [opts]
+ * @param {{ onSeeded?: (systemIdentifier: string) => void, attachRefusals?: import('./lib/deploy/replication.js').AttachRefusals }} [opts]
+ *   `attachRefusals`: the provider's permanent volume attach refusals, for the
+ *   standby db's wait when the reseed recreated its pod (watchDbAttach)
  */
 async function reseedStandbyOrAbort(
   servers,
   sshKeyPath,
   s,
-  { onSeeded, mustReseed = false, envName } = {},
+  { onSeeded, mustReseed = false, envName, attachRefusals } = {},
 ) {
   // Skip the re-seed when the standby is already verifiably streaming. A
   // streaming standby is in-parity with the primary (that is exactly what
@@ -410,6 +413,7 @@ async function reseedStandbyOrAbort(
       primaryIp: servers.primary.ip,
       envName,
       onSeeded,
+      attachRefusals,
     });
   } catch (err) {
     s.stop('Re-seed failed, aborting failover');
@@ -2745,6 +2749,9 @@ export async function failoverHA(
       let reseeded = false;
       await reseed(servers, sshKeyPath, s, {
         envName,
+        // A volume attach the provider refuses for good stops the standby
+        // db's wait at once, by name.
+        attachRefusals: attachRefusalsOf(providerFor(envConfig)),
         // A standby the gate found not streaming has no catch-up proof, so a
         // later streaming read must not skip its reseed.
         mustReseed: planned && caughtUp === false,

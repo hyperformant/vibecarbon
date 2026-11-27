@@ -781,6 +781,7 @@ function parsePodIdentity(podJson) {
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {string} [options.envName] - the environment (named in the reseed's refusals)
  * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval when the reseed's restart recreated the pod
+ * @param {import('../../replication.js').AttachRefusals} [options.attachRefusals] - the provider's permanent volume attach refusals, for that same wait
  * @param {object|null} [options.discardableStandby] the env's ha.discardableStandby: the
  *   standby copy a `failover -abort` gave up, which the lineage check lets the reseed overwrite
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (role + slot, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
@@ -1053,6 +1054,7 @@ export async function setupReplication(options) {
             label: 'ha-replication',
           }),
         attachWatchPollMs: options.attachWatchPollMs,
+        attachRefusals: options.attachRefusals,
       }),
     );
   } catch (error) {

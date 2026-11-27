@@ -380,6 +380,30 @@ classes:
       fresh host.
     sites: []
 
+  - class: provider-volume-attach-refusal
+    attribution: external-proven
+    evidence: >-
+      The provider refusing, for good, to attach a block volume to the server
+      it placed. Vultr run 45940611622 and run 45966805225 (2026-11-27,
+      vultr/k8s restore-deploy, each a fresh vc2-4c-8gb database server in
+      ewr): every ControllerPublishVolume for 900 s failed with
+      `storage handler unable to attach block storage :
+      {"error":"Block storage is not compatible with this server","status":400}`
+      and db-0 sat Pending until the db wait's budget ran out. Across the last
+      three Vultr runs a fresh vc2-4c-8gb in ewr got it 2 times in 4, a fresh
+      vc2-1c-2gb 0 times in about 10, and the one vc2-4c-8gb in ord attached;
+      within one server it never cleared. Vultr's docs, API reference and the
+      vultr-csi issues say nothing of it (the only documented exclusion is
+      bare metal). Detection is a diagnosis, not a mitigation:
+      watchDbAttach (replication.js) stops the db wait once a refusal the
+      provider class declares permanent (ATTACH_REFUSALS_PERMANENT) has held
+      two minutes, with VolumeAttachRefusedError, and the deploy logs the
+      provider's view of the server and the volume; nothing is retried or
+      replaced, so it carries no sites. The classifier matches only that
+      error's own sentence. Another server is the only remedy: the rebuilt
+      run lands on a fresh one.
+    sites: []
+
   - class: provider-api-outages
     attribution: external-proven
     evidence: >-
@@ -415,3 +439,4 @@ flakeRetry:
   - { reason: "SSH connection blip", class: ssh-transport-blips }
   - { reason: "LE cert pending", class: acme-issuance-pending }
   - { reason: "k8s node NotReady (host died)", class: provider-host-failure }
+  - { reason: "provider refused the db volume attach", class: provider-volume-attach-refusal }

@@ -36,7 +36,11 @@
  *     the server (`publicIp`, `privateIp`), driven by a fixture of that
  *     provider's real response (VIEW_FIXTURES), so the probe has the private
  *     address and the failure can say when the public one is not the
- *     address waited on.
+ *     address waited on; and its plan (`plan`: Hetzner `server_type.name`,
+ *     DigitalOcean `size_slug`, Linode `type`, Vultr `plan`, Scaleway
+ *     `commercial_type`, the fields each getServerSummary reads), which a
+ *     refused volume attach logs beside it (Vultr runs 45940611622 and
+ *     45966805225).
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -88,6 +92,7 @@ const VIEW_FIXTURES: Record<
     routes: Record<string, unknown>;
     publicIp: string | null;
     privateIp: string | null;
+    plan: string;
   }
 > = {
   hetzner: {
@@ -100,6 +105,7 @@ const VIEW_FIXTURES: Record<
           status: 'running',
           created: '2026-11-27T02:32:10+00:00',
           datacenter: { name: 'nbg1-dc3' },
+          server_type: { id: 109, name: 'cx33', cores: 4 },
           public_net: {
             ipv4: { id: 1, ip: '167.233.172.157', blocked: false, dns_ptr: 'x' },
             ipv6: { id: 2, ip: '2a01:4f8:1c1e::/64', blocked: false, dns_ptr: [] },
@@ -113,6 +119,7 @@ const VIEW_FIXTURES: Record<
     },
     publicIp: '167.233.172.157',
     privateIp: '10.0.1.2',
+    plan: 'cx33',
   },
   digitalocean: {
     id: 77,
@@ -124,6 +131,7 @@ const VIEW_FIXTURES: Record<
           status: 'active',
           created_at: '2026-11-27T02:32:10Z',
           region: { slug: 'nyc3' },
+          size_slug: 's-2vcpu-4gb',
           networks: {
             v4: [
               { ip_address: '10.116.0.3', netmask: '255.255.240.0', gateway: '', type: 'private' },
@@ -142,6 +150,7 @@ const VIEW_FIXTURES: Record<
     },
     publicIp: '159.89.40.7',
     privateIp: '10.116.0.3',
+    plan: 's-2vcpu-4gb',
   },
   linode: {
     id: 9001,
@@ -152,6 +161,7 @@ const VIEW_FIXTURES: Record<
         status: 'running',
         created: '2026-11-27T02:32:10',
         region: 'us-ord',
+        type: 'g6-standard-2',
         ipv4: ['172.105.12.34'],
         ipv6: '2600:3c06::1/128',
       },
@@ -168,6 +178,7 @@ const VIEW_FIXTURES: Record<
     },
     publicIp: '172.105.12.34',
     privateIp: '10.0.1.3',
+    plan: 'g6-standard-2',
   },
   vultr: {
     id: 'abc-123',
@@ -181,6 +192,7 @@ const VIEW_FIXTURES: Record<
           server_status: 'ok',
           date_created: '2026-11-27T08:04:10+00:00',
           region: 'ord',
+          plan: 'vc2-4c-8gb',
           main_ip: '137.220.58.74',
           internal_ip: '10.1.96.4',
         },
@@ -188,6 +200,7 @@ const VIEW_FIXTURES: Record<
     },
     publicIp: '137.220.58.74',
     privateIp: '10.1.96.4',
+    plan: 'vc2-4c-8gb',
   },
   scaleway: {
     id: 'srv-1',
@@ -200,6 +213,7 @@ const VIEW_FIXTURES: Record<
           state_detail: 'booted',
           creation_date: '2026-11-27T02:32:10Z',
           zone: 'fr-par-1',
+          commercial_type: 'DEV1-M',
           public_ip: null,
           public_ips: [
             { id: 'ip-6', address: '2001:bc8:1640::1', family: 'inet6' },
@@ -219,6 +233,7 @@ const VIEW_FIXTURES: Record<
     },
     publicIp: '51.15.200.7',
     privateIp: null,
+    plan: 'DEV1-M',
   },
 };
 
@@ -345,6 +360,9 @@ describe('every provider can say what it knows about a server that never joined'
         if (fixture.privateIp === null) {
           expect(String(view.privateIpNote ?? ''), `${id}: why no private address`).not.toBe('');
         }
+        // The size the provider gave it (getServerSummary reads the same
+        // field), so a failure log names the plan the server runs.
+        expect(view.plan, `${id}: plan`).toBe(fixture.plan);
       }
     } finally {
       fetchSpy.mockRestore();

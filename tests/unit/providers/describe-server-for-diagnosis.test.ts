@@ -74,6 +74,7 @@ describe('HetznerProvider.describeServerForDiagnosis', () => {
     status: 'running',
     created: '2026-11-27T02:32:10+00:00',
     datacenter: { name: 'nbg1-dc3', location: { name: 'nbg1' } },
+    server_type: { id: 109, name: 'cx33', cores: 4, memory: 8, disk: 80 },
     public_net: {
       ipv4: { id: 51, ip: '167.233.172.157', blocked: false, dns_ptr: 'static.example' },
       ipv6: { id: 52, ip: '2a01:4f8:1c1e::/64', blocked: false, dns_ptr: [] },
@@ -114,6 +115,7 @@ describe('HetznerProvider.describeServerForDiagnosis', () => {
       status: 'running',
       created: '2026-11-27T02:32:10+00:00',
       location: 'nbg1-dc3',
+      plan: 'cx33',
       publicIp: '167.233.172.157',
       privateIp: '10.0.1.2',
       events: [
@@ -186,6 +188,7 @@ describe('DigitalOceanProvider.describeServerForDiagnosis', () => {
           status: 'new',
           created_at: '2026-11-27T02:32:10Z',
           region: { slug: 'nyc3' },
+          size_slug: 's-2vcpu-4gb',
           // DigitalOcean lists the VPC address first as often as not.
           networks: {
             v4: [
@@ -219,6 +222,7 @@ describe('DigitalOceanProvider.describeServerForDiagnosis', () => {
       status: 'new',
       created: '2026-11-27T02:32:10Z',
       location: 'nyc3',
+      plan: 's-2vcpu-4gb',
       publicIp: '159.89.40.7',
       privateIp: '10.116.0.3',
       events: [
@@ -245,6 +249,7 @@ describe('LinodeProvider.describeServerForDiagnosis', () => {
     status: 'provisioning',
     created: '2026-11-27T02:32:10',
     region: 'us-ord',
+    type: 'g6-standard-2',
     ipv4: ['172.105.12.34'],
     ipv6: '2600:3c06::f03c:95ff:fe12:3456/128',
   };
@@ -297,6 +302,7 @@ describe('LinodeProvider.describeServerForDiagnosis', () => {
       name: 'proj-ci4-db',
       status: 'provisioning',
       location: 'us-ord',
+      plan: 'g6-standard-2',
       publicIp: '172.105.12.34',
       privateIp: '10.0.1.3',
       events: [
@@ -366,10 +372,14 @@ describe('VultrProvider.describeServerForDiagnosis', () => {
           server_status: 'installingbooting',
           date_created: '2026-11-27T02:32:10+00:00',
           region: 'ewr',
+          plan: 'vc2-4c-8gb',
           main_ip: '137.220.58.74',
           internal_ip: '10.1.96.4',
           v6_main_ip: '2001:19f0:5c01:1234:5400:05ff:fe12:3456',
           vpc_id: '',
+          // Never part of the view, and so never logged.
+          default_password: 'Zq9-not-a-real-password',
+          kvm: 'https://my.vultr.com/subs/vps/novnc/api.php?data=kvm-token-not-real',
         },
       }),
     });
@@ -381,11 +391,13 @@ describe('VultrProvider.describeServerForDiagnosis', () => {
       detail: 'power running, subscription active',
       created: '2026-11-27T02:32:10+00:00',
       location: 'ewr',
+      plan: 'vc2-4c-8gb',
       publicIp: '137.220.58.74',
       privateIp: '10.1.96.4',
       events: [],
       eventsNote: "Vultr's API keeps no event history for an instance",
     });
+    expect(JSON.stringify(view)).not.toMatch(/Zq9-not-a-real-password|kvm-token-not-real/);
     expectReadOnly(1);
   });
 
@@ -416,6 +428,7 @@ describe('ScalewayProvider.describeServerForDiagnosis', () => {
     state_detail: 'provisioning node',
     creation_date: '2026-11-27T02:32:10Z',
     zone: 'nl-ams-1',
+    commercial_type: 'DEV1-M',
     // Routed-IP era: the flexible IPs, and the Private Network NIC, which
     // carries no address (IPAM holds it: ipam_ip_ids).
     public_ip: null,
@@ -452,6 +465,7 @@ describe('ScalewayProvider.describeServerForDiagnosis', () => {
       detail: 'provisioning node',
       created: '2026-11-27T02:32:10Z',
       location: 'nl-ams-1',
+      plan: 'DEV1-M',
       publicIp: '51.15.200.7',
       privateIp: null,
       privateIpNote: "Scaleway's server read carries no private address; its IPAM API holds it",
@@ -499,6 +513,89 @@ describe('BaseProvider.describeServerForDiagnosis', () => {
     await expect(new NoView('t').describeServerForDiagnosis(1)).rejects.toThrow(
       /Example Cloud has no read of a server's own status/,
     );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describeVolumeForDiagnosis: the provider's view of the db volume, read only
+// when the provider refused to attach it (VolumeAttachRefusedError; Vultr
+// runs 45940611622 and 45966805225)
+// ---------------------------------------------------------------------------
+
+describe('VultrProvider.describeVolumeForDiagnosis', () => {
+  // GET /v2/blocks/{block-id}, the API reference's response shape.
+  const block = {
+    id: 'cb676a46-66fd-4dfb-b839-443f2e6c0b60',
+    date_created: '2026-11-27T09:19:02+00:00',
+    cost: 1,
+    pending_charges: 0.02,
+    status: 'active',
+    size_gb: 10,
+    region: 'ewr',
+    attached_to_instance: '',
+    attached_to_instance_ip: '',
+    attached_to_instance_label: '',
+    attached_to_instance_as_bd: false,
+    label: 'pvc-d77e8ece45b54f59',
+    mount_id: 'ewr-2f7a0c1d3e4b5a69',
+    block_type: 'high_perf',
+    os_id: 0,
+    snapshot_id: '',
+    bootable: false,
+  };
+
+  it('one read of the block, only its named fields', async () => {
+    answer(VultrProvider.API_BASE, { [`/blocks/${block.id}`]: ok({ block }) });
+    const view = await new VultrProvider('t').describeVolumeForDiagnosis(block.id);
+    expect(view).toEqual({
+      id: block.id,
+      label: 'pvc-d77e8ece45b54f59',
+      blockType: 'high_perf',
+      region: 'ewr',
+      sizeGb: 10,
+      status: 'active',
+      attachedToInstance: null,
+      created: '2026-11-27T09:19:02+00:00',
+    });
+    expectReadOnly(1);
+  });
+
+  it('a block attached to an instance names it', async () => {
+    answer(VultrProvider.API_BASE, {
+      [`/blocks/${block.id}`]: ok({ block: { ...block, attached_to_instance: 'inst-9' } }),
+    });
+    const view = await new VultrProvider('t').describeVolumeForDiagnosis(block.id);
+    expect(view?.attachedToInstance).toBe('inst-9');
+  });
+
+  it('a block it cannot read throws, with the status code', async () => {
+    answer(VultrProvider.API_BASE, { [`/blocks/${block.id}`]: { status: 404 } });
+    await expect(new VultrProvider('t').describeVolumeForDiagnosis(block.id)).rejects.toMatchObject(
+      {
+        status: 404,
+        message: `Vultr answered HTTP 404 for /blocks/${block.id}`,
+      },
+    );
+  });
+
+  it('an id that is not a block id is never put in a path', async () => {
+    await expect(
+      new VultrProvider('t').describeVolumeForDiagnosis('../instances/x'),
+    ).rejects.toThrow(/not a Vultr block storage id/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('BaseProvider.describeVolumeForDiagnosis', () => {
+  it('null: not read, and nothing is fetched', async () => {
+    class NoVolumeView extends BaseProvider {
+      static NAME = 'Example Cloud';
+    }
+    await expect(new NoVolumeView('t').describeVolumeForDiagnosis('v-1')).resolves.toBeNull();
+    for (const Class of [HetznerProvider, DigitalOceanProvider, LinodeProvider, ScalewayProvider]) {
+      await expect(new Class('t').describeVolumeForDiagnosis('v-1')).resolves.toBeNull();
+    }
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

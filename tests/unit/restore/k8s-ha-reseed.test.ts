@@ -186,6 +186,9 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
       envName: 'prod',
       // The restored primary's lineage is what the standby now holds: record it.
       onSeeded: expect.any(Function),
+      // The env's provider's permanent volume attach refusals, for the standby
+      // db's wait (watchDbAttach); this env names none, so Hetzner's: none.
+      attachRefusals: { provider: 'Hetzner Cloud', permanent: [] },
     });
     // Verify reads pg_stat_replication on the PRIMARY master.
     expect(readReplicationState).toHaveBeenCalledWith('10.0.1.1', '/tmp/key');

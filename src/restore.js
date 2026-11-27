@@ -61,6 +61,7 @@ import {
 import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
   assertLiveDbGuardSupportsReseed,
+  attachRefusalsOf,
   DbGuardMissingError,
   k8sPsqlRunner,
   ReseedStageBusyError,
@@ -83,6 +84,7 @@ import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { providerFor } from './lib/providers/index.js';
 import { getPostgresPod, sshKeyPathFor, sshKubectl } from './lib/ssh.js';
 import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
@@ -1246,6 +1248,8 @@ export async function runK8sRestore({
         {
           kubectl: (argv, opts) => sshKubectl(serverIp, sshKeyPath, argv, opts),
           pollMs: attachWatchPollMs,
+          // ...and so does a refusal this provider declares permanent.
+          attachRefusals: attachRefusalsOf(providerFor(envConfig)),
         },
       );
     });
@@ -1408,6 +1412,8 @@ export async function runK8sRestore({
           // The restored primary may carry another lineage than the last seed
           // (a backup from before a re-create): record what the standby now holds.
           onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+          // The standby db's wait, when the reseed recreated its pod.
+          attachRefusals: attachRefusalsOf(providerFor(envConfig)),
         });
       } catch (err) {
         s.stop('Standby re-seed failed');

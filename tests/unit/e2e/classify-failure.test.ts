@@ -8,8 +8,18 @@ import { describe, expect, it } from 'vitest';
 import { standbyDbRebuildHint } from '../../../src/lib/deploy/db-workload.js';
 import { summarizeDbPods, summarizeNotReadyNodes } from '../../../src/lib/deploy/k8s/k3s.js';
 import { awaitDbPodReady } from '../../../src/lib/deploy/k8s/readiness.js';
+import {
+  attachRefusalsOf,
+  persistentAttachRefusal,
+  VolumeAttachRefusedError,
+} from '../../../src/lib/deploy/replication.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { readRepoFile } from '../../_shared/source-files.js';
-import { DB_POD_UID, FAILED_ATTACH_MESSAGE } from '../../_shared/vultr-failed-attach-event.js';
+import {
+  DB_POD_UID,
+  FAILED_ATTACH_MESSAGE,
+  failedAttachEvent,
+} from '../../_shared/vultr-failed-attach-event.js';
 import {
   CODE_PATTERNS,
   classifiableTail,
@@ -596,6 +606,54 @@ describe("the skipped apply's last-warning clause never decides a classification
       await skippedApplyFailure({ reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE }),
     );
     expect(classifiableTail(alone, 1000)).toBe(alone);
+  });
+});
+
+describe("a volume the provider refused to attach is the provider's, not ours", () => {
+  // The error awaitDbRollout throws when the refusal held (watchDbAttach,
+  // VolumeAttachRefusedError), built by the product's own code from the
+  // event of perf run 45940611622 (run 45966805225 hit the same).
+  const PODS = `db-0   Pending   <none>   ${DB_POD_UID}\n`;
+  const { provider } = attachRefusalsOf(VultrProvider);
+  const refusal = persistentAttachRefusal(JSON.stringify({ items: [failedAttachEvent()] }), {
+    permanent: VultrProvider.ATTACH_REFUSALS_PERMANENT,
+  });
+  const thrown = () => {
+    if (!refusal) throw new Error('the fixture no longer reads as a refusal');
+    const summary = summarizeDbPods(
+      PODS,
+      new Map([['db-0', { reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE }]]),
+    );
+    return `awaitDbRollout: ${new VolumeAttachRefusedError({ ...refusal, provider }).message} ${summary}`;
+  };
+  const INFRA = { category: 'infra', reason: 'provider refused the db volume attach' };
+
+  it('classifies as infra, by our own words and never the cluster event', () => {
+    expect(classifyFailure({ errorMessage: thrown() })).toEqual(INFRA);
+    // The same event under a plain timeout stays ours until proven otherwise.
+    const timeout =
+      'awaitDbRollout: statefulset/db did not become Ready within 900s (error: timed out). ' +
+      summarizeDbPods(
+        PODS,
+        new Map([['db-0', { reason: 'FailedAttachVolume', message: FAILED_ATTACH_MESSAGE }]]),
+      );
+    expect(classifyFailure({ errorMessage: timeout })).toEqual({ category: 'unknown' });
+  });
+
+  it("survives the step's tail cut, on a k8s-ha standby too", () => {
+    const deploy = `Error: ${thrown()} | [perf] deploy.k3s.awaitDb 120123ms (failed)`;
+    // The refusal carries no standby rebuild hint: only a timeout does.
+    const ha =
+      `Error: HA deploy failed — standby: ${thrown()} | ` +
+      '[perf] deploy.k3s-ha.standby.awaitDb 120123ms (failed)';
+    for (const detail of [deploy, ha]) {
+      expect(
+        classifyFailure({
+          errorMessage: `deploy -restore latest exited with code 1: ${classifiableTail(detail, 1000)}`,
+        }),
+        detail,
+      ).toEqual(INFRA);
+    }
   });
 });
 

@@ -131,6 +131,9 @@ export function cidrToVultrRuleFields(cidr) {
   return { ip_type: isV6 ? 'v6' : 'v4', subnet, subnet_size };
 }
 
+/** A Vultr block storage id (vultr-csi's volumeHandle): a lowercase UUID, never anything else in a path. */
+const VULTR_BLOCK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /** walkCursor's page size and page guard: it reads at most 10,000 of a kind. */
 const WALK_PAGE_SIZE = 500;
 const WALK_MAX_PAGES = 20;
@@ -379,6 +382,23 @@ export class VultrProvider extends BaseProvider {
    * @type {string}
    */
   static K8S_STORAGE_CLASS = 'vultr-block-storage-vibecarbon';
+
+  /**
+   * Vultr's refusal to attach NVMe block storage to a server, which never
+   * cleared on the server that got it: runs 45940611622 and 45966805225
+   * (2026-11-27, vultr/k8s restore-deploy, each a fresh vc2-4c-8gb database
+   * server in ewr), where every ControllerPublishVolume for 900 s answered
+   * `{"error":"Block storage is not compatible with this server","status":400}`
+   * and db-0 sat Pending for the whole db wait. Across the last three Vultr
+   * runs a fresh vc2-4c-8gb in ewr got it 2 times in 4, a fresh vc2-1c-2gb 0
+   * times in about 10, and the one vc2-4c-8gb in ord attached. Vultr's docs,
+   * API reference and the vultr-csi issues say nothing of it. See
+   * BaseProvider.ATTACH_REFUSALS_PERMANENT.
+   * @type {ReadonlyArray<RegExp>}
+   */
+  static ATTACH_REFUSALS_PERMANENT = Object.freeze([
+    /Block storage is not compatible with this server/,
+  ]);
 
   /**
    * Vultr's NVMe block volumes start at 10 GB (POST /v2/blocks), and
@@ -899,7 +919,10 @@ export class VultrProvider extends BaseProvider {
    * BaseProvider.describeServerForDiagnosis): GET /instances/{id} only.
    * `server_status` is the operating system's state (`installingbooting`,
    * `ok`: see waitForServer), and the power and subscription states ride
-   * beside it as `detail`. Its addresses are `main_ip` (getPublicIP, which
+   * beside it as `detail`, and its plan is `plan` (as getServerSummary reads
+   * it). Only named fields are taken: the instance read also carries its
+   * `default_password` and a `kvm` console URL, which never reach the view or
+   * a log. Its addresses are `main_ip` (getPublicIP, which
    * reads the '0.0.0.0' placeholder as none) and `internal_ip`, its VPC
    * address, empty until it has one. Vultr's API keeps no history of what it
    * did to an instance, so there are no recent actions to read.
@@ -916,10 +939,39 @@ export class VultrProvider extends BaseProvider {
       detail: `power ${instance.power_status ?? '?'}, subscription ${instance.status ?? '?'}`,
       created: instance.date_created ?? null,
       location: instance.region ?? null,
+      plan: instance.plan ?? null,
       publicIp: VultrProvider.getPublicIP(instance),
       privateIp: instance.internal_ip || null,
       events: [],
       eventsNote: "Vultr's API keeps no event history for an instance",
+    };
+  }
+
+  /**
+   * Vultr's view of a block storage volume for the log of a refused attach
+   * (see BaseProvider.describeVolumeForDiagnosis): GET /blocks/{id} once,
+   * and only its named fields, `block_type`, `region`, `size_gb`, `status`,
+   * `attached_to_instance` (empty when detached) and `date_created`, beside
+   * its id and label. The id is vultr-csi's volumeHandle, a UUID; anything
+   * else is refused before a request is made.
+   * @param {string} volumeId
+   * @returns {Promise<import('./base.js').VolumeProviderView>}
+   */
+  async describeVolumeForDiagnosis(volumeId) {
+    if (!VULTR_BLOCK_ID.test(String(volumeId))) {
+      throw new Error(`${JSON.stringify(volumeId)} is not a Vultr block storage id`);
+    }
+    const { block } = await this._readForDiagnosis(`/blocks/${volumeId}`);
+    if (!block) throw new Error(`Vultr returned no block storage for ${volumeId}`);
+    return {
+      id: block.id,
+      label: block.label || null,
+      blockType: block.block_type ?? null,
+      region: block.region ?? null,
+      sizeGb: block.size_gb ?? null,
+      status: block.status ?? null,
+      attachedToInstance: block.attached_to_instance || null,
+      created: block.date_created ?? null,
     };
   }
 

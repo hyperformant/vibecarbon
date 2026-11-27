@@ -58,7 +58,7 @@ import {
 import { haSshKeyName } from '../k8s/ha-ssh-key.js';
 import { clusterIngressIp } from '../k8s/ingress-ip.js';
 import { deployK3s } from '../k8s/k3s.js';
-import { assertReplicationStreamingOrDegraded } from '../replication.js';
+import { assertReplicationStreamingOrDegraded, attachRefusalsOf } from '../replication.js';
 import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
 import { k8sStandbyTypes } from '../standby-types.js';
 import { StateTracker } from '../state.js';
@@ -729,6 +729,9 @@ async function haK8sConfigureReplication(ctx) {
       primaryConfigured: ctx.primaryReplicationConfigured === true,
       envName: options.environment,
       discardableStandby,
+      // A volume attach the provider refuses for good stops the standby db's
+      // wait at once, by name, when the reseed recreated its pod.
+      attachRefusals: attachRefusalsOf(providerFor(options)),
     });
     // The swap replaced the standby's data directory, or the standby streams
     // from the primary (verified, with or without a reseed): either way the

@@ -1107,3 +1107,114 @@ describe('awaitDbRollout: a stale volume attachment fails the wait early, by nam
     expect(polls).toBeGreaterThanOrEqual(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The db rollout wait stops on a refusal the provider declares permanent
+// (Vultr runs 45940611622 and 45966805225: "Block storage is not compatible
+// with this server" for the whole 900 s), names it, and records the
+// provider's view of the server and the volume first
+// ---------------------------------------------------------------------------
+
+const { attachRefusalsOf, VolumeAttachRefusedError } = await import(
+  '../../../src/lib/deploy/replication.js'
+);
+const { VultrProvider } = await import('../../../src/lib/providers/vultr.js');
+
+describe('awaitDbRollout: a volume the provider refuses to attach stops the wait, by name', () => {
+  const VULTR = attachRefusalsOf(VultrProvider);
+  const PENDING = `db-0   Pending   <none>   ${DB_POD_UID}\n`;
+  const hangingRollout = (_args: string[], { signal }: { signal: AbortSignal }) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  const describeDbPodsSees = (event: Doc) => {
+    scripted = [
+      { match: 'get pods', stdout: PENDING },
+      { match: 'get events', stdout: JSON.stringify({ kind: 'List', items: [event] }) },
+      { match: 'get nodes', stdout: 'master True\nproj-db True\n' },
+    ];
+  };
+
+  it('its message, then what the db pod is doing; the provider view is recorded first', async () => {
+    describeDbPodsSees(failedAttachEvent());
+    const order: string[] = [];
+    const onAttachRefused = vi.fn(async (refusal: unknown) => {
+      expect(refusal).toBeInstanceOf(VolumeAttachRefusedError);
+      order.push('view');
+    });
+    const err = (await awaitDbRollout({
+      env,
+      staleAttachPollMs: 1,
+      attachRefusals: VULTR,
+      onAttachRefused,
+      waitRollout: hangingRollout,
+      kubectl: clusterReader(DB_POD_UID, [failedAttachEvent()]),
+    }).catch((e: Error) => {
+      order.push('thrown');
+      return e;
+    })) as Error;
+    expect(onAttachRefused).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['view', 'thrown']);
+    expect(err.message).toMatch(
+      /^awaitDbRollout: Vultr refused to attach the db volume pvc-8d578e6fd25c44b0 to the database node, 15 times over 906s, in its own words: "Block storage is not compatible with this server"\. /,
+    );
+    expect(err.message).toContain(
+      `The db pod never became Ready: db-0 (Pending; last warning FailedAttachVolume: ${FAILED_ATTACH_MESSAGE}).`,
+    );
+    expect(err.message).not.toContain('did not become Ready within');
+  });
+
+  it('a view that fails never replaces the failure it describes', async () => {
+    describeDbPodsSees(failedAttachEvent());
+    const err = (await awaitDbRollout({
+      env,
+      staleAttachPollMs: 1,
+      attachRefusals: VULTR,
+      onAttachRefused: async () => {
+        throw new Error('view blew up');
+      },
+      waitRollout: hangingRollout,
+      kubectl: clusterReader(DB_POD_UID, [failedAttachEvent()]),
+    }).catch((e: Error) => e)) as Error;
+    expect(err.message).toMatch(/^awaitDbRollout: Vultr refused to attach the db volume /);
+    expect(err.message).not.toContain('view blew up');
+  });
+
+  it('any other failure keeps the timeout wording, and records no view', async () => {
+    const other = failedAttachEvent({
+      message: FAILED_ATTACH_MESSAGE.replace(
+        'Block storage is not compatible with this server',
+        'server is busy, try again',
+      ),
+    });
+    describeDbPodsSees(other);
+    const onAttachRefused = vi.fn();
+    let polls = 0;
+    const read = clusterReader(DB_POD_UID, [other]);
+    const err = (await awaitDbRollout({
+      env,
+      timeoutS: 5,
+      staleAttachPollMs: 1,
+      attachRefusals: VULTR,
+      onAttachRefused,
+      waitRollout: (_args: string[], { signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          const t = setInterval(() => {
+            if (polls >= 5) {
+              clearInterval(t);
+              reject(new Error('error: timed out waiting for the condition'));
+            }
+          }, 1);
+          signal.addEventListener('abort', () => clearInterval(t));
+        }),
+      kubectl: async (argv: string[]) => {
+        if (argv.includes('events')) polls += 1;
+        return read(argv);
+      },
+    }).catch((e: Error) => e)) as Error;
+    expect(err.message).toMatch(
+      /^awaitDbRollout: statefulset\/db did not become Ready within 5s \(error: timed out waiting for the condition\)\. /,
+    );
+    expect(onAttachRefused).not.toHaveBeenCalled();
+  });
+});

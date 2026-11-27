@@ -1056,8 +1056,8 @@ export class LinodeProvider extends BaseProvider {
   /**
    * Linode's view of an instance for the failure log (see
    * BaseProvider.describeServerForDiagnosis): GET /linode/instances/{id} for
-   * its status (`provisioning`, `booting`, `running`, `offline`), `created`
-   * and region, and the account's events for that instance (GET
+   * its status (`provisioning`, `booting`, `running`, `offline`), `created`,
+   * region and type (`type`, as getServerSummary reads it), and the account's events for that instance (GET
    * /account/events, filtered to it, newest first: linode_create,
    * linode_boot, ...), with whether each finished or failed. 25 is the
    * smallest page Linode serves; the view keeps the newest
@@ -1106,6 +1106,7 @@ export class LinodeProvider extends BaseProvider {
       status: instance.status ?? null,
       created: instance.created ?? null,
       location: instance.region ?? null,
+      plan: instance.type ?? null,
       publicIp: LinodeProvider.getPublicIP(instance),
       ...vpcAddress,
       ...history,
