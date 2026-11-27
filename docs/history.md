@@ -2108,7 +2108,7 @@ its S3 object stay for good.
 dropping one fails) and the restored cases in
 `tests/unit/e2e/stack-probes.test.ts`.
 
-#### 2026-11-27: The e2e failure bundle records the provider's view of every server
+#### 2026-11-27: The e2e failure bundle records the provider's view of every server (#609)
 
 The failure diagnostics of an e2e step now include a section `provider view:
 servers of <project>` on every mode and provider. It lists the scenario's
