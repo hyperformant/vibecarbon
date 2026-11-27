@@ -45,6 +45,7 @@ import {
   reportSweep,
   sweepBuckets,
   sweepClass,
+  sweepOwnsServer,
   sweepOwnsVolume,
 } from './sweep-core.js';
 
@@ -191,7 +192,7 @@ export async function sweepOrphanedVultrResources(
     cleanupFailed: 'Instance cleanup failed',
     count: 'servers',
     list: () => provider.listServersDetailed(),
-    owned: (instance) => instance.label.startsWith(projectName),
+    owned: (instance) => sweepOwnsServer(instance, projectName),
     announce: (instance) => `Deleting orphaned instance ${instance.id} (${instance.label})`,
     remove: async (instance) => {
       await provider.deleteServer(instance.id, { waitUntilGone: true });

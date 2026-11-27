@@ -148,6 +148,7 @@ import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { collectHostDiagnostics, findClusterHosts } from '../utils/host-diagnostics.js';
 import { reapLocalBuildArtifacts } from '../utils/local-artifacts.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
+import { collectProviderView } from '../utils/provider-view.js';
 import {
   type CapacityProvider,
   type DeployedEnv,
@@ -520,6 +521,7 @@ async function captureFailureDiagnostics(
   config: ScenarioConfig,
   stepName: StepName,
   tag: string,
+  computeToken: string,
 ): Promise<void> {
   const { existsSync, mkdirSync, appendFileSync } = await import('node:fs');
   const { vibecarbonHome } = await import('../../../src/lib/vibecarbon-home.js');
@@ -773,6 +775,21 @@ async function captureFailureDiagnostics(
       sections.push([label, text]);
     }
   }
+
+  // 3c. What the provider says about every server of this scenario, on every
+  //     mode and provider (bounded at ~30 s, never throws). The ssh sections
+  //     above cover the master and db only, and say nothing when the server
+  //     itself is the problem: CI run 45994716507 (vultr/k8s, scale) lost a
+  //     worker mid-resize and the bundle could not say what Vultr reported
+  //     for it. Read here, because the rig is destroyed at teardown. See
+  //     tests/e2e/utils/provider-view.ts.
+  sections.push(
+    await collectProviderView({
+      provider: () => getProvider(config.provider ?? 'hetzner', computeToken),
+      providerId: config.provider ?? 'hetzner',
+      projectName: config.projectName,
+    }),
+  );
 
   // 4. Compose state: Traefik logs from every node, over SSH. Bought by the
   //    2026-08-29 DO reds (run 33252884427): both compose modes failed
@@ -1079,7 +1096,7 @@ export async function runLifecycle(
       // the test to learn what went wrong. Best-effort + bounded —
       // we're already failing; nothing here should make it worse.
       try {
-        await captureFailureDiagnostics(config, name, tag);
+        await captureFailureDiagnostics(config, name, tag, computeToken);
       } catch (diagErr) {
         console.error(
           `${tag} (diagnostic capture failed: ${diagErr instanceof Error ? diagErr.message : String(diagErr)})`,

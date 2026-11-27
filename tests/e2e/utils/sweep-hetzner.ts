@@ -4,7 +4,12 @@
  * (./sweep-provider.ts) can reach it without loading the whole lifecycle.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { assertSweepableProjectName, bucketSource, sweepBuckets } from './sweep-core.js';
+import {
+  assertSweepableProjectName,
+  bucketSource,
+  hetznerServerSelectorQuery,
+  sweepBuckets,
+} from './sweep-core.js';
 
 /** One Object Storage location's view (each endpoint lists only its own buckets). */
 interface HetznerSweepObjectStorage {
@@ -222,7 +227,7 @@ export async function sweepOrphanedHetznerResources(
     const { items: orphanServers, complete: srvComplete } = await listSweepPages<{
       id: number;
       name: string;
-    }>('/servers', 'servers', `label_selector=project%3D${encodeURIComponent(projectName)}`);
+    }>('/servers', 'servers', hetznerServerSelectorQuery(projectName));
     if (!srvComplete) markIncomplete('server list');
     for (const srv of orphanServers) {
       console.log(`${tag} [sweep] Deleting orphaned server ${srv.id} (${srv.name})`);
