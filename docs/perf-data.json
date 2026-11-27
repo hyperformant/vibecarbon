@@ -2,44 +2,35 @@
   "providers": {
     "hetzner": {
       "run": {
-        "id": "63a8d3d",
-        "date": "2026-11-20",
+        "id": "20e286a",
+        "date": "2026-11-27",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 111985,
-          "warm-deploy": 16448,
-          "scale": 142212,
-          "backup": 4553,
-          "destroy": 15181,
-          "restore": 152207
-        },
-        "compose-ha": {
-          "deploy": 124454,
-          "warm-deploy": 30077,
-          "scale": 155067,
-          "backup": 4616,
-          "destroy": 25817,
-          "restore": 152737,
-          "failover": 53230
+          "deploy": 103822,
+          "warm-deploy": 14793,
+          "scale": 198390,
+          "backup": 5498,
+          "destroy": 14432,
+          "restore": 148156
         },
         "k8s": {
-          "deploy": 336252,
-          "warm-deploy": 15036,
-          "scale": 138318,
-          "backup": 25753,
-          "destroy": 86491,
-          "restore": 94352
+          "deploy": 204579,
+          "warm-deploy": 12074,
+          "scale": 117803,
+          "backup": 25529,
+          "destroy": 76935,
+          "restore": 91074
         },
         "k8s-ha": {
-          "deploy": 208540,
-          "warm-deploy": 29586,
-          "scale": 263461,
-          "backup": 24277,
-          "destroy": 80360,
-          "restore": 130809,
-          "failover": 197766
+          "deploy": 215183,
+          "warm-deploy": 28584,
+          "scale": 243547,
+          "backup": 23099,
+          "destroy": 78874,
+          "restore": 126793,
+          "failover": 195784
         }
       }
     },
@@ -130,18 +121,35 @@
     },
     "scaleway": {
       "run": {
-        "id": "51573d5",
-        "date": "2026-11-26",
+        "id": "f0e86de",
+        "date": "2026-11-27",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 147099,
-          "warm-deploy": 17531,
-          "scale": 150119,
-          "backup": 5550,
-          "destroy": 21330,
-          "restore": 132233
+          "deploy": 143096,
+          "warm-deploy": 19816,
+          "scale": 130890,
+          "backup": 3120,
+          "destroy": 32473,
+          "restore": 144185
+        },
+        "k8s": {
+          "deploy": 309612,
+          "warm-deploy": 19223,
+          "scale": 151103,
+          "backup": 25586,
+          "destroy": 107014,
+          "restore": 107776
+        },
+        "k8s-ha": {
+          "deploy": 323138,
+          "warm-deploy": 41483,
+          "scale": 331036,
+          "backup": 31429,
+          "destroy": 109509,
+          "restore": 198344,
+          "failover": 328814
         }
       }
     }
