@@ -140,7 +140,7 @@ export function planDestroyTargets(envConfig, projectConfig, environment) {
   // servers are removed. See the ownership-filtered delete docs in the DNS backends.
   //
   // k8s DNS records point at the cluster's ingress IP (clusterIngressIp): its
-  // floating/reserved IP on Hetzner, Linode and Vultr, which is not any server's own
+  // floating/reserved IP on Hetzner, Linode and Scaleway, which is not any server's own
   // IP — without folding it in here, every k8s destroy preserved its own DNS
   // record as "unowned" (M3 Task 9f evidence: both Hetzner and DO k8s
   // destroys left the A record behind, hand-deleted afterwards). Single k8s
@@ -4005,11 +4005,10 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * cluster's. Linode reissues a released address within minutes, so by
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry the k8s program's labels (`reservedIpLabelMatch`:
- * Linode by its tags, Vultr by its one label and the tags of the instance
- * holding it, Scaleway by its tags and those of the server holding it) is
- * asked, and only an IP carrying this project's labels and
+ * Linode by its tags, Scaleway by its tags and those of the server holding
+ * it) is asked, and only an IP carrying this project's labels and
  * those of one of `stackEnvs` counts as ours. One of ours that is still
- * assigned (to a Linode or a Vultr instance, or any entity) is `held`: this
+ * assigned (to a Linode, a Scaleway server, or any entity) is `held`: this
  * runs after the teardown, so whatever holds it is something the teardown
  * did not delete, and an address is never taken off a running server.
  *
@@ -4305,9 +4304,10 @@ export async function sweepTaggedReservedIps({
  * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr, Scaleway), whose
  *   `pulumi destroy` has been seen to skip them: the firewall and SSH key by
  *   name, each recorded reserved IP by address (releaseRecordedReservedIp),
- *   then the VPC last.
+ *   then the VPC last. A Vultr cluster has no reserved IP, so none is on
+ *   record there.
  * - On every provider whose reserved IPs carry the program's labels
- *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr, Scaleway): the IPs labelled for the
+ *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Scaleway): the IPs labelled for the
  *   stack that no record names (sweepTaggedReservedIps), before the VPC.
  * - On a provider with `K8S_AUTOSCALED_WORKER_IPS` (Scaleway), whose
  *   autoscaled workers each get an IP labelled with the worker's labels (its

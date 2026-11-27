@@ -1299,7 +1299,9 @@ and provider call of every pass), `checks-ssh-exec.test.ts`,
   provider methods answer `[]` on a failed call; a `false` from
   `deleteLoadBalancer` is a failed delete.
 - The Vultr banner counts reserved IPs, the Hetzner sweep refuses a project
-  name under 4 characters, and preflight reads every page.
+  name under 4 characters, and preflight reads every page. (Replaced for Vultr
+  on 2026-11-27: its clusters make no reserved IP, so its sweep has no
+  reserved-IP pass, and the residue audit still lists every one.)
 
 **Why:** each of these let a sweep report success without having looked, and a
 leaked resource bills until someone finds it.
@@ -1872,6 +1874,35 @@ https://github.com/settings/applications.
 path, and `tests/unit/lib/secret-read-census.test.ts` with its behaviour test
 `tests/unit/lib/command-secret-output.test.ts` for secret reads.
 
+#### 2026-11-27: Vultr k8s clusters point DNS at the master, with no reserved IP
+
+A Vultr k8s cluster makes no reserved IP, as on DigitalOcean
+(`VultrProvider.K8S_FLOATING_IP = false`): its domain points at the master's
+own public IPv4, the program exports no `floatingIp`, and the master is
+replaced create-first. The reserved-IP release, label and sweep code that only
+Vultr k8s used is gone. No release made the reserved IP, so nothing migrates.
+
+**Why:** every Vultr k8s destroy failed on it. It was the master's main IP, and
+Vultr refuses to detach a main IP until its server is gone (400 "The server
+must be closed to detach this IP because it is being used as the main IP").
+The provider's instance delete returns before the server is gone, so
+`pulumi destroy` deleted the instances in 7 s and then failed on the IP, on
+both k8s and both k8s-ha stacks (e2e run 45922250720). It also bought nothing:
+failover flips DNS between the clusters, and a resize keeps the master's
+address.
+
+**Do not undo:** a Vultr reserved IP given at create as an instance's main IP
+can never be deleted in the same `pulumi destroy` as that instance. Bringing
+one back needs its own assignment step and a delete that waits for the
+instance to be gone, a reaping pass in the e2e sweep, and an entry in
+`BILLING_EXTRAS`.
+
+**Guard:** `tests/unit/iac/vultr-k8s.test.ts`,
+`tests/unit/iac/floating-ip-backstop-census.test.ts` (a k8s program makes an IP
+exactly when `K8S_FLOATING_IP` says) and
+`tests/unit/e2e/sweep-reserved-ip-coverage.test.ts` (Vultr's sweep may skip
+reserved IPs only while both of its flags are false).
+
 ## Added and later removed
 
 | What | Removed | Why |
@@ -1885,6 +1916,7 @@ path, and `tests/unit/lib/secret-read-census.test.ts` with its behaviour test
 | Reseed helper pod and volume-attach repair | 2026-11-04 (#309) | The volume no longer detaches |
 | Bucket rotation and shared uploads bucket | 2026-10-20 (#233) | New buckets are unreliable; data-loss paths |
 | DigitalOcean k8s reserved IP | 2026-11-11 (#418) | Never moved; could fail; takeover risk |
+| Vultr k8s reserved IP | 2026-11-27, before any release | Never moved; every destroy failed on it |
 | Deploy blocks until the certificate is issued | 2026-10-31 (#239) | A slow authority should not fail a deploy |
 | Traefik CPU limit | 2026-11-06 (#364) | One client stalled all HTTPS |
 | Docker version pin | 2026-11-05 (#343) | Security fixes must arrive without a release |
@@ -1942,6 +1974,7 @@ path, and `tests/unit/lib/secret-read-census.test.ts` with its behaviour test
 | Linode | Labels are cut at 50 characters; every image boots as "localhost" | Find by label and id; hostnames are set at boot |
 | Linode | Two VPCs may share a range | No range allocation is needed, unlike DigitalOcean |
 | Vultr | Nameservers remember that a name did not exist | Same rule: never look up before create |
+| Vultr | A main IP cannot be detached until its server is gone, and the provider's instance delete returns first | k8s clusters have no reserved IP; the domain points at the master |
 | All | A fresh server may inherit a spent Docker Hub quota | Core images come from the GHCR mirror |
 
 ## Dated bridges

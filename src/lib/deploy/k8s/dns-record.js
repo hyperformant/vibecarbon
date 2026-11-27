@@ -1,8 +1,8 @@
 /**
  * Single-cluster k8s's domain records (apex + wildcard, the provider's
  * setupSimple): one target, the cluster's ingress IP (clusterIngressIp: its
- * floating IP on Hetzner, Linode and Vultr, its master's own address on
- * DigitalOcean), gated on {domain, provider, ip} by the `k8s-dns-update`
+ * floating IP on Hetzner, Linode and Scaleway, its master's own address on
+ * DigitalOcean and Vultr), gated on {domain, provider, ip} by the `k8s-dns-update`
  * state step.
  *
  * Single k8s only. A k8s-ha deploy never builds this writer: its records have

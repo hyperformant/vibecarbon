@@ -30,13 +30,10 @@ import { canonicalCidr } from '../cidr.js';
 import { fetchWithRetry } from '../fetch-retry.js';
 import {
   BaseProvider,
-  deleteFailure,
-  deleteRefused,
   deleteVpcByName,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
-  sweepLabels,
   waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
@@ -165,64 +162,6 @@ async function walkCursor(init, path, key) {
     cursor = next;
   }
   return { items, complete: false };
-}
-
-/** The characters a project, environment or stack name is spelled with. */
-const NAME_RE = /^[a-z0-9-]+$/;
-
-/**
- * The label vultr-k8s.js gives a cluster's reserved IP, the one attribution
- * a Vultr reserved IP carries (it takes a label and no tags):
- * `project:<project>:environment:<environment>`, the stack's two ownership
- * labels in the instances' own tag form (encodeLabel), joined by `:`.
- * Project, environment and stack names are spelled `[a-z0-9-]`
- * (validators.js, deploy/prompts.js) and never hold a `:`, so a label names
- * exactly one project and environment. The `<cluster>-ingress` it replaced
- * did not: `acme-prod-primary-ingress` was both project acme's k8s-ha stack
- * prod-primary and project acme-prod's environment primary.
- *
- * Vultr documents the label as a plain string with no pattern or length
- * (`label`, "The user-supplied label", on POST /v2/reserved-ips in the
- * OpenAPI spec its vultr-python-client is generated from; terraform-provider-
- * vultr's reserved_ip schema is a bare string too). `:` and `-` are the
- * characters every Vultr instance tag vibecarbon writes already carries.
- *
- * null for labels that are not exactly a project and an environment, each
- * spelled as a name: no reserved IP carries such a label, so none can be
- * proven to match.
- * @param {Object<string, string|undefined|null>|undefined|null} labels
- * @returns {string|null}
- */
-export function reservedIpLabel(labels) {
-  const keys = Object.keys(labels ?? {}).sort();
-  if (keys.join(',') !== 'environment,project') return null;
-  const { project, environment } = labels;
-  if (![project, environment].every((v) => typeof v === 'string' && NAME_RE.test(v))) return null;
-  return `${encodeLabel('project', project)}:${encodeLabel('environment', environment)}`;
-}
-
-/**
- * The project and environment a reserved IP's label names, the inverse of
- * reservedIpLabel; null for a label it did not write. The e2e sweep reads
- * the project from it.
- * @param {string|undefined|null} label
- * @returns {{project: string, environment: string}|null}
- */
-export function reservedIpLabelOwner(label) {
-  const parts = typeof label === 'string' ? label.split(':') : [];
-  if (parts.length !== 4 || parts[0] !== 'project' || parts[2] !== 'environment') return null;
-  const owner = { project: parts[1], environment: parts[3] };
-  return reservedIpLabel(owner) === label ? owner : null;
-}
-
-/**
- * What a reserved IP is assigned to, as a phrase, or null when it is
- * unassigned (Vultr answers `instance_id: ''`).
- * @param {{instance_id?: string|null}} ip
- * @returns {string|null}
- */
-function reservedIpHolder(ip) {
-  return ip.instance_id ? `instance ${ip.instance_id}` : null;
 }
 
 export class VultrProvider extends BaseProvider {
@@ -497,11 +436,16 @@ export class VultrProvider extends BaseProvider {
   static K8S_OPERATOR_RULES_AFTER_UP = true;
 
   /**
-   * A deploy that failed partway (the reserved IP and VPC made, the master
-   * never ready) can leave the reserved IP, VPC, firewall group and SSH key
-   * outside what `pulumi destroy` removes, as on DigitalOcean and Linode, so
-   * destroy also removes them by name, address and label
-   * (sweepK8sBackstopTargets, destroy.js). @type {boolean}
+   * No reserved IP, as on DigitalOcean: a cluster's domain points at the
+   * master's own address (vultr-k8s.js says why; BaseProvider). @type {boolean}
+   */
+  static K8S_FLOATING_IP = false;
+
+  /**
+   * A deploy that failed partway (the VPC made, the master never ready) can
+   * leave the VPC, firewall group and SSH key outside what `pulumi destroy`
+   * removes, as on DigitalOcean and Linode, so destroy also removes them by
+   * name (sweepK8sBackstopTargets, destroy.js). @type {boolean}
    */
   static K8S_DESTROY_BACKSTOP = true;
 
@@ -572,7 +516,8 @@ export class VultrProvider extends BaseProvider {
    * Lazily build the Pulumi Automation-API program for a single Vultr k3s
    * cluster (dynamic import, never top-level).
    * @param {import('../iac/programs/vultr-k8s.js').K8sStackConfig} config
-   * @returns {Promise<() => Promise<{masterIp: string, masterId: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterId: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   *   No `floatingIp`: K8S_FLOATING_IP is false (the domain points at masterIp).
    */
   static async getK8sProgram(config) {
     const { buildVultrK8sProgram } = await import('../iac/programs/vultr-k8s.js');
@@ -1331,191 +1276,6 @@ export class VultrProvider extends BaseProvider {
    */
   async deleteNetworkByName(name) {
     return deleteVpcByName(this, name);
-  }
-
-  /**
-   * Every reserved IP on the account (cursor walk of GET /reserved-ips).
-   * An account past the walk's guard is not read in full, and a partial
-   * listing must not pass for the whole: destroy reads an address missing
-   * from it as already released (reservedIpLabelMatch).
-   * @returns {Promise<Array<{id: string, subnet: string, label?: string, instance_id?: string, region?: string}>>}
-   *   `subnet` is the address
-   * @throws when a page cannot be read, or there are more pages than the guard reads
-   */
-  async _listReservedIps() {
-    const { items, complete, status } = await this._walkCursor('/reserved-ips', 'reserved_ips');
-    if (status !== undefined) throw new Error(`GET /reserved-ips failed: HTTP ${status}`);
-    if (complete) return items;
-    throw new Error(
-      `the Vultr account has more reserved IPs than vibecarbon reads (${WALK_MAX_PAGES * WALK_PAGE_SIZE})`,
-    );
-  }
-
-  /**
-   * Delete one listed reserved IP by its id, answered as a ReservedIpRelease:
-   * 2xx or 404 is released, a 4xx is a refusal (still held), and any other
-   * status, a 5xx that outlasted fetchWithRetry's retries, proves nothing
-   * either way (deleteRefused).
-   * @param {{id: string}} ip
-   * @returns {Promise<import('./base.js').ReservedIpRelease>}
-   */
-  async _deleteReservedIp(ip) {
-    const response = await this.bareRequest(`/reserved-ips/${ip.id}`, { method: 'DELETE' });
-    if (response.ok || response.status === 404) return { released: true };
-    return {
-      released: false,
-      held: deleteRefused(response.status) ? true : null,
-      region: null,
-      reason: deleteFailure(VultrProvider.NAME, response.status),
-    };
-  }
-
-  /**
-   * Release a reserved IP by address, answered as a ReservedIpRelease
-   * (providers/base.js) so destroy reads every provider one way. Vultr
-   * deletes by id, so this lists and matches `subnet` (the address) first;
-   * an address the account no longer holds is already released. One still
-   * assigned to an instance is refused here, with no delete sent: an address
-   * is never taken off a running server, whoever asks.
-   * @param {string} address
-   * @returns {Promise<import('./base.js').ReservedIpRelease>}
-   * @throws when the listing cannot be read whole
-   */
-  async deleteReservedIpByAddress(address) {
-    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
-    if (!ip) return { released: true };
-    const holder = reservedIpHolder(ip);
-    if (holder) {
-      return {
-        released: false,
-        held: true,
-        region: null,
-        reason: `it is still assigned to ${holder}`,
-      };
-    }
-    return this._deleteReservedIp(ip);
-  }
-
-  /**
-   * What holds a reserved IP labelled for `labels`, and whether it is
-   * theirs. vultr-k8s.js tags every instance with the stack's project and
-   * environment (encodeLabel), so the instance an IP of theirs is assigned to
-   * carries both. One that does not is someone else's, whatever the IP's
-   * label says, and the address is never released or reported as held by
-   * this stack. An instance Vultr no longer lists (404) holds it on its way
-   * out, so the IP stays this stack's and held.
-   * @param {{instance_id?: string|null}} ip
-   * @param {{project: string, environment: string}} labels
-   * @returns {Promise<{holder: string|null, foreign: string|null}>}
-   *   holder names the instance, null when unassigned; foreign, when set,
-   *   says whose that instance is instead
-   * @throws when the instance cannot be read
-   */
-  async _reservedIpHolder(ip, labels) {
-    const holder = reservedIpHolder(ip);
-    if (!holder) return { holder: null, foreign: null };
-    let instance;
-    try {
-      instance = await this.getServer(ip.instance_id);
-    } catch (err) {
-      if (err.status === 404) return { holder, foreign: null };
-      const why = err.status ? `HTTP ${err.status}` : err.message;
-      throw new Error(`Vultr did not answer for ${holder}, which holds it (${why})`);
-    }
-    const { project, environment } = decodeLabels(instance?.tags);
-    if (project === labels.project && environment === labels.environment) {
-      return { holder, foreign: null };
-    }
-    const whose = project
-      ? `project ${project}, environment ${environment ?? 'none'}`
-      : 'no vibecarbon project';
-    return { holder, foreign: `held by ${holder}, which is ${whose}` };
-  }
-
-  /**
-   * Whether the reserved IP at `address` is still this project's and
-   * environment's: its label is exactly reservedIpLabel(labels), and the
-   * instance it is assigned to, if any, carries the same project and
-   * environment tags (_reservedIpHolder). Destroy asks before it releases an
-   * address saved at deploy time: a released address can be reissued to
-   * another account or project by then, and one of ours still assigned to an
-   * instance the teardown did not delete must never be taken off it. Labels
-   * that are not exactly a project and an environment match nothing. `tags`
-   * is the IP's label, the one attribution it carries, and what its holder
-   * carries when that is someone else's.
-   * @param {string} address
-   * @param {Object<string,string>} labels
-   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
-   *   found is false when the account holds no reserved IP at that address;
-   *   holder names the instance the address is assigned to, null when unassigned
-   * @throws when the listing, or the instance holding a labelled one, cannot be read
-   */
-  async reservedIpLabelMatch(address, labels) {
-    const wanted = reservedIpLabel(labels);
-    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
-    if (!ip) return { found: false };
-    const tags = ip.label ? [ip.label] : [];
-    if (wanted === null || ip.label !== wanted) {
-      return { found: true, matches: false, tags, holder: reservedIpHolder(ip) };
-    }
-    const { holder, foreign } = await this._reservedIpHolder(ip, labels);
-    if (foreign) return { found: true, matches: false, tags: [...tags, foreign], holder };
-    return { found: true, matches: true, tags, holder };
-  }
-
-  /**
-   * Release every reserved IP labelled for this project and environment:
-   * its label is exactly reservedIpLabel(labels), never a prefix match, so
-   * another environment's or project's IP is never touched. A label without
-   * a value is refused (sweepLabels), and so is any key set other than
-   * exactly project and environment, which a Vultr IP's one label cannot
-   * prove. One assigned to an instance is never deleted: if that instance
-   * carries this stack's tags it is one the teardown did not delete, and the
-   * IP is reported held; if it carries anyone else's, the IP is not this
-   * stack's and is left out (_reservedIpHolder).
-   * @param {Object<string,string>} labels
-   * @param {{except?: string[]}} [options] - addresses the caller already handled
-   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
-   * @throws when the labels are refused (before any read), or the listing cannot be read whole
-   */
-  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
-    const scope = Object.fromEntries(sweepLabels(labels));
-    const wanted = reservedIpLabel(scope);
-    if (wanted === null) {
-      throw new Error(
-        `refusing to sweep Vultr reserved IPs by ${Object.keys(labels).join(', ')}: a Vultr ` +
-          'reserved IP carries one label and no tags, so it is found only by project and ' +
-          'environment, and nothing was listed or released',
-      );
-    }
-    const skip = new Set(except);
-    const matches = (await this._listReservedIps()).filter(
-      (ip) => ip.label === wanted && !skip.has(ip.subnet),
-    );
-    const deleted = [];
-    const failed = [];
-    for (const ip of matches) {
-      let held;
-      try {
-        held = await this._reservedIpHolder(ip, scope);
-      } catch (err) {
-        failed.push({ address: ip.subnet, held: null, reason: err.message });
-        continue;
-      }
-      if (held.foreign) continue;
-      if (held.holder) {
-        failed.push({
-          address: ip.subnet,
-          held: true,
-          reason: `it is still assigned to ${held.holder}, which was not deleted`,
-        });
-        continue;
-      }
-      const outcome = await this._deleteReservedIp(ip);
-      if (outcome.released) deleted.push(ip.subnet);
-      else failed.push({ address: ip.subnet, held: outcome.held, reason: outcome.reason });
-    }
-    return { deleted, failed };
   }
 
   /**

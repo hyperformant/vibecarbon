@@ -513,11 +513,11 @@ export class BaseProvider {
   /**
    * Whether this provider's k8s program gives each cluster a floating (or
    * reserved) IP for its ingress, exported as the `floatingIp` output, which
-   * deployK3s then requires. Hetzner, Linode and Vultr do. DigitalOcean does not:
-   * its clusters' domains point at the master's own address
-   * (clusterIngressIp, lib/deploy/k8s/ingress-ip.js), and a deploy releases
-   * the reserved IP a cluster made before that still has on record
-   * (lib/deploy/k8s/retired-reserved-ip.js). The program census
+   * deployK3s then requires. Hetzner, Linode and Scaleway do. DigitalOcean
+   * and Vultr do not: their clusters' domains point at the master's own
+   * address (clusterIngressIp, lib/deploy/k8s/ingress-ip.js), and a deploy
+   * releases the reserved IP a DigitalOcean cluster made before that still
+   * has on record (lib/deploy/k8s/retired-reserved-ip.js). The program census
    * (tests/unit/iac/k8s-floating-ip-output-census.test.ts) holds every k8s
    * program's outputs to this flag.
    * @type {boolean}
@@ -1841,7 +1841,7 @@ export class BaseProvider {
   //   k8s:     { masterIp, masterPrivateIp, dbIp, dbPrivateIp,
   //              workerIps, floatingIp, networkId, sshKeyId, k3sToken,
   //              clusterName }
-  //   k8s without a floating IP (K8S_FLOATING_IP false, DigitalOcean):
+  //   k8s without a floating IP (K8S_FLOATING_IP false, DigitalOcean and Vultr):
   //     the same keys minus floatingIp; the domain points at masterIp.
   //   k8s (DO-only additive, M3 Task 9c): vpcCidr — the Vpc's actual
   //     ipRange, threaded to `applyK3sManifests` so DO deploys can extend

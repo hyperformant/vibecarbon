@@ -160,7 +160,8 @@ export async function sweepOrphanedVultrResources(
   deps: VultrSweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
   // The guard, the opening line, the counts and the incomplete flag
-  // (sweep-core.ts). Vultr has no placement groups; `networks` counts VPCs and `floatingIps` reserved IPs.
+  // (sweep-core.ts). Vultr has no placement groups and no reserved IPs of
+  // ours (see the note before the ssh-key pass); `networks` counts VPCs.
   const sweep = createSweep(tag, 'Vultr', projectName, { loadBalancers: 0 });
   const { markIncomplete } = sweep;
 
@@ -249,41 +250,12 @@ export async function sweepOrphanedVultrResources(
       `Firewall group ${fw.description} delete failed`,
   });
 
-  // Reserved IPs. vultr-k8s.js's `ingress` ReservedIp bills WHILE UNASSIGNED,
-  // and deleting the instance it was attached to does NOT release it — so a
-  // failed destroy strands a billing IP that only this sweep can reap.
-  //
-  // This pass used to be a hardcoded `floatingIps: 0` with the comment
-  // a claim that this tier mints none. That was true of
-  // the compose tier and became false the moment the k8s tier landed: the
-  // ledger then reported zero meaning "never looked", not "found none".
-  //
-  // Attribution is the `label` the program sets,
-  // `project:<project>:environment:<environment>` (reservedIpLabel): its
-  // project carries the scratch prefix, the same prefix contract as every
-  // other pass here. An unlabelled IP, or one labelled any other way, is
-  // never touched.
-  const { reservedIpLabelOwner } = (await import('../../../src/lib/providers/vultr.js')) as {
-    reservedIpLabelOwner: (label?: string) => { project: string; environment: string } | null;
-  };
-  await sweepClass(sweep, {
-    listing: 'reserved-ip list',
-    cleanupFailed: 'Reserved IP cleanup failed',
-    count: 'floatingIps',
-    list: () =>
-      walkPages<{ id: string; label?: string; subnet?: string; instance_id?: string }>(
-        '/reserved-ips',
-        'reserved_ips',
-      ),
-    owned: (ip) => !!reservedIpLabelOwner(ip.label)?.project.startsWith(projectName),
-    announce: (ip) => `Deleting orphaned reserved IP ${ip.label} (${ip.subnet ?? ip.id})`,
-    remove: async (ip) => {
-      const res = await fetchImpl(`${API_BASE}/reserved-ips/${ip.id}`, { method: 'DELETE' });
-      return (
-        res.ok || res.status === 404 || `Reserved IP ${ip.label} delete failed (${res.status})`
-      );
-    },
-  });
+  // No reserved-IP pass: no Vultr program makes one (K8S_FLOATING_IP and
+  // COMPOSE_FLOATING_IP are both false; a k8s cluster's domain points at its
+  // master, vultr-k8s.js). The weekly residue audit still lists every
+  // reserved IP on the account (residue-audit.ts), and the coverage census
+  // (sweep-reserved-ip-coverage.test.ts) fails if a Vultr program makes one
+  // again before this sweep looks for them.
 
   await sweepClass(sweep, {
     listing: 'ssh-key list',
@@ -384,7 +356,6 @@ export async function sweepOrphanedVultrResources(
     ['instances', 'servers'],
     ['volumes', 'volumes'],
     ['firewalls', 'firewalls'],
-    ['reserved-ips', 'floatingIps'],
     ['load-balancers', 'loadBalancers'],
     ['vpcs', 'networks'],
     ['buckets', 's3Buckets'],

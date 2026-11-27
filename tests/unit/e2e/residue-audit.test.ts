@@ -1,7 +1,6 @@
 /** The weekly read-only residue audit: classifier, summary, exit code, and the GET-only guarantee. */
 import { DeleteBucketCommand, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { describe, expect, it } from 'vitest';
-import { reservedIpLabel } from '../../../src/lib/providers/vultr.js';
 import { testConfig } from '../../config.js';
 import {
   auditExitCode,
@@ -95,14 +94,15 @@ describe('classify', () => {
     expect(classify(tag(NOW - 7 * H), NOW)).toBe('residue');
   });
 
-  // vultr-k8s.js labels its reserved IP `project:<project>:environment:<env>`
-  // (reservedIpLabel): the audit lists that label as the row's name.
+  // vultr-k8s.js labelled its reserved IP `project:<project>:environment:<env>`
+  // until the IP was removed (2026-11-27): the audit lists that label as the
+  // row's name, so one left on the account is still read by its project.
   it("reads a Vultr reserved IP's label by the project it names", () => {
     const ip = (project: string, createdAt: string) =>
       row({
         provider: 'vultr',
         kind: 'ip',
-        name: reservedIpLabel({ project, environment: 'v1' }) as string,
+        name: `project:${project}:environment:v1`,
         createdAt,
       });
     expect(classify(ip('testapp-k8s-1731000000000-abc123', ago(7 * H)), NOW)).toBe('residue');

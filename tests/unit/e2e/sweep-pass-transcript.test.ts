@@ -380,16 +380,6 @@ const CLOUDS: Cloud[] = [
           ],
           ...vultrEnd,
         },
-        '/v2/reserved-ips': {
-          reserved_ips: [
-            { id: 'r-1', label: `project:${P}:environment:e1`, subnet: '203.0.113.7' },
-            { id: 'r-2', label: `project:${P}:environment:gone` },
-            { id: 'r-3', label: `project:${P}:environment:refused` },
-            { id: 'r-4', label: 'project:someone-else:environment:e1' },
-            { id: 'r-5' },
-          ],
-          ...vultrEnd,
-        },
         '/v2/ssh-keys': {
           ssh_keys: [
             { id: 'k-1', name: `${P}-key` },
@@ -409,11 +399,7 @@ const CLOUDS: Cloud[] = [
           ...vultrEnd,
         },
       },
-      deletes: {
-        ...netDeletes('/v2/vpcs'),
-        '/v2/reserved-ips/r-2': 404,
-        '/v2/reserved-ips/r-3': 500,
-      },
+      deletes: netDeletes('/v2/vpcs'),
     },
     deleteThrows: {
       provider: {
@@ -432,13 +418,6 @@ const CLOUDS: Cloud[] = [
           ],
           ...vultrEnd,
         },
-        '/v2/reserved-ips': {
-          reserved_ips: [
-            { id: 'r-1', label: `project:${P}:environment:e1` },
-            { id: 'r-2', label: `project:${P}:environment:e2` },
-          ],
-          ...vultrEnd,
-        },
         '/v2/ssh-keys': {
           ssh_keys: [
             { id: 'k-1', name: `${P}-key` },
@@ -447,7 +426,6 @@ const CLOUDS: Cloud[] = [
           ...vultrEnd,
         },
       },
-      deletes: { '/v2/reserved-ips/r-1': 'throw' },
     },
   },
   {

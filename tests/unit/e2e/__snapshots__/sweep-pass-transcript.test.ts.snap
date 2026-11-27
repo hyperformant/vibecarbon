@@ -509,11 +509,6 @@ log   [t] [sweep] Deleting orphaned firewall group testapp-tr-fw
 call  deleteFirewallByName("testapp-tr-fw")
 warn  [t] [sweep] firewall list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Firewall cleanup failed: connect ETIMEDOUT
-fetch GET /v2/reserved-ips?per_page=100
-log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:e1 (r-1)
-fetch DELETE /v2/reserved-ips/r-1
-warn  [t] [sweep] reserved-ip list enumeration incomplete — residue past the last readable page cannot be ruled out
-warn  [t] [sweep] Reserved IP cleanup failed: connect ETIMEDOUT
 fetch GET /v2/ssh-keys?per_page=100
 log   [t] [sweep] Deleting orphaned ssh key testapp-tr-key
 call  deleteSSHKeyByName("testapp-tr-key")
@@ -537,15 +532,13 @@ log   [t] [sweep] Deleting orphaned volume v-1 (testapp-tr-data)
 call  deleteVolume("v-1")
 fetch GET /v2/firewalls?per_page=100
 warn  [t] [sweep] firewall list enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /v2/reserved-ips?per_page=100
-warn  [t] [sweep] reserved-ip list enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /v2/ssh-keys?per_page=100
 warn  [t] [sweep] ssh-key list enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /v2/load-balancers?per_page=100
 warn  [t] [sweep] load-balancer list enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /v2/vpcs?per_page=100
 warn  [t] [sweep] vpc list enumeration incomplete — residue past the last readable page cannot be ruled out
-warn  [t] [sweep] REGRESSION: destroy left 2 Vultr orphan resource(s) (instances=1, volumes=1, firewalls=0, reserved-ips=0, load-balancers=0, vpcs=0, buckets=0, ssh-keys=0). vibecarbon destroy did not free these — fix the corresponding destroy code path.
+warn  [t] [sweep] REGRESSION: destroy left 2 Vultr orphan resource(s) (instances=1, volumes=1, firewalls=0, load-balancers=0, vpcs=0, buckets=0, ssh-keys=0). vibecarbon destroy did not free these — fix the corresponding destroy code path.
 result {"counts":{"servers":1,"volumes":1,"placementGroups":0,"firewalls":0,"floatingIps":0,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
 `;
 
@@ -574,14 +567,6 @@ call  deleteFirewallByName("testapp-tr-fw")
 log   [t] [sweep] Deleting orphaned firewall group testapp-tr-fw-refused
 call  deleteFirewallByName("testapp-tr-fw-refused")
 warn  [t] [sweep] Firewall group testapp-tr-fw-refused delete failed
-fetch GET /v2/reserved-ips?per_page=100
-log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:e1 (203.0.113.7)
-fetch DELETE /v2/reserved-ips/r-1
-log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:gone (r-2)
-fetch DELETE /v2/reserved-ips/r-2
-log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:refused (r-3)
-fetch DELETE /v2/reserved-ips/r-3
-warn  [t] [sweep] Reserved IP project:testapp-tr:environment:refused delete failed (500)
 fetch GET /v2/ssh-keys?per_page=100
 log   [t] [sweep] Deleting orphaned ssh key testapp-tr-key
 call  deleteSSHKeyByName("testapp-tr-key")
@@ -610,8 +595,8 @@ fetch DELETE /v2/vpcs/n-4
 warn  [t] [sweep] VPC n-4 delete failed: connect ETIMEDOUT
 log   [t] [sweep] Deleting orphaned VPC n-6 (testapp-tr-net-labelled)
 fetch DELETE /v2/vpcs/n-6
-warn  [t] [sweep] REGRESSION: destroy left 12 Vultr orphan resource(s) (instances=1, volumes=3, firewalls=1, reserved-ips=2, load-balancers=1, vpcs=3, buckets=0, ssh-keys=1). vibecarbon destroy did not free these — fix the corresponding destroy code path.
-result {"counts":{"servers":1,"volumes":3,"placementGroups":0,"firewalls":1,"floatingIps":2,"networks":3,"s3Buckets":0,"sshKeys":1,"loadBalancers":1},"enumFailed":true}"
+warn  [t] [sweep] REGRESSION: destroy left 10 Vultr orphan resource(s) (instances=1, volumes=3, firewalls=1, load-balancers=1, vpcs=3, buckets=0, ssh-keys=1). vibecarbon destroy did not free these — fix the corresponding destroy code path.
+result {"counts":{"servers":1,"volumes":3,"placementGroups":0,"firewalls":1,"floatingIps":0,"networks":3,"s3Buckets":0,"sshKeys":1,"loadBalancers":1},"enumFailed":true}"
 `;
 
 exports[`Vultr sweep: every pass, line for line > throwing listings: every pass reports and the sweep goes on 1`] = `
@@ -624,8 +609,6 @@ warn  [t] [sweep] volume list enumeration incomplete — residue past the last r
 warn  [t] [sweep] Volume cleanup failed: connect ETIMEDOUT
 fetch GET /v2/firewalls?per_page=100
 warn  [t] [sweep] firewall list enumeration incomplete — residue past the last readable page cannot be ruled out
-fetch GET /v2/reserved-ips?per_page=100
-warn  [t] [sweep] reserved-ip list enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /v2/ssh-keys?per_page=100
 warn  [t] [sweep] ssh-key list enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /v2/load-balancers?per_page=100
