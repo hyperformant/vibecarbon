@@ -179,6 +179,7 @@ import {
   provesObservabilityAfterReconverge,
   runPostReconvergeObservability,
 } from './observability-step-plan.js';
+import { SCALE_STEP_TIMEOUT_MS, scaleStepTimeoutMs } from './scale-timeout.js';
 import { expandSkippedSteps } from './step-dependencies.js';
 import { runStepLoop } from './step-loop.js';
 import type {
@@ -272,11 +273,8 @@ const TIMEOUTS: Record<string, number> = {
   // load-gen Deployment apply + drain + cluster-autoscaler reconciliation
   // slack. Only invoked under --expanded.
   'verify-autoscale': 1_500_000, // 25 min — load+poll+drain+poll for CA scale-up + scale-down
-  scale: 2_100_000, // 35 min — compose-ha scales primary then standby serially
-  // (≈12-15 min per side via remote build + image pull + compose up); previous
-  // green at 24m24s left no headroom and timed out at 25m exactly on the next
-  // slow-Docker-Hub day (k8s e2e fanout5 2026-05-01). 35 min covers
-  // both serial halves plus margin without masking real regressions.
+  // The default only: the step takes its provider's (scaleStepTimeoutMs).
+  scale: SCALE_STEP_TIMEOUT_MS,
   'verify-scale': 600_000,
   backup: 900_000,
   // 20 min — the S3 bucket teardown carries deliberate consistency-retry
@@ -3176,7 +3174,7 @@ EOF`;
 
           const result = await runScale(config.envPrefix, {
             cwd: config.projectDir,
-            timeout: TIMEOUTS.scale,
+            timeout: scaleStepTimeoutMs(config.provider),
             env: hcloudEnv,
             scaleToType,
           });
