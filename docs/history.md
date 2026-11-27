@@ -2138,7 +2138,7 @@ the provider says at the moment of failure.
 **Guard:** `tests/unit/e2e/provider-view.test.ts`, which also runs the section
 against every provider in the e2e registry.
 
-#### 2026-11-27: A node that never joins but answers on its private address is read from the inside
+#### 2026-11-27: A node that never joins but answers on its private address is read from the inside (#610)
 
 At the join deadline, each server that never registered and whose private
 address answered port 22 `open` in the probe from its k3s server (#606) is
