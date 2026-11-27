@@ -61,7 +61,9 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'unit',
-          // Pure, in-process. No child processes, no I/O outside tmp dirs.
+          // No I/O outside tmp dirs and no network. Child processes are
+          // allowed: about 50 files run the real shell scripts under stub
+          // binaries.
           include: ['tests/unit/**/*.test.ts'],
           exclude: [
             'tests/integration/**',
@@ -73,7 +75,12 @@ export default defineConfig({
           // a unit test that runs a real ssh, scp or ssh-keyscan fails, and
           // so does one that connects anywhere but this machine.
           setupFiles: ['tests/setup/no-real-ssh.ts', 'tests/setup/no-real-network.ts'],
-          testTimeout: 5_000,
+          // 30 s, not vitest's 5 s: a test that runs a shell script forks a
+          // dozen or more processes, and on a CI runner busy with the whole
+          // suite that took 8.2 s once (retired-fence's wal-archive control,
+          // run 45946811939, 21 ms locally). A hung child is still bounded
+          // by its spawn call's own timeout.
+          testTimeout: 30_000,
         },
       },
       {

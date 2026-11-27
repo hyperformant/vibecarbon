@@ -984,6 +984,15 @@ describe('wal-archive.sh refuses on a retired node', () => {
     mkdirSync(pgdata);
     if (marker) writeFileSync(join(pgdata, RETIRED_DB_MARKER), '');
     const calls = stubBin(join(base, 'bin'), ['wal-g', 'psql']);
+    // The script runs wal-g by absolute path (WAL_ARCHIVE_WALG, default
+    // /usr/local/bin/wal-g), never from PATH, so the stub is named there. It
+    // logs and fails, so the push loop ends in WAL_ARCHIVE_FAILED without a
+    // wal-g on this machine deciding the outcome.
+    const walg = join(base, 'bin', 'wal-g');
+    writeFileSync(
+      walg,
+      `#!/bin/sh\necho "wal-g $*" >> "${join(base, 'bin', 'calls.log')}"\nexit 1\n`,
+    );
     writeFileSync(
       join(base, 'bin', 'pg_controldata'),
       '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
@@ -1003,6 +1012,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
         VC_WALG_ROLE_FILE: join(base, 'walg-role'),
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
+        WAL_ARCHIVE_WALG: walg,
       },
       timeout: 10_000,
     });
@@ -1021,6 +1031,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
     const r = runArchive(false);
     expect(r.stderr).not.toContain(RETIRED_REFUSAL);
     expect(r.calls).toContain('psql');
+    expect(r.calls).toContain('wal-g wal-push pg_wal/000000010000000000000001');
     expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
   });
 });
