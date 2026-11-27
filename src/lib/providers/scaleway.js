@@ -689,6 +689,22 @@ export class ScalewayProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'scaleway-block-vibecarbon';
 
   /**
+   * A refresh does not read the security group's rules back in place.
+   * terraform-provider-scaleway keeps a refreshed rule only while it equals
+   * the state's rule at the same index, and rebuilds any other from the API
+   * row in its own shape: `ip` in place of `ip_range`, and for a rule past
+   * the end of state both (internal/services/instance/security_group.go,
+   * the rules read). A rule REST inserted, the deploy's UDP 51821 rule or an
+   * operator push that adds a CIDR, moves every rule after it, so the first
+   * up after it plans the group as changed and sets it to the list the
+   * program declares: the same rules in the same order
+   * (buildReplicationFirewallRules, iac/programs/scaleway-k8s.js). Seen on
+   * both clusters' first scale after a k8s-ha deploy, 2026-11-27.
+   * @type {boolean}
+   */
+  static K8S_FIREWALL_RULES_READ_BACK_IN_PLACE = false;
+
+  /**
    * scaleway-csi passes a claim's request through unrounded
    * (pkg/driver/helpers.go). The driver and the SDK floor a Block volume at
    * 1 GB (pkg/scaleway/scaleway.go, block_sdk.go), Scaleway's console and

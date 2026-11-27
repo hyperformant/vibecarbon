@@ -33,7 +33,10 @@
  *     (ScalewayProvider.applyOperatorCidrs, buildReplicationFirewallRules)
  *     produce: the web, the replication rule, then 22, then 6443
  *     (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). The next up
- *     then plans no rule change after any REST write.
+ *     after a REST write then sets the group to the rules it already has.
+ *     The provider still plans that up as a change when the write moved a
+ *     rule to another index: its read rebuilds such a rule in its own shape
+ *     (ScalewayProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE).
  *   - A zoned resource's id is `<zone>/<uuid>` and a regional one's
  *     `<region>/<uuid>` (the bridged provider's form). The outputs the REST
  *     paths read (masterId, networkId) are bare UUIDs, and so is the master

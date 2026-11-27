@@ -117,6 +117,38 @@ export function replicationPeerIpFor(envConfig, stackName) {
 }
 
 /**
+ * What a converge says when its program declares a cluster's replication rule
+ * (UDP 51821 from `peerIp`, replicationPeerIpFor): the stack, then the peer.
+ * The e2e scale check reads it back (parseReplicationRuleNotices) as the
+ * proof the scale's up kept the rule, on a provider whose refresh rewrites
+ * the group however its rules were declared
+ * (BaseProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE).
+ * @param {string} stackName the Pulumi stack the program is for
+ * @param {string} peerIp the peer's recorded database node address
+ * @returns {string}
+ */
+export function replicationRuleNotice(stackName, peerIp) {
+  return `[firewall] ${stackName}: this up keeps UDP 51821 open to the peer database node ${peerIp}, so replication carries on through it`;
+}
+
+const REPLICATION_RULE_NOTICE =
+  /\[firewall\] (\S+): this up keeps UDP 51821 open to the peer database node (\S+), so replication/g;
+
+/**
+ * Every replicationRuleNotice in a command's output: the peer each stack's
+ * program declared, the last one said per stack.
+ * @param {string} output
+ * @returns {Map<string, string>} stack name to peer address
+ */
+export function parseReplicationRuleNotices(output) {
+  const declared = new Map();
+  for (const [, stack, peerIp] of output.matchAll(REPLICATION_RULE_NOTICE)) {
+    declared.set(stack, peerIp);
+  }
+  return declared;
+}
+
+/**
  * The frozen `sshKeyId` output: the caller's existing key id as given, or the
  * created key's id as a string Output.
  * @param {string|{apply: (fn: (id: unknown) => string) => unknown}} sshKeyId

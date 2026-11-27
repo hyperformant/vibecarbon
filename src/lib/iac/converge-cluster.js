@@ -207,13 +207,14 @@ export async function convergeClusterInfra({
   // standby. A hand-edited address stops here, before any cloud call, by the
   // name failover reads to skip its revert. Dynamic: program-inputs.js
   // reaches @pulumi/pulumi (through create-timeout.js), see CD2 below.
-  const { replicationPeerIpFor } = await import('./program-inputs.js');
+  const { replicationPeerIpFor, replicationRuleNotice } = await import('./program-inputs.js');
   let replicationPeerIp;
   try {
     replicationPeerIp = replicationPeerIpFor(envConfig, clusterEnv);
   } catch (err) {
     throw new ConvergeBuildError(clusterEnv, err);
   }
+  if (replicationPeerIp) p.log.info(replicationRuleNotice(clusterEnv, replicationPeerIp));
 
   // Apply server type changes via Pulumi. Hetzner server_type is an in-place
   // resize via the provider's update path (~2 min reboot), so a legitimate

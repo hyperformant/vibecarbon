@@ -541,6 +541,21 @@ export class BaseProvider {
   static K8S_OPERATOR_RULES_AFTER_UP = false;
 
   /**
+   * Whether a refresh reads an inline k8s firewall's rules back in the shape
+   * its program declares them. Then an up after a REST rule write (the
+   * k8s-ha replication rule, an operator push) plans no firewall change, as
+   * long as the program declares what REST wrote, and a planned change means
+   * it did not. Scaleway's provider rebuilds a rule REST moved to another
+   * index in its own shape, so the first up after such a write rewrites the
+   * group, to the same rules (ScalewayProvider). The e2e scale check reads a
+   * firewall change in the scale's output as a dropped rule only where this
+   * holds (tests/e2e/checks/scale-ha.ts). Meaningless on a provider whose
+   * program declares no rule REST writes (K8S_OPERATOR_RULES_AFTER_UP).
+   * @type {boolean}
+   */
+  static K8S_FIREWALL_RULES_READ_BACK_IN_PLACE = true;
+
+  /**
    * Whether this provider's compose program gives the server a floating (or
    * reserved) IP. Scaleway's does (a flexible IP); no other provider's does.
    * Compose destroy deletes the server by its API, which frees only an IP

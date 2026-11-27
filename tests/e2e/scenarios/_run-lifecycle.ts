@@ -91,7 +91,7 @@ import {
 } from '../checks/replication.js';
 import {
   checkReplicationFirewalls,
-  checkScaleUpsLeftFirewalls,
+  checkScaleUpsKeptReplicationRule,
   runHaFirewallChecks,
   runScaleHaChecks,
 } from '../checks/scale-ha.js';
@@ -3421,14 +3421,16 @@ EOF`;
           //       type, so its tunnel rebuild re-opens the rule by REST after
           //       both ups: the read proves the scale ENDS with the rule open,
           //       whatever the programs declared;
-          //     - on a provider whose program declares its rules inline, the
-          //       scale's ups changed no firewall resource, read from their
+          //     - on a provider whose program declares its rules inline,
+          //       each side's converge declared the rule from the recorded
+          //       peer, and, where a refresh reads the rules back in place,
+          //       its up changed no firewall resource, read from the
           //       per-resource markers in this scale's output. That is the
-          //       proof the ups kept the rule the program declares.
+          //       proof the ups kept the rule.
+          const scaleProvider = getProviderClass(config.provider ?? 'hetzner');
           const haScaleResults = await runScaleHaChecks({
             mode: config.mode,
-            inlineFirewallRules: !getProviderClass(config.provider ?? 'hetzner')
-              .K8S_OPERATOR_RULES_AFTER_UP,
+            inlineFirewallRules: !scaleProvider.K8S_OPERATOR_RULES_AFTER_UP,
             replication: () => {
               const { primaryIp, standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
               return runReplicationChecks({
@@ -3442,10 +3444,11 @@ EOF`;
             },
             firewalls: readReplicationFirewalls,
             scaleUps: () =>
-              checkScaleUpsLeftFirewalls({
+              checkScaleUpsKeptReplicationRule({
                 output: `${stdoutClean}\n${stderrClean}`,
                 envName: config.envPrefix,
                 envConfig: readEnvConfig(config.projectDir, config.envPrefix),
+                rulesReadBackInPlace: scaleProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE,
               }),
           });
           collector.recordVerifications(stepId, haScaleResults);

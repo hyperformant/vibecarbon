@@ -46,6 +46,7 @@ vi.mock('@pulumiverse/scaleway', async (orig) => {
   };
 });
 
+import { replicationRuleNotice } from '../../../src/lib/iac/program-inputs.js';
 import {
   buildScalewayK8sProgram,
   privateIpv4In,
@@ -58,7 +59,7 @@ import {
   decodeLabels,
   ScalewayProvider,
 } from '../../../src/lib/providers/scaleway.js';
-import { checkScaleUpsLeftFirewalls } from '../../e2e/checks/scale-ha.js';
+import { checkScaleUpsKeptReplicationRule } from '../../e2e/checks/scale-ha.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: mock inputs of every resource shape
 type Captured = { type: string; name: string; inputs: Record<string, any> };
@@ -522,7 +523,10 @@ describe('buildScalewayK8sProgram resource graph', () => {
 
   // The e2e scale check (tests/e2e/checks/scale-ha.ts) reads a firewall
   // change from the per-resource markers by type name: the security group
-  // must count as one, and nothing a scale legitimately changes may.
+  // must count as one, and nothing a scale legitimately changes may. On
+  // Scaleway the first up after a REST insert rewrites the group
+  // (K8S_FIREWALL_RULES_READ_BACK_IN_PLACE), so there the change passes on
+  // the declared peer.
   it('the scale firewall check counts the security group, and no other resource, as a firewall', () => {
     const ha = {
       ha: {
@@ -531,21 +535,32 @@ describe('buildScalewayK8sProgram resource graph', () => {
       },
     };
     const lines = (list: Captured[]) =>
-      ['prod-primary', 'prod-standby'].flatMap((stack) => [
+      (
+        [
+          ['prod-primary', '203.0.113.20'],
+          ['prod-standby', '203.0.113.10'],
+        ] as const
+      ).flatMap(([stack, peer]) => [
+        replicationRuleNotice(stack, peer),
         `[perf] scale.k8s.${stack}.upStack 1000ms`,
         ...list.map(
           (r) =>
             `[perf] scale.k8s.${stack}.upStack.resource.${timedTypeName(r.type)}.${r.name} 1ms`,
         ),
       ]);
-    const check = (list: Captured[]) =>
-      checkScaleUpsLeftFirewalls({
+    const check = (list: Captured[], rulesReadBackInPlace = true) =>
+      checkScaleUpsKeptReplicationRule({
         output: lines(list).join('\n'),
         envName: 'prod',
         envConfig: ha,
+        rulesReadBackInPlace,
       }).map((r) => r.status);
     expect(check(resources.filter((r) => r.type !== GROUP))).toEqual(['pass', 'pass']);
     expect(check(byType(resources, GROUP))).toEqual(['fail', 'fail']);
+    expect(ScalewayProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE).toBe(false);
+    expect(
+      check(byType(resources, GROUP), ScalewayProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE),
+    ).toEqual(['pass', 'pass']);
   });
 });
 

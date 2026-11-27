@@ -289,6 +289,53 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Safety: an up never detaches a volume the CSI driver attached. Scaleway's
+  // server lists its attached volumes in `additionalVolumeIds`, which the
+  // provider's read fills from the live server and its update resets to the
+  // program's value. No program sets it, so every up after a refresh sent the
+  // root volume alone and Scaleway detached the database's PersistentVolume
+  // (the 2026-11-27 resize scales, s3 and s4). Ignored, the up leaves it be.
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource leaves its attached volumes to the CSI driver',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input = (
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES] as {
+            attachedVolumesInput?: string;
+          }
+        ).attachedVolumesInput;
+        if (!input) continue;
+        // The program never declares the list, so ignoring it hides nothing
+        // the program means to change.
+        expect(
+          Object.keys((server.args ?? {}) as object),
+          `${file}: ${server.type} "${server.name}" declares ${input}, which the CSI driver owns`,
+        ).not.toContain(input);
+        const opts = (server.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(
+          opts.ignoreChanges ?? [],
+          `${file}: ${server.type} "${server.name}" would detach a volume the CSI driver attached`,
+        ).toContain(input);
+      }
+    },
+  );
+
+  // Which server types name one, and why the rest need none: a list a new
+  // provider has to take a side in. DigitalOcean's `volumeIds` and Linode's
+  // `config` are Computed (terraform-provider-digitalocean resource_droplet.go,
+  // terraform-provider-linode instance/schema_resource.go), so leaving them
+  // out keeps what the driver attached; Hetzner and Vultr attach a volume
+  // through the volume, never the server.
+  it('only Scaleway servers carry an attached-volume list an up would reset', () => {
+    const named = Object.entries(SERVER_RESOURCE_TYPES)
+      .filter(([, t]) => (t as { attachedVolumesInput?: string }).attachedVolumesInput)
+      .map(([token, t]) => [token, (t as { attachedVolumesInput?: string }).attachedVolumesInput]);
+    expect(named).toEqual([['scaleway:instance/server:Server', 'additionalVolumeIds']]);
+  });
+
   // Speed: DO's vendor cloud-init installs the Droplet Console agent, costing
   // 44-68s of first boot on every node. `dropletAgent: false` skips it. The
   // provider treats the field as create-only, so it is ignored on existing

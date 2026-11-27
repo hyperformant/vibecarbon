@@ -170,6 +170,47 @@ describe('convergeClusterInfra', () => {
     }
   });
 
+  // k8s-ha: the program declares the replication rule from the peer's
+  // recorded database address, and the converge says so, by stack and peer:
+  // the e2e scale check reads that line as the proof the up kept the rule
+  // (tests/e2e/checks/scale-ha.ts).
+  it('(a3) names the peer it declares the replication rule from, and hands it to the program', async () => {
+    const { Provider, programCalls } = makeProvider();
+    const p = await import('@clack/prompts');
+    const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    const ha = {
+      primary: { stack: 'unit-cluster-xyz', dbIp: '198.51.100.1' },
+      standby: { stack: 'unit-cluster-abc', dbIp: '198.51.100.2' },
+    };
+    try {
+      await convergeClusterInfra({
+        ...baseArgs({ envConfig: { ...baseArgs().envConfig, ha } }),
+        Provider,
+      });
+      expect(programCalls[0].replicationPeerIp).toBe('198.51.100.2');
+      const { parseReplicationRuleNotices } = await import(
+        '../../../src/lib/iac/program-inputs.js'
+      );
+      const said = parseReplicationRuleNotices(info.mock.calls.map(([m]) => String(m)).join('\n'));
+      expect([...said]).toEqual([['unit-cluster-xyz', '198.51.100.2']]);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('(a4) says nothing about the rule when no peer is on record', async () => {
+    const { Provider, programCalls } = makeProvider();
+    const p = await import('@clack/prompts');
+    const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    try {
+      await convergeClusterInfra({ ...baseArgs(), Provider });
+      expect(programCalls[0].replicationPeerIp).toBeUndefined();
+      expect(JSON.stringify(info.mock.calls)).not.toContain('51821');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('(b) throws before upStack when the preview schedules a master replace', async () => {
     getOrCreateStackMock.mockResolvedValue({
       preview: vi.fn(async ({ onEvent }: { onEvent: (e: unknown) => void }) => {
