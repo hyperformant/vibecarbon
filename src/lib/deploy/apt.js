@@ -34,8 +34,10 @@
  * `update` takes dpkg's lock-frontend too, but the list lock (lists/lock) is
  * apt's own: with it held, `apt-get -o DPkg::Lock::Timeout=30 update` exits
  * 100 in 0 s, because the option does not apply to it. The cloud-init
- * programs are covered anyway (apt-daily is ordered Before= cloud-init's
- * final stage); post-boot ssh refreshes call aptWaitForDailyUnits() first.
+ * programs are covered anyway (cloud-init's final stage is ordered Before=
+ * apt-daily.service); post-boot ssh refreshes, and unattended-upgrade, which
+ * exits 1 at once on the daily job's own lock, call aptWaitForDailyUnits()
+ * first. tests/unit/deploy/apt-daily-wait-census.test.ts holds that.
  *
  * WHY THIS REPLACED THREE SEPARATE DODGES
  * ---------------------------------------

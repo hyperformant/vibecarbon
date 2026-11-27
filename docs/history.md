@@ -1975,6 +1975,27 @@ and must never replace the failure they describe.
 `tests/unit/deploy/node-join.test.ts` and
 `tests/unit/providers/describe-server-for-diagnosis.test.ts`.
 
+#### 2026-11-27: `update`'s check waits for Ubuntu's daily apt job
+
+`update` reads each server's pending updates only after Ubuntu's daily apt
+units are done (`aptWaitForDailyUnits()`, at most 300 s), and its ssh bound
+covers that wait as well as apt's lock wait. When the dry run still fails, the
+reason names the last line it printed.
+
+**Why:** perf run 45940611622 (vultr/k8s-ha) checked both database nodes about
+4 minutes after they booted, while Ubuntu's apt-daily-upgrade was installing
+there. unattended-upgrade exits 1 at once when another one holds its lock, so
+both nodes were skipped with "unattended-upgrade exited 1" and nothing more.
+`update`'s install and Docker upgrade, and the WireGuard install, already
+waited; the check was the one post-boot apt script that did not.
+
+**Do not undo:** do not drop the wait for a retry of the check. Every apt
+refresh or unattended-upgrade we run over ssh waits first; only cloud-init,
+which runs before apt-daily, and a command we print for a person go without.
+
+**Guard:** `tests/unit/deploy/apt-daily-wait-census.test.ts`, with the wait and
+reason cases in `tests/unit/update/inspect.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

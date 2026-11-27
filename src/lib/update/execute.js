@@ -102,7 +102,7 @@ const APP_READY_PATH = '/api/health/ready';
  * Installs the security updates the daily job would, the same way it does,
  * once the daily apt units are done, so the two never run apt at once.
  */
-const UPGRADE_ARGV = [
+export const UPGRADE_ARGV = [
   'env',
   'DEBIAN_FRONTEND=noninteractive',
   'sh',
@@ -143,7 +143,7 @@ const BOOT_ARGV = [
  *
  * @returns {string[]}
  */
-function dockerUpdateArgv() {
+export function dockerUpdateArgv() {
   const install = aptGet(
     `install -y --only-upgrade -o Dpkg::Options::=--force-confold ${DOCKER_PACKAGES.join(' ')}`,
   );
