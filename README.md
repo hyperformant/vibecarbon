@@ -223,7 +223,7 @@ Same family, different starting point. If your app already exists, those tools a
 </details>
 
 ### Infrastructure
-- New environments in minutes, and warm redeploys in seconds (<!-- perf:warm-deploy:hetzner/k8s -->15.0s<!-- /perf --> k8s / <!-- perf:warm-deploy:hetzner/compose -->16.4s<!-- /perf --> compose, [measured](#performance))
+- New environments in minutes, and warm redeploys in seconds (<!-- perf:warm-deploy:hetzner/k8s -->12.1s<!-- /perf --> k8s / <!-- perf:warm-deploy:hetzner/compose -->14.8s<!-- /perf --> compose, [measured](#performance))
 - Security hardened from day one, with automatic operator CIDR firewalling
 - Automated deployments via CI/CD
 - Auto-scaling (2-10+ replicas)
@@ -288,9 +288,9 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 <!-- BEGIN:perf-table -->
 | Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` | `failover` |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Hetzner Cloud | `compose` | 1m 52s | 16.4s | 4.6s | 2m 32s | 2m 22s | 15.2s | — |
-| | `k8s` | 5m 36s | 15.0s | 25.8s | 1m 34s | 2m 18s | 1m 26s | — |
-| | `k8s-ha` | 3m 29s | 29.6s | 24.3s | 2m 11s | 4m 23s | 1m 20s | 3m 18s |
+| Hetzner Cloud | `compose` | 1m 44s | 14.8s | 5.5s | 2m 28s | 3m 18s | 14.4s | — |
+| | `k8s` | 3m 25s | 12.1s | 25.5s | 1m 31s | 1m 58s | 1m 17s | — |
+| | `k8s-ha` | 3m 35s | 28.6s | 23.1s | 2m 7s | 4m 4s | 1m 19s | 3m 16s |
 | DigitalOcean | `compose` | 1m 59s | 16.7s | 5.7s | 2m 20s | 2m 29s | 27.9s | — |
 | | `k8s` | 3m 2s | 18.2s | 33.3s | 1m 40s | 2m 11s | 1m 1s | — |
 | | `k8s-ha` | 3m 47s | 27.0s | 33.9s | 2m 10s | 3m 54s | 1m 8s | 3m 10s |
@@ -300,11 +300,11 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
 | | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| Scaleway | `compose` | 2m 27s | 17.5s | 5.6s | 2m 12s | 2m 30s | 21.3s | — |
-| | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| Scaleway | `compose` | 2m 23s | 19.8s | 3.1s | 2m 24s | 2m 11s | 32.5s | — |
+| | `k8s` | 5m 10s | 19.2s | 25.6s | 1m 48s | 2m 31s | 1m 47s | — |
+| | `k8s-ha` | 5m 23s | 41.5s | 31.4s | 3m 18s | 5m 31s | 1m 50s | 5m 29s |
 
-_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `aaa073b` (2026-11-27) · Linode `84ef6ef` (2026-11-27) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `20e286a` (2026-11-27) · DigitalOcean `aaa073b` (2026-11-27) · Linode `84ef6ef` (2026-11-27) · Vultr `cc553a2` (2026-11-25) · Scaleway `f0e86de` (2026-11-27) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on all five providers today.
