@@ -1,12 +1,12 @@
 /**
  * Scaleway Cloud Provider
  *
- * Compose + compose-ha provider (PR 3 of the 2026-08 provider expansion +
- * tier-parity wave 1 — see
- * the scaleway-provider-step0-audit plan for the
- * live-API-verified capability audit). The k8s statics throw
- * provider-specific errors (Scaleway's k8s tier is unbuilt, not forgotten —
- * 4-mode headroom is recorded in the audit).
+ * Runs every mode (SUPPORTED_TIERS): compose and compose-ha through
+ * iac/programs/scaleway-compose.js, k8s and k8s-ha through
+ * iac/programs/scaleway-k8s.js, which boots k3s on Instances
+ * (carbon/cloud-init/k3s/scaleway-*-init.sh) with scaleway-csi for volumes
+ * (K8S_ASSETS) and no Scaleway cloud controller (see PROVIDER_ID_PREFIX).
+ * The live-API capability audit is the scaleway-provider-step0-audit plan.
  *
  * Scaleway-shape notes (vs the Hetzner/DO/Linode/Vultr templates):
  *
@@ -35,6 +35,10 @@
  *   Hetzner's per-project API tokens; guided setup says this too).
  *   `createServer` consequently takes no ssh-key field at all — the
  *   Project's keys are the mechanism (audit design flag 1).
+ * - EVERY LISTING IS SCOPED TO SCALEWAY_DEFAULT_PROJECT_ID (projectScope):
+ *   an organization-wide key lists every project's servers, IPs and security
+ *   groups, so each walk sends the project and keeps only its rows, and
+ *   without the id nothing is listed or deleted.
  * - TERMINATE ONLY DETACHES SBS VOLUMES (SDK verbatim: "The `terminate`
  *   action will result in the deletion of `l_ssd` and `scratch` volumes
  *   types, `sbs_volume` volumes will only be detached"), and BASIC3/
@@ -271,6 +275,56 @@ function scalewayOperatorIds() {
 }
 
 /**
+ * The one Scaleway project vibecarbon reads and changes:
+ * SCALEWAY_DEFAULT_PROJECT_ID. A key can see every project in its
+ * organization, and a listing sent without a project filter returns them
+ * all, so a destroy sweep, the autoscaler's refresh or a firewall lookup
+ * would reach another project's resource with the same name or tags. Every
+ * listing is scoped to it (projectScope), and none falls back to an unscoped
+ * listing when it is missing: the listing throws instead, naming it.
+ * @returns {string}
+ * @throws when it is not set
+ */
+function configuredProjectId() {
+  const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
+  if (projectId) return projectId;
+  throw new Error(
+    'SCALEWAY_DEFAULT_PROJECT_ID is not set, so vibecarbon reads and changes nothing on ' +
+      'Scaleway: a key can see more than one project, and without it a listing would hold ' +
+      "other projects' servers, IPs and security groups too. Run vibecarbon configure and " +
+      "pick Providers, then Scaleway, or set it in your shell or the project's .env.local.",
+  );
+}
+
+/**
+ * Scope one listing to the configured project, both ways: the query asks
+ * the API for that project's rows, and `keep` drops any other row, so a
+ * filter the API ignored can never widen what a caller acts on. `field` is
+ * the name the API gives the project on the query and on each row
+ * (scaleway-sdk-go at 25895fc5, the source the facts file was built from):
+ *   - the Instance API says `project`: ListServers (instance_sdk.go:4397) and
+ *     Server.Project (:1649); ListIPs (:6468) and IP.Project (:1765);
+ *     ListSecurityGroups (:5631) and SecurityGroup.Project (:1831);
+ *     ListVolumes (:5452) and Volume.Project (:1311);
+ *   - the Block, VPC, IAM and Load Balancer APIs say `project_id`: block/v1
+ *     ListVolumes (block_sdk.go:960) and Volume.ProjectID (:534); vpc/v2
+ *     ListPrivateNetworks (vpc_sdk.go:1568) and PrivateNetwork.ProjectID
+ *     (:492), ListVPCs (:1387) and VPC.ProjectID (:671); iam/v1alpha1
+ *     ListSSHKeys (iam_sdk.go:3215) and SSHKey.ProjectID (:1535); lb/v1
+ *     ZonedAPI.ListLBs (lb_sdk.go:4653) and LB.ProjectID (:1351).
+ * @param {'project'|'project_id'} field
+ * @returns {{query: string, keep: (rows: object[]) => object[]}}
+ * @throws when SCALEWAY_DEFAULT_PROJECT_ID is not set (configuredProjectId)
+ */
+function projectScope(field) {
+  const projectId = configuredProjectId();
+  return {
+    query: `${field}=${encodeURIComponent(projectId)}`,
+    keep: (rows) => rows.filter((row) => row?.[field] === projectId),
+  };
+}
+
+/**
  * Encode a label key/value pair into a Scaleway tag string — same
  * `key:value` wire encoding as the DO/Linode/Vultr tag-based providers
  * (byte-compatible so the destroy-sweep/listing matchers behave
@@ -400,10 +454,12 @@ export class ScalewayProvider extends BaseProvider {
   // needs. See BaseProvider.STATE_BACKEND_CHECKSUM_CALCULATION for the full
   // RCA and for why this is opt-in per provider rather than a global flip.
   static STATE_BACKEND_CHECKSUM_CALCULATION = 'when_supported';
-  // The providerID scheme Scaleway's CCM stamps on nodes
-  // (`scaleway://instance/<zone>/<uuid>` — note TWO path segments between
-  // prefix and UUID, unlike hcloud://<id>). Relevant only at the (unbuilt)
-  // k8s tier; pinned now for uniqueness.
+  // The providerID every k3s node boots with: `scaleway://<server uuid>`,
+  // set by --kubelet-arg=provider-id in carbon/cloud-init/k3s/scaleway-*-init.sh.
+  // No Scaleway CCM runs (its own form is scaleway://instance/<zone>/<uuid>),
+  // so k3s's embedded cloud controller keeps the preset id, and the
+  // autoscaler and the shared parsers read the server id straight after
+  // this prefix, as on every other provider.
   static PROVIDER_ID_PREFIX = 'scaleway://';
   static DEFAULT_REGION = 'fr-par-1'; // a ZONE — see the class header
   static PRICING_URL = 'https://www.scaleway.com/en/pricing/';
@@ -1059,24 +1115,24 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Page-walk one `page`/`page_size` listing (the IAM, VPC, Block Storage
-   * and Load Balancer APIs; a page shorter than page_size ends the walk).
-   * Soft completeness signal like the zone walks: a non-ok page returns the
-   * rows read so far with its `status`.
+   * and Load Balancer APIs; a page shorter than page_size ends the walk),
+   * scoped to the configured project (projectScope: `project_id` on the
+   * query and on each row kept). Soft completeness signal like the zone
+   * walks: a non-ok page returns the rows read so far with its `status`.
    * @param {string} path - full API path, e.g. '/iam/v1alpha1/ssh-keys'
    * @param {string} key - response array key (e.g. 'ssh_keys')
-   * @param {string} [query] - extra query (e.g. 'project_id=…'), no '?'
    * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   * @throws when SCALEWAY_DEFAULT_PROJECT_ID is not set
    */
-  async _walkPageSize(path, key, query = '') {
+  async _walkPageSize(path, key) {
+    const scope = projectScope('project_id');
     const items = [];
     for (let page = 1; page <= 20; page++) {
-      const res = await this.bareRequest(
-        `${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
-      );
+      const res = await this.bareRequest(`${path}?page_size=100&page=${page}&${scope.query}`);
       if (!res.ok) return { items, complete: false, status: res.status };
       const data = await res.json().catch(() => ({}));
       const pageItems = data[key] || [];
-      items.push(...pageItems);
+      items.push(...scope.keep(pageItems));
       if (pageItems.length < 100) return { items, complete: true };
     }
     return { items, complete: false };
@@ -1086,25 +1142,33 @@ export class ScalewayProvider extends BaseProvider {
    * Page-walk one zone-scoped listing (`page`/`per_page`; Scaleway v1 has
    * no cursor — a page shorter than per_page ends the walk). Same ≤20-page
    * guard and completeness semantics as the sibling providers' walks.
+   * Scoped to the configured project (projectScope: `project` on the query
+   * and on each row kept), except a group's rules (`scoped: false`), which
+   * are the group's own sub-resource and carry no project.
    * @param {string} path - zone-relative path WITH leading slash and any
    *   query of its own (e.g. '/servers' or '/servers?name=x')
    * @param {string} key - response array key (e.g. 'servers')
    * @param {string} zone
+   * @param {{scoped?: boolean}} [options]
    * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   * @throws when the listing is scoped and SCALEWAY_DEFAULT_PROJECT_ID is not set
    */
-  async _walkZone(path, key, zone) {
+  async _walkZone(path, key, zone, { scoped = true } = {}) {
+    const scope = scoped ? projectScope('project') : null;
     const items = [];
     const sep = path.includes('?') ? '&' : '?';
+    const query = scope ? `&${scope.query}` : '';
     for (let page = 1; page <= 20; page++) {
       const response = await this.bareRequest(
-        `/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}`,
+        `/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}${query}`,
       );
       if (!response.ok) return { items, complete: false, status: response.status };
       const data = await response.json();
       const pageItems = Array.isArray(data[key]) ? data[key] : [];
       // Stamp the zone: it is path data on Scaleway, and every id-scoped
-      // follow-up (delete/action) needs it back.
-      items.push(...pageItems.map((it) => ({ zone, ...it })));
+      // follow-up (delete/action) needs it back. The page's own length ends
+      // the walk, never the rows kept.
+      items.push(...(scope ? scope.keep(pageItems) : pageItems).map((it) => ({ zone, ...it })));
       if (pageItems.length < 100) return { items, complete: true };
     }
     return { items, complete: false };
@@ -1129,18 +1193,17 @@ export class ScalewayProvider extends BaseProvider {
   /**
    * Walk one VPC API collection (`private-networks`, `vpcs`) in every
    * region, merged as _walkAllZones does, each row stamped with its region:
-   * a delete goes to the region it is listed in. Scoped to
-   * SCALEWAY_DEFAULT_PROJECT_ID when it is set, as deleteSSHKeyByName is, so
-   * another project's network of the same name is never listed.
+   * a delete goes to the region it is listed in. Scoped to the configured
+   * project, as every listing is (_walkPageSize), so another project's
+   * network of the same name is never listed.
    * @param {string} collection - 'private-networks' or 'vpcs'
    * @param {string} key - response array key ('private_networks', 'vpcs')
    * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   * @throws when SCALEWAY_DEFAULT_PROJECT_ID is not set
    */
   async _walkVpcApi(collection, key) {
-    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const query = projectId ? `project_id=${encodeURIComponent(projectId)}` : '';
     return mergeWalks(ScalewayProvider._regions(), async (region) => {
-      const walk = await this._walkPageSize(`/vpc/v2/regions/${region}/${collection}`, key, query);
+      const walk = await this._walkPageSize(`/vpc/v2/regions/${region}/${collection}`, key);
       return { ...walk, items: walk.items.map((row) => ({ region, ...row })) };
     });
   }
@@ -1231,11 +1294,8 @@ export class ScalewayProvider extends BaseProvider {
   async createServer(config) {
     const { name, region, serverType, image, labels, userData, networks, firewalls } = config;
 
-    const [existing] = await this.findServersByName(name);
-    if (existing) {
-      return { id: existing.id, server: existing, reused: true };
-    }
-
+    // Before the reuse lookup, which is project-scoped and would refuse on
+    // its own, but in words that say nothing of the SSH keys.
     const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     if (!projectId) {
       throw new Error(
@@ -1243,6 +1303,11 @@ export class ScalewayProvider extends BaseProvider {
           "project's DEDICATED Scaleway Project (SSH keys are Project-scoped; see " +
           "scaleway-guided-setup). Set it in your shell or the project's .env.local.",
       );
+    }
+
+    const [existing] = await this.findServersByName(name);
+    if (existing) {
+      return { id: existing.id, server: existing, reused: true };
     }
 
     const fwList = Array.isArray(firewalls) ? firewalls : [];
@@ -1343,7 +1408,8 @@ export class ScalewayProvider extends BaseProvider {
     } catch (err) {
       const cleanup = await this.deleteServer(server.id).then(
         () => '',
-        (deleteErr) => `; deleting server ${name} failed too (${deleteErr.message})`,
+        (deleteErr) =>
+          `; deleting server ${name} failed too (${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)})`,
       );
       throw new Error(`Scaleway ${step} failed: ${err.message}${cleanup}`, { cause: err });
     }
@@ -1385,12 +1451,21 @@ export class ScalewayProvider extends BaseProvider {
    * throws that refusal, with status 403, as a refused DELETE throws on the
    * other providers (deleteServerAt): destroy reports the server, never
    * reads it as deleted (serverZoneError).
+   *
+   * Only a server of the configured project is deleted (configuredProjectId):
+   * without SCALEWAY_DEFAULT_PROJECT_ID this refuses before any request, and
+   * a server step 1 reads in another project is refused before terminate. A
+   * key that sees several projects can read another project's server by id,
+   * and an id reaches here from a listing, a record or the autoscaler.
    * @param {string} serverId
    * @param {{waitUntilGone?: boolean, onLeftover?: (line: import('./base.js').ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>}
-   * @throws when a zone refused the read and no zone showed the server
+   * @throws when a zone refused the read and no zone showed the server, when
+   *   SCALEWAY_DEFAULT_PROJECT_ID is not set, or when the server is another
+   *   project's
    */
   async deleteServer(serverId, { waitUntilGone = false, onLeftover } = {}) {
+    const projectId = configuredProjectId();
     const { zone, refusedIn = [] } = await this._probeServerZone(serverId);
     if (!zone) {
       if (refusedIn.length > 0)
@@ -1404,6 +1479,13 @@ export class ScalewayProvider extends BaseProvider {
     const getRes = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (getRes.ok) {
       const { server } = await getRes.json();
+      if (server.project !== projectId) {
+        throw new Error(
+          `Failed to delete server: ${server.name ?? serverId} (${serverId}) is in Scaleway ` +
+            `project ${server.project ?? 'unknown'}, not SCALEWAY_DEFAULT_PROJECT_ID's ` +
+            `${projectId}, so vibecarbon leaves it alone`,
+        );
+      }
       const root = server.volumes?.['0'];
       sbsVolumeIds = root?.volume_type === 'sbs_volume' && root?.id ? [root.id] : [];
       publicIpIds = (server.public_ips ?? []).map((ip) => ip?.id).filter(Boolean);
@@ -1658,19 +1740,13 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<string>} SSH key UUID
    */
   async createSSHKey(name, publicKey) {
-    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     const targetMaterial = normalizePublicKey(publicKey);
 
-    const { items: existingKeys } = await this._walkPageSize(
-      '/iam/v1alpha1/ssh-keys',
-      'ssh_keys',
-      projectId ? `project_id=${projectId}` : '',
-    );
+    const { items: existingKeys } = await this._walkPageSize('/iam/v1alpha1/ssh-keys', 'ssh_keys');
     const match = existingKeys.find((k) => normalizePublicKey(k.public_key) === targetMaterial);
     if (match) return match.id;
 
-    const body = { name, public_key: publicKey.trim() };
-    if (projectId) body.project_id = projectId;
+    const body = { name, public_key: publicKey.trim(), project_id: configuredProjectId() };
     const response = await this.apiRequest('/iam/v1alpha1/ssh-keys', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -1724,9 +1800,10 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Look up a security group by its exact name (server-side contains
-   * filter + client-side exact match, per zone). The returned object is
-   * AUGMENTED with `rules` (fetched here) and `zone` so the rule-rewrite
-   * methods can operate on it — Scaleway keeps rules as a sub-resource.
+   * filter + client-side exact match, per zone, inside the configured
+   * project). The returned object is AUGMENTED with `rules` (fetched here)
+   * and `zone` so the rule-rewrite methods can operate on it — Scaleway
+   * keeps rules as a sub-resource.
    *
    * Null only when every zone's listing came back whole and none has the
    * name. A walk that stopped early (an error page, or the page cap) throws
@@ -1734,9 +1811,13 @@ export class ScalewayProvider extends BaseProvider {
    * whole, a short group listing told destroy a live group never existed,
    * and a short rules listing had applyOperatorCidrs and the replication
    * write PUT back a rule set missing whatever the listing dropped, 80 and
-   * 443 among them. Every caller catches the throw or passes it on.
+   * 443 among them. More than one group by that name throws too, naming
+   * each: a leaked twin could shadow the live group, and rules written to it
+   * would protect nothing. Every caller catches the throw or passes it on.
    * @param {string} name
    * @returns {Promise<object|null>}
+   * @throws when a listing is partial, the name is ambiguous, or
+   *   SCALEWAY_DEFAULT_PROJECT_ID is not set
    */
   async findFirewallByName(name) {
     const partial = (what, walk) =>
@@ -1744,6 +1825,7 @@ export class ScalewayProvider extends BaseProvider {
         `Scaleway listed only part of ${what}` +
           `${walk.status === undefined ? '' : ` (HTTP ${walk.status})`}, so nothing was changed`,
       );
+    const groups = [];
     for (const zone of ScalewayProvider._zones()) {
       const walk = await this._walkZone(
         `/security_groups?name=${encodeURIComponent(name)}`,
@@ -1751,17 +1833,29 @@ export class ScalewayProvider extends BaseProvider {
         zone,
       );
       if (!walk.complete) throw partial(`zone ${zone}'s security groups`, walk);
-      const group = walk.items.find((g) => g.name === name);
-      if (!group) continue;
-      const rulesWalk = await this._walkZone(`/security_groups/${group.id}/rules`, 'rules', zone);
-      if (!rulesWalk.complete) throw partial(`${name}'s rules`, rulesWalk);
-      this._sgZoneCache ??= new Map();
-      this._sgZoneCache.set(group.id, zone);
-      // Strip the zone stamp _walkZone put on each rule — rules are pure
-      // wire objects the replace path sends back verbatim (minus ids).
-      return { ...group, zone, rules: rulesWalk.items.map(({ zone: _z, ...r }) => r) };
+      groups.push(...walk.items.filter((g) => g.name === name));
     }
-    return null;
+    if (groups.length === 0) return null;
+    if (groups.length > 1) {
+      throw new Error(
+        `Scaleway has ${groups.length} security groups named ${name} in this project ` +
+          `(${groups.map((g) => `${g.id} in ${g.zone}`).join(', ')}), so vibecarbon cannot ` +
+          "tell which one is this stack's: a leaked twin could shadow the live group, and " +
+          'rules written to it would protect nothing. Nothing was changed. Delete the one no ' +
+          'server uses in the Scaleway console, then run this again.',
+      );
+    }
+    const [group] = groups;
+    const { zone } = group;
+    const rulesWalk = await this._walkZone(`/security_groups/${group.id}/rules`, 'rules', zone, {
+      scoped: false,
+    });
+    if (!rulesWalk.complete) throw partial(`${name}'s rules`, rulesWalk);
+    this._sgZoneCache ??= new Map();
+    this._sgZoneCache.set(group.id, zone);
+    // Strip the zone stamp _walkZone put on each rule — rules are pure
+    // wire objects the replace path sends back verbatim (minus ids).
+    return { ...group, zone, rules: rulesWalk.items.map(({ zone: _z, ...r }) => r) };
   }
 
   /** Resolve a security group's zone (cache-first, probe fallback). */
@@ -1804,12 +1898,13 @@ export class ScalewayProvider extends BaseProvider {
     // out keeps them, as Terraform's do (its cassettes' PUT bodies carry only
     // its own rules), and they count positions of their own: the editable
     // rules number theirs from 1.
-    // Normalize: fresh rules carry no id (null ⇒ create), editable defaults
-    // true (the API ignores a non-editable rule, so pinning it avoids a
-    // silently-dropped rule), and each rule's position is its place in the
-    // list. Set last: a kept rule still carries the position it was read
-    // with, and two rules on one position leave their order to the API, so
-    // the order the caller built would not be the order on the group.
+    // Normalize: fresh rules carry no id (null ⇒ create), and every rule
+    // sent says editable: true, since the filter has already dropped
+    // Scaleway's non-editable ones and what is left is ours. Each rule's
+    // position is its place in the list, set last: a kept rule still carries
+    // the position it was read with, and two rules on one position leave
+    // their order to the API, so the order the caller built would not be
+    // the order on the group.
     const wireRules = rules
       .filter((rule) => rule.editable !== false)
       .map((rule, i) => ({
@@ -1951,22 +2046,23 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Delete a Project-level IAM SSH key by its exact name. Never throws;
-   * false on no match. Scoped to SCALEWAY_DEFAULT_PROJECT_ID when set — the
-   * dedicated-Project doctrine makes that the deploy's own key namespace.
+   * Delete a Project-level IAM SSH key by its exact name; false on no match
+   * or a listing that failed. Scoped to SCALEWAY_DEFAULT_PROJECT_ID, the
+   * deploy's own key namespace under the dedicated-Project doctrine
+   * (projectScope), and throws when it is not set: false would read as gone.
+   * Every caller catches.
    * @param {string} name
    * @returns {Promise<boolean>}
+   * @throws when SCALEWAY_DEFAULT_PROJECT_ID is not set
    */
   async deleteSSHKeyByName(name) {
-    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
+    const scope = projectScope('project_id');
     const res = await this.bareRequest(
-      `/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
-        projectId ? `&project_id=${projectId}` : ''
-      }`,
+      `/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}&${scope.query}`,
     );
     if (!res.ok) return false;
     const { ssh_keys } = await res.json().catch(() => ({ ssh_keys: [] }));
-    const match = (ssh_keys || []).find((k) => k.name === name);
+    const match = scope.keep(ssh_keys || []).find((k) => k.name === name);
     if (!match) return false;
 
     return this.deleteGone(`/iam/v1alpha1/ssh-keys/${match.id}`);

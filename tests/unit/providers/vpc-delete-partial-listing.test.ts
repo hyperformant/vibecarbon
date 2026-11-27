@@ -22,9 +22,12 @@ import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { inTestProject, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
+  // Scaleway lists only the configured project (scaleway-project.ts).
+  stubScalewayProject();
 });
 
 const NAME = 'proj-prod-network';
@@ -87,10 +90,13 @@ const rows: Array<[string, Row]> = [
       // A full page (page_size=100) has a next; a short one ends the walk.
       firstPage: () =>
         ok({
-          private_networks: [
-            { id: 'pn-1', name: NAME },
-            ...Array.from({ length: 99 }, (_, i) => ({ id: `pn-x${i}`, name: `other-${i}` })),
-          ],
+          private_networks: inTestProject(
+            [
+              { id: 'pn-1', name: NAME },
+              ...Array.from({ length: 99 }, (_, i) => ({ id: `pn-x${i}`, name: `other-${i}` })),
+            ],
+            'project_id',
+          ),
         }),
       listing: 'Private Network',
       listed: /\/vpc\/v2\/regions\/[^/]+\/private-networks\?/,

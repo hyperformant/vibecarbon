@@ -30,6 +30,11 @@ import {
 } from '../../../src/lib/providers/scaleway.js';
 import { reservedIpLabel, VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
+import {
+  SCALEWAY_OTHER_PROJECT,
+  SCALEWAY_TEST_PROJECT,
+  stubScalewayProject,
+} from '../../_shared/scaleway-project.js';
 
 // A block body: an arrow that returns the mock would hand vitest a cleanup
 // hook, and vitest would call the mock once more after every test.
@@ -440,11 +445,18 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
 });
 
 describe('sweepK8sBackstopTargets on Scaleway', () => {
+  // Every listing is scoped to the configured project (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   type ScalewayIp = {
     id: string;
     address: string;
     tags: string[];
     server?: { id: string; name: string } | null;
+    /** The configured project unless given. */
+    project?: string;
   };
   /** The tags scaleway-k8s.js gives a node's flexible IP and its server. */
   const tags = (project: string, environment: string, role = 'master') =>
@@ -460,7 +472,10 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
       const path = new URL(url).pathname;
       const list = /^\/instance\/v1\/zones\/([^/]+)\/ips$/.exec(path);
       if (list) {
-        const rows = list[1] === 'fr-par-1' ? ips.map((ip) => ({ server: null, ...ip })) : [];
+        const rows =
+          list[1] === 'fr-par-1'
+            ? ips.map((ip) => ({ server: null, project: SCALEWAY_TEST_PROJECT, ...ip }))
+            : [];
         return { ok: true, status: 200, json: async () => ({ ips: rows }) };
       }
       const server = /^\/instance\/v1\/zones\/([^/]+)\/servers\/([^/]+)$/.exec(path);
@@ -564,6 +579,47 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
     });
     return results;
   };
+
+  it("another project's IPs with our project tags or our cluster tags are never released", async () => {
+    const { provider } = scaleway();
+    scalewayIps([
+      {
+        id: 'ip-8',
+        address: '203.0.113.8',
+        tags: tags('proj', 'prod'),
+        project: SCALEWAY_OTHER_PROJECT,
+      },
+      {
+        id: 'ip-9',
+        address: '203.0.113.9',
+        tags: workerTags('proj-prod', 'prod'),
+        project: SCALEWAY_OTHER_PROJECT,
+      },
+    ]);
+    const results = await sweepSingle(provider);
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID the label sweeps release nothing and keep the environment on record', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const { provider } = scaleway();
+    scalewayIps([{ id: 'ip-8', address: '203.0.113.8', tags: tags('proj', 'prod') }]);
+    const results = (await sweepSingle(provider)) as ReturnType<typeof makeResults> & {
+      unsweptReservedIpScopes?: string[];
+    };
+    expect(deleteUrls()).toEqual([]);
+    const ipEntries = results.leaks.entries.filter(
+      (e: { resourceClass: string }) => e.resourceClass === 'reserved-ip',
+    );
+    expect(ipEntries.map((e: { severity: string }) => e.severity)).toEqual([
+      'unverified',
+      'unverified',
+    ]);
+    for (const e of ipEntries) expect(e.reason).toContain('SCALEWAY_DEFAULT_PROJECT_ID is not set');
+    expect(results.unsweptReservedIpScopes).toEqual(['prod', 'prod']);
+  });
 
   it("an autoscaled worker's flexible IP its delete did not release is released by its cluster and environment", async () => {
     const { provider } = scaleway();

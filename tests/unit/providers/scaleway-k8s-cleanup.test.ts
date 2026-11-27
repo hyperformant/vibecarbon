@@ -23,24 +23,35 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 import { encodeLabels, ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555';
+/** Another project the same key can see. */
+const OTHER_PROJECT = '99999999-8888-4777-8666-555555555555';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
-  // No project scope unless a test sets one.
-  vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+  // Every listing is scoped to the configured project; a test that needs
+  // it unset unsets it.
+  vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', PROJECT_ID);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-type Pn = { id: string; name: string; region?: string; tags?: string[] };
-type Vpc = { id: string; name: string; region?: string; is_default?: boolean; tags?: string[] };
+type Pn = { id: string; name: string; region?: string; tags?: string[]; project_id?: string };
+type Vpc = {
+  id: string;
+  name: string;
+  region?: string;
+  is_default?: boolean;
+  tags?: string[];
+  project_id?: string;
+};
 type Ip = {
   id: string;
   address: string;
   zone?: string;
   tags?: string[];
   server?: { id: string; name: string } | null;
+  project?: string;
 };
 type Call = { method: string; path: string; query: URLSearchParams };
 
@@ -58,7 +69,10 @@ const json = (code: number, body: unknown = {}) => ({
  * GET `/instance/v1/zones/fr-par-1/servers/{id}` answers the tags in
  * `servers` (404 for any other id or zone). `get` overrides a GET path's
  * answer with a status, or with `full` (a full page, every time, so the walk
- * runs into its page guard); `del` a DELETE path's (204 by default).
+ * runs into its page guard); `del` a DELETE path's (204 by default). Every
+ * listed row is in PROJECT_ID unless it names its own project (`project` on
+ * an IP, `project_id` on a network or VPC, as the API names them), and the
+ * fake ignores the query's project filter, as an API that ignored it would.
  */
 function api({
   pns = [] as Pn[],
@@ -78,14 +92,20 @@ function api({
     if (override === 'full') {
       const key = path.endsWith('/vpcs') ? 'vpcs' : 'private_networks';
       return json(200, {
-        [key]: Array.from({ length: 100 }, (_, i) => ({ id: `x-${i}`, name: `x-${i}` })),
+        [key]: Array.from({ length: 100 }, (_, i) => ({
+          id: `x-${i}`,
+          name: `x-${i}`,
+          project_id: PROJECT_ID,
+        })),
       });
     }
     if (override !== undefined) return json(override, { message: 'nope' });
     const vpcApi = /^\/vpc\/v2\/regions\/([^/]+)\/(private-networks|vpcs)$/.exec(path);
     if (vpcApi) {
       const [, region, kind] = vpcApi;
-      const rows = (kind === 'vpcs' ? vpcs : pns).filter((r) => (r.region ?? 'fr-par') === region);
+      const rows = (kind === 'vpcs' ? vpcs : pns)
+        .filter((r) => (r.region ?? 'fr-par') === region)
+        .map((r) => ({ project_id: PROJECT_ID, ...r }));
       return json(200, { [kind === 'vpcs' ? 'vpcs' : 'private_networks']: rows });
     }
     const ipList = /^\/instance\/v1\/zones\/([^/]+)\/ips$/.exec(path);
@@ -93,7 +113,7 @@ function api({
       return json(200, {
         ips: ips
           .filter((ip) => (ip.zone ?? 'fr-par-1') === ipList[1])
-          .map(({ zone: _z, ...ip }) => ({ server: null, tags: [], ...ip })),
+          .map(({ zone: _z, ...ip }) => ({ server: null, tags: [], project: PROJECT_ID, ...ip })),
       });
     }
     const server = /^\/instance\/v1\/zones\/([^/]+)\/servers\/([^/]+)$/.exec(path);
@@ -179,15 +199,26 @@ describe('ScalewayProvider.listNetworksDetailed', () => {
     expect(await provider().listNetworks()).toEqual([]);
   });
 
-  it('is scoped to SCALEWAY_DEFAULT_PROJECT_ID when it is set, and unscoped when not', async () => {
-    let calls = api();
-    await provider().listNetworksDetailed();
-    expect(calls.map((c) => c.query.get('project_id'))).toEqual([null, null]);
-
-    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', PROJECT_ID);
-    calls = api();
-    await provider().listNetworksDetailed();
+  it('asks for SCALEWAY_DEFAULT_PROJECT_ID, and keeps only its rows', async () => {
+    const calls = api({
+      pns: [
+        { id: 'pn-1', name: 'acme-prod-network' },
+        { id: 'pn-2', name: 'acme-prod-network', project_id: OTHER_PROJECT },
+      ],
+    });
+    const out = await provider().listNetworksDetailed();
     expect(calls.map((c) => c.query.get('project_id'))).toEqual([PROJECT_ID, PROJECT_ID]);
+    expect(out.items.map((n: Pn) => n.id)).toEqual(['pn-1']);
+  });
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID it refuses, naming it, and lists nothing', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const calls = api({ pns: [{ id: 'pn-1', name: 'acme-prod-network' }] });
+    await expect(provider().listNetworksDetailed()).rejects.toThrow(
+      'SCALEWAY_DEFAULT_PROJECT_ID is not set',
+    );
+    expect(calls).toEqual([]);
   });
 });
 
@@ -245,8 +276,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
     ]);
   });
 
-  it('both listings carry project_id when SCALEWAY_DEFAULT_PROJECT_ID is set', async () => {
-    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', PROJECT_ID);
+  it('both listings carry project_id', async () => {
     const calls = api({ pns, vpcs });
     await provider().deleteNetworkByName(NAME, OURS);
     const listings = calls.filter((c) => c.method === 'GET');
@@ -720,6 +750,75 @@ describe('two stacks whose names join to the same string', () => {
         ],
       });
       expect(deletes(calls)).toEqual([]);
+    },
+  );
+});
+
+describe('every listing stays inside SCALEWAY_DEFAULT_PROJECT_ID', () => {
+  // A key can see every project in its organization. Another project's IP
+  // with our tags, or its network by our name, is never ours: the listing
+  // asks for our project, and a row of another project is dropped even when
+  // the API answers with it.
+  const theirs = {
+    id: 'ip-9',
+    address: '203.0.113.9',
+    tags: TAGS('acme', 'prod'),
+    project: OTHER_PROJECT,
+  };
+
+  it("another project's flexible IP with identical tags is never matched or released", async () => {
+    const calls = api({ ips: [theirs] });
+    const p = provider();
+    expect(await p.deleteReservedIpsByLabels(OURS)).toEqual({ deleted: [], failed: [] });
+    expect(await p.reservedIpLabelMatch('203.0.113.9', OURS)).toEqual({ found: false });
+    // Not ours, so it is not on the account as far as this project goes.
+    expect(await p.deleteReservedIpByAddress('203.0.113.9')).toEqual({ released: true });
+    expect(deletes(calls)).toEqual([]);
+    const listings = calls.filter((c) => c.method === 'GET' && c.path.endsWith('/ips'));
+    expect(listings.length).toBeGreaterThan(0);
+    for (const c of listings) expect(c.query.get('project'), c.path).toBe(PROJECT_ID);
+  });
+
+  it("ours beside another project's with the same tags: only ours is released", async () => {
+    const calls = api({
+      ips: [theirs, { id: 'ip-1', address: '203.0.113.1', tags: TAGS('acme', 'prod') }],
+    });
+    expect(await provider().deleteReservedIpsByLabels(OURS)).toEqual({
+      deleted: ['203.0.113.1'],
+      failed: [],
+    });
+    expect(deletes(calls)).toEqual(['/instance/v1/zones/fr-par-1/ips/ip-1']);
+  });
+
+  it("another project's network by our name and tags is never deleted", async () => {
+    const NAME = 'acme-prod-network';
+    const NET = encodeLabels({ project: 'acme', environment: 'prod', 'managed-by': 'vibecarbon' });
+    const calls = api({
+      pns: [{ id: 'pn-9', name: NAME, tags: NET, project_id: OTHER_PROJECT }],
+      vpcs: [{ id: 'vpc-9', name: NAME, tags: NET, project_id: OTHER_PROJECT }],
+    });
+    expect(await provider().deleteNetworkByName(NAME, OURS)).toEqual({
+      deleted: false,
+      everExisted: false,
+      apiError: null,
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it.each([
+    ['the label sweep', (p: ScalewayProvider) => p.deleteReservedIpsByLabels(OURS)],
+    ['a release by address', (p: ScalewayProvider) => p.deleteReservedIpByAddress('203.0.113.1')],
+    ['a network delete', (p: ScalewayProvider) => p.deleteNetworkByName('acme-prod-network', OURS)],
+  ])(
+    'without SCALEWAY_DEFAULT_PROJECT_ID, %s refuses, naming it, and sends nothing',
+    async (_, run) => {
+      vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+      delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+      const calls = api({
+        ips: [{ id: 'ip-1', address: '203.0.113.1', tags: TAGS('acme', 'prod') }],
+      });
+      await expect(run(provider())).rejects.toThrow('SCALEWAY_DEFAULT_PROJECT_ID is not set');
+      expect(calls).toEqual([]);
     },
   );
 });

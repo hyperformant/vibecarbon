@@ -21,7 +21,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 
 // @ts-expect-error JS module without types
 import { GroupManager } from '../../../src/autoscaler/groups.js';
-import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
+import { encodeLabels, ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 
 const jsonResp = (body: unknown, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -98,6 +98,7 @@ function wire({
             server: {
               id: 'srv-new',
               zone: 'fr-par-1',
+              project: 'proj-1',
               volumes: { '0': { id: 'root-vol', volume_type: 'sbs_volume' } },
               public_ips: [{ id: 'ip-new', address: '203.0.113.7' }],
             },
@@ -263,6 +264,30 @@ describe('createServer: an autoscaled worker joins the Private Network before it
     );
   });
 
+  it('names a delete that rejects with something other than an Error, never "(undefined)"', async () => {
+    wire({ throwOn: 'poweron' });
+    const provider = new ScalewayProvider('tok');
+    vi.spyOn(provider, 'deleteServer').mockRejectedValue('server is locked' as never);
+    const err = await provider
+      .createServer({ ...worker, networks: ['pn-uuid'] })
+      .catch((e: Error) => e);
+
+    expect((err as Error).message).toBe(
+      'Scaleway poweron failed: fetch failed: ECONNRESET; deleting server acme-prod-ca-k3x9q2ab ' +
+        'failed too (server is locked)',
+    );
+  });
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID it refuses before the reuse lookup, and sends nothing', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const calls = wire();
+    await expect(
+      new ScalewayProvider('tok').createServer({ ...worker, networks: ['pn-uuid'] }),
+    ).rejects.toThrow('SCALEWAY_DEFAULT_PROJECT_ID is not set, Scaleway server creation');
+    expect(calls).toEqual([]);
+  });
+
   it('sends no hostname, whatever the name: Scaleway takes the name', async () => {
     const calls = wire();
     await new ScalewayProvider('tok').createServer({
@@ -323,5 +348,88 @@ describe('the autoscaler path end to end: GroupManager over ScalewayProvider', (
     expect(writes(calls).indexOf('attach private network')).toBeLessThan(
       writes(calls).indexOf('poweron'),
     );
+  });
+});
+
+describe("the autoscaler's refresh stays inside the configured project", () => {
+  const WORKER_LABELS = { 'cluster-autoscaler/node': 'worker-pool', cluster: 'acme-prod' };
+  const config = {
+    provider: 'scaleway',
+    providerIdPrefix: 'scaleway://',
+    clusterName: 'acme-prod',
+    nodeGroups: {
+      'worker-pool': {
+        minSize: 0,
+        maxSize: 3,
+        serverType: 'DEV1-M',
+        region: 'fr-par-1',
+        image: 'ubuntu_resolute',
+        cloudInit: '#cloud-config\n',
+        serverLabels: WORKER_LABELS,
+        nodeLabels: {},
+        taints: [],
+        podsPerNode: 110,
+      },
+    },
+    sshKeyName: 'acme-prod-fr-par-1-key',
+    firewallName: 'acme-prod-firewall',
+    networkName: 'acme-prod-network',
+  };
+  /** GET /servers in fr-par-1 answers both workers, whatever the query asks. */
+  const listing = () => {
+    const urls: URL[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      urls.push(u);
+      if (u.pathname === '/instance/v1/zones/fr-par-1/servers') {
+        const tags = encodeLabels(WORKER_LABELS);
+        return jsonResp({
+          servers: [
+            { id: 'srv-ours', name: 'acme-prod-ca-aaaa', tags, project: 'proj-1' },
+            { id: 'srv-theirs', name: 'acme-prod-ca-bbbb', tags, project: 'proj-other' },
+          ],
+        });
+      }
+      return jsonResp({ servers: [] });
+    });
+    return urls;
+  };
+
+  it("another project's server with identical labels is never adopted into the group", async () => {
+    const urls = listing();
+    const gm = new GroupManager({
+      config,
+      provider: new ScalewayProvider('tok'),
+      providerIdPrefix: 'scaleway://',
+      log: vi.fn(),
+    });
+    expect(await gm.refresh()).toMatchObject({ refreshed: ['worker-pool'], failed: [] });
+    expect(gm.nodeGroupNodes('worker-pool').map((n: { id: string }) => n.id)).toEqual([
+      'scaleway://srv-ours',
+    ]);
+    expect(gm.groupForProviderId('scaleway://srv-theirs')).toBeNull();
+    // The cluster-autoscaler can only remove a node the group holds.
+    await expect(
+      gm.deleteNodes('worker-pool', [{ providerID: 'scaleway://srv-theirs' }]),
+    ).rejects.toThrow('is not a known member');
+    for (const u of urls) expect(u.searchParams.get('project')).toBe('proj-1');
+  });
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID the refresh fails for the group and adopts nothing', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const urls = listing();
+    const log = vi.fn();
+    const gm = new GroupManager({
+      config,
+      provider: new ScalewayProvider('tok'),
+      providerIdPrefix: 'scaleway://',
+      log,
+    });
+    const out = await gm.refresh();
+    expect(out.refreshed).toEqual([]);
+    expect(out.failed[0].error).toContain('SCALEWAY_DEFAULT_PROJECT_ID is not set');
+    expect(gm.nodeGroupNodes('worker-pool')).toEqual([]);
+    expect(urls).toEqual([]);
   });
 });

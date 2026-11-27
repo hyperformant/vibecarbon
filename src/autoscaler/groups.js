@@ -70,7 +70,8 @@ export class GroupManager {
     // Firewall id is resolved lazily (on first create in a cycle) and
     // cached for the rest of that cycle; refresh() invalidates it by
     // clearing the cached promise so the next cycle re-resolves. A lookup
-    // that fails is not cached: the next create asks again (_cachedLookup). An unresolvable firewall FAILS the create, as an
+    // that fails is not cached: the next create asks again (_cachedLookup).
+    // An unresolvable firewall FAILS the create, as an
     // unresolvable network does: a node made without it would have no
     // firewall on Hetzner and the project's default security group on
     // Scaleway, its kubelet and SSH open to whoever finds the address.
@@ -367,10 +368,15 @@ export class GroupManager {
 
   /**
    * Resolve config.firewallName to the provider's firewall id. Like
-   * _lookupNetworkId, it THROWS on failure (not found, or a lookup that
+   * _lookupNetworkId, it THROWS on failure (none returned, or a lookup that
    * rejected), with a message naming the firewall: the create path refuses
    * the create and records errorInfo, so the cluster-autoscaler sees a failed
    * create and backs off (constructor, `_firewallIdPromise`).
+   *
+   * "Could not be found or read", never "not found": Hetzner's,
+   * DigitalOcean's and Vultr's findFirewallByName return null for a failed
+   * read (a 429 or a 5xx) as well as for a missing firewall, so a null here
+   * does not say which, and the message must not claim the firewall is gone.
    */
   async _lookupFirewallId() {
     const firewallName = this.config.firewallName;
@@ -378,10 +384,13 @@ export class GroupManager {
     try {
       firewall = await this.provider.findFirewallByName(firewallName);
     } catch (err) {
-      throw new Error(`firewall "${firewallName}" lookup failed: ${errMessage(err)}`);
+      throw new Error(`firewall "${firewallName}" could not be found or read: ${errMessage(err)}`);
     }
     if (!firewall?.id) {
-      throw new Error(`firewall "${firewallName}" not found`);
+      throw new Error(
+        `firewall "${firewallName}" could not be found or read: the provider returned none by ` +
+          'that name, which some providers also answer when the read fails',
+      );
     }
     return firewall.id;
   }

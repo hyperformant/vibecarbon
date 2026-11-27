@@ -27,6 +27,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { inTestProject, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 const jsonResp = (body: unknown, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -235,6 +236,11 @@ describe('VultrProvider.applyOperatorCidrs scrubs retired DB-port rules', () => 
 });
 
 describe('ScalewayProvider.applyOperatorCidrs scrubs retired DB-port rules', () => {
+  // Every listing is scoped to the configured project (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   const rule = (
     id: string,
     protocol: string,
@@ -266,7 +272,13 @@ describe('ScalewayProvider.applyOperatorCidrs scrubs retired DB-port rules', () 
       const method = init?.method ?? 'GET';
       calls.push({ url, method, body: init?.body as string | undefined });
       if (url.includes('/security_groups?name=')) {
-        return jsonResp({ security_groups: [{ id: 'sg-1', name: 'proj-prod-firewall' }] });
+        // The group lives in one zone; a second by that name would be a twin.
+        const inZone = url.includes('/zones/fr-par-1/');
+        return jsonResp({
+          security_groups: inZone
+            ? inTestProject([{ id: 'sg-1', name: 'proj-prod-firewall' }])
+            : [],
+        });
       }
       if (url.includes('/security_groups/sg-1/rules') && method === 'PUT')
         return jsonResp({ rules: [] });

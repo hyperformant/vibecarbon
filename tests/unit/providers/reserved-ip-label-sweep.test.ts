@@ -25,9 +25,12 @@ import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel as linodeLabel } from '../../../src/lib/providers/linode.js';
 import { encodeLabel as scalewayLabel } from '../../../src/lib/providers/scaleway.js';
 import { reservedIpLabel as vultrLabel } from '../../../src/lib/providers/vultr.js';
+import { SCALEWAY_TEST_PROJECT, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
+  // Scaleway lists only the configured project (scaleway-project.ts).
+  stubScalewayProject();
 });
 
 /** One IP as the test describes it, before any provider's wire shape. */
@@ -176,6 +179,7 @@ const rows: Record<string, Row> = {
                   address: ip.address,
                   server: ip.server ? { id: `srv-${ip.server}`, name: 'web' } : null,
                   tags: tagsOf(ip),
+                  project: SCALEWAY_TEST_PROJECT,
                 }))
               : [],
           },

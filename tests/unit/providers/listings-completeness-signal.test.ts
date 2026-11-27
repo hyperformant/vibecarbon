@@ -27,6 +27,7 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { inTestProject, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 const hetzner = new HetznerProvider('tok-hetzner');
 const digitalocean = new DigitalOceanProvider('tok-do');
@@ -274,6 +275,11 @@ describe('VultrProvider — completeness signal (cursor pagination)', () => {
 });
 
 describe('ScalewayProvider — completeness signal (multi-zone page walks)', () => {
+  // Every listing is scoped to the configured project (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   it('reports complete: false with the HTTP status when a zone walk 403s', async () => {
     fetchWithRetryMock.mockResolvedValue(jsonResp({}, 403));
 
@@ -303,11 +309,11 @@ describe('ScalewayProvider — completeness signal (multi-zone page walks)', () 
     let call = 0;
     fetchWithRetryMock.mockImplementation(async () => {
       call += 1;
-      return call === 1 ? jsonResp({ servers: [{ id: 'a' }] }) : jsonResp({}, 503);
+      return call === 1 ? jsonResp({ servers: inTestProject([{ id: 'a' }]) }) : jsonResp({}, 503);
     });
 
     expect(await scaleway.listServersDetailed()).toEqual({
-      items: [{ zone: 'fr-par-1', id: 'a' }],
+      items: inTestProject([{ zone: 'fr-par-1', id: 'a' }]),
       complete: false,
       status: 503,
     });
@@ -320,10 +326,12 @@ describe('ScalewayProvider — completeness signal (multi-zone page walks)', () 
     fetchWithRetryMock.mockImplementation(async (url: unknown) => {
       const u = String(url);
       if (u.includes('/block/v1/zones/fr-par-1/')) {
-        return jsonResp({ volumes: [{ id: 'sbs-1', name: 'testapp-root' }] });
+        return jsonResp({
+          volumes: inTestProject([{ id: 'sbs-1', name: 'testapp-root' }], 'project_id'),
+        });
       }
       if (u.includes('/instance/v1/zones/fr-par-1/volumes')) {
-        return jsonResp({ volumes: [{ id: 'lssd-1', name: 'testapp-local' }] });
+        return jsonResp({ volumes: inTestProject([{ id: 'lssd-1', name: 'testapp-local' }]) });
       }
       return jsonResp({ volumes: [] });
     });
@@ -338,10 +346,10 @@ describe('ScalewayProvider — completeness signal (multi-zone page walks)', () 
       const u = String(url);
       if (u.includes('/zones/fr-par-1/servers')) {
         return jsonResp({
-          servers: [
+          servers: inTestProject([
             { id: 'a', tags: ['project:testapp', 'environment:prod'] },
             { id: 'b', tags: ['project:testapp'] },
-          ],
+          ]),
         });
       }
       return jsonResp({ servers: [] });

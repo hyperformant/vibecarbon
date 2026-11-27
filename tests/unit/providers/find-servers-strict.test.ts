@@ -24,6 +24,7 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { inTestProject, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 const NAME = 'p-e1-worker-1';
 const jsonResp = (body: unknown, status = 200) => ({
@@ -88,17 +89,21 @@ const CASES: Array<{
     provider: 'Scaleway',
     make: () => new ScalewayProvider('tok') as unknown as Lookup,
     listing: (url) => ({
-      servers: url.includes('/zones/fr-par-1/') ? [{ id: 'a', name: NAME }] : [],
+      servers: url.includes('/zones/fr-par-1/') ? inTestProject([{ id: 'a', name: NAME }]) : [],
     }),
     // A full page on every page: the walk stops at its limit, unfinished.
     endless: () => ({
-      servers: Array.from({ length: 100 }, (_, i) => ({ id: `x${i}`, name: 'other' })),
+      servers: inTestProject(
+        Array.from({ length: 100 }, (_, i) => ({ id: `x${i}`, name: 'other' })),
+      ),
     }),
   },
 ];
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
+  // Scaleway lists only the configured project (scaleway-project.ts).
+  stubScalewayProject();
 });
 
 describe.each(CASES)('$provider findServersByName', ({ provider, make, listing, endless }) => {

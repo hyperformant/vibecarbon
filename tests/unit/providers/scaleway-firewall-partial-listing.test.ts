@@ -25,6 +25,8 @@ import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { listedRange, SCALEWAY_SMTP_DROPS } from '../../_shared/scaleway-listed-rules.js';
 
 const NAME = 'acme-prod-primary-firewall';
+/** The configured project; every group listed below is in it. */
+const PROJECT = '11111111-2222-4333-8444-555555555555';
 const PEER = '198.51.100.7';
 const ZONES = Object.keys(ScalewayProvider.REGIONS);
 
@@ -75,7 +77,7 @@ function api({ groups, rules }: Api = {}) {
     if (/\/security_groups\?name=/.test(url)) {
       if (groups) return groups(zone, page);
       return json({
-        security_groups: zone === 'fr-par-1' ? [{ id: 'sg-1', name: NAME }] : [],
+        security_groups: zone === 'fr-par-1' ? [{ id: 'sg-1', name: NAME, project: PROJECT }] : [],
       });
     }
     if (/\/security_groups\/sg-1\/rules/.test(url) && method === 'GET') {
@@ -95,6 +97,7 @@ const fullPageOfOthers = (page: number) =>
     security_groups: Array.from({ length: 100 }, (_v, i) => ({
       id: `other-${page}-${i}`,
       name: `${NAME}-${page}-${i}`,
+      project: PROJECT,
     })),
   });
 
@@ -122,10 +125,12 @@ const shortRules = (page: number) =>
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
+  vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', PROJECT);
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('findFirewallByName refuses an incomplete group or rules walk, and nothing is written', () => {
@@ -240,12 +245,81 @@ describe('findFirewallByName refuses an incomplete group or rules walk, and noth
     });
   });
 
-  it('walks only the zones it needs: the group found in the first zone stops the walk', async () => {
+  it('walks every zone, so a twin in a later zone is seen, and asks only for our project', async () => {
     const { calls } = api();
     await new ScalewayProvider('t').findFirewallByName(NAME);
-    const zonesListed = calls
-      .filter((c) => /\/security_groups\?name=/.test(c.url))
-      .map((c) => /\/zones\/([^/]+)\//.exec(c.url)?.[1]);
-    expect(zonesListed).toEqual([ZONES[0]]);
+    const listings = calls.filter((c) => /\/security_groups\?name=/.test(c.url));
+    expect(listings.map((c) => /\/zones\/([^/]+)\//.exec(c.url)?.[1])).toEqual(ZONES);
+    for (const c of listings) expect(new URL(c.url).searchParams.get('project')).toBe(PROJECT);
+  });
+});
+
+describe('findFirewallByName stays inside the configured project, and refuses a twin', () => {
+  const OTHER = '99999999-8888-4777-8666-555555555555';
+  const group = (id: string, project = PROJECT) => ({ id, name: NAME, project });
+
+  it("another project's group by the same name is never returned, and nothing is written", async () => {
+    const { writes } = api({
+      groups: (zone) =>
+        json({ security_groups: zone === 'fr-par-1' ? [group('sg-9', OTHER)] : [] }),
+    });
+    const provider = new ScalewayProvider('t');
+    expect(await provider.findFirewallByName(NAME)).toBeNull();
+    expect(await provider.deleteFirewallByName(NAME)).toMatchObject({ deleted: false });
+    expect(writes()).toEqual([]);
+  });
+
+  it("ours beside another project's twin: ours is returned", async () => {
+    api({
+      groups: (zone) =>
+        json({ security_groups: zone === 'fr-par-1' ? [group('sg-9', OTHER), group('sg-1')] : [] }),
+    });
+    expect(await new ScalewayProvider('t').findFirewallByName(NAME)).toMatchObject({
+      id: 'sg-1',
+      zone: 'fr-par-1',
+    });
+  });
+
+  it.each([
+    ['in one zone', (zone: string) => (zone === 'fr-par-1' ? [group('sg-1'), group('sg-2')] : [])],
+    [
+      'in two zones',
+      (zone: string) =>
+        zone === 'fr-par-1' ? [group('sg-1')] : zone === ZONES[1] ? [group('sg-2')] : [],
+    ],
+  ])(
+    'two of ours by that name %s: it throws, naming both, and nothing is written',
+    async (_, rows) => {
+      const { writes } = api({ groups: (zone) => json({ security_groups: rows(zone) }) });
+      const provider = new ScalewayProvider('t');
+      const err = await provider.findFirewallByName(NAME).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      const { message } = err as Error;
+      expect(message).toContain(`2 security groups named ${NAME}`);
+      expect(message).toContain('sg-1 in fr-par-1');
+      expect(message).toContain('sg-2 in ');
+      expect(message).toContain('a leaked twin could shadow the live group');
+      await expect(
+        provider.applyOperatorCidrs({ firewallName: NAME, cidrs: ['198.51.100.9/32'] }),
+      ).rejects.toThrow('leaked twin');
+      const destroyed = await provider.deleteFirewallByName(NAME);
+      expect(destroyed).toMatchObject({ deleted: false });
+      expect(destroyed.apiError?.message).toContain('leaked twin');
+      expect(writes()).toEqual([]);
+    },
+  );
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID it refuses, naming it, and lists nothing', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const { calls } = api();
+    const provider = new ScalewayProvider('t');
+    await expect(provider.findFirewallByName(NAME)).rejects.toThrow(
+      'SCALEWAY_DEFAULT_PROJECT_ID is not set',
+    );
+    expect((await provider.deleteFirewallByName(NAME)).apiError?.message).toContain(
+      'SCALEWAY_DEFAULT_PROJECT_ID is not set',
+    );
+    expect(calls).toEqual([]);
   });
 });

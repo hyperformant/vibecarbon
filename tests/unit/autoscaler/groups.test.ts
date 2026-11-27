@@ -713,13 +713,22 @@ describe('GroupManager — firewall resolution', () => {
   // internet on Hetzner and sits in the project's default security group on
   // Scaleway. So the create is refused, as a network-less one is, and a
   // failed lookup is not remembered: the next create asks again.
+  // "Could not be found or read": three providers' lookups return null for a
+  // failed read too, so no message says the firewall is missing.
+  const NONE =
+    'firewall "acme-prod-firewall" could not be found or read: the provider returned none by ' +
+    'that name, which some providers also answer when the read fails';
   it.each([
-    ['returns null', () => vi.fn().mockResolvedValue(null)],
-    ['returns a firewall with no id', () => vi.fn().mockResolvedValue({ name: 'x' })],
-    ['rejects', () => vi.fn().mockRejectedValue(new Error('HTTP 403'))],
+    ['returns null', () => vi.fn().mockResolvedValue(null), NONE],
+    ['returns a firewall with no id', () => vi.fn().mockResolvedValue({ name: 'x' }), NONE],
+    [
+      'rejects',
+      () => vi.fn().mockRejectedValue(new Error('HTTP 403')),
+      'firewall "acme-prod-firewall" could not be found or read: HTTP 403',
+    ],
   ])(
     'refuses the create when the lookup %s, and fails the intent naming the firewall',
-    async (_how, lookup) => {
+    async (_how, lookup, message) => {
       const log = vi.fn();
       const provider = createProvider({ findFirewallByName: lookup() });
       const gm = new GroupManager({
@@ -741,7 +750,9 @@ describe('GroupManager — firewall resolution', () => {
         errorCode: 'firewall-not-found',
         instanceErrorClass: 3,
       });
-      expect(nodes[0].status.errorInfo.errorMessage).toContain('acme-prod-firewall');
+      expect(nodes[0].status.errorInfo.errorMessage).toBe(message);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(message));
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('not found'));
 
       // The next refresh drops the failed intent and desired snaps back.
       provider.listServers.mockResolvedValueOnce([]);
