@@ -246,7 +246,18 @@ describe('VultrProvider destroy-sweep field accessors', () => {
 });
 
 describe('ScalewayProvider destroy-sweep field accessors', () => {
-  it('serverNetworkIds is always [] — compose instances join no Private Network', () => {
+  it('serverNetworkIds reads private_nics[].private_network_id, [] when none', () => {
+    // instance_sdk.go: Server.PrivateNics `json:"private_nics"`, each with
+    // PrivateNetworkID `json:"private_network_id"`. A compose instance has none.
+    const server = {
+      id: 'uuid-1',
+      zone: 'fr-par-1',
+      private_nics: [{ id: 'nic-1', private_network_id: 'pn-1', mac_address: '02:00:00:00:00:01' }],
+    };
+    expect(scaleway.serverNetworkIds(server)).toEqual(['pn-1']);
+    expect(scaleway.serverNetworkIds({ id: 'uuid-1', zone: 'fr-par-1', private_nics: [] })).toEqual(
+      [],
+    );
     expect(scaleway.serverNetworkIds({ id: 'uuid-1', zone: 'fr-par-1' })).toEqual([]);
     expect(scaleway.serverNetworkIds({})).toEqual([]);
   });

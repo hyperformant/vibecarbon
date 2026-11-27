@@ -69,18 +69,24 @@ export class GroupManager {
 
     // Firewall id is resolved lazily (on first create in a cycle) and
     // cached for the rest of that cycle; refresh() invalidates it by
-    // clearing the cached promise so the next cycle re-resolves.
+    // clearing the cached promise so the next cycle re-resolves. A lookup
+    // that fails is not cached: the next create asks again (_cachedLookup).
+    // An unresolvable firewall FAILS the create, as an
+    // unresolvable network does: a node made without it would have no
+    // firewall on Hetzner and the project's default security group on
+    // Scaleway, its kubelet and SSH open to whoever finds the address.
+    // Every k8s program declares `${clusterName}-firewall` unconditionally
+    // (renderCarbonAutoscalerConfig's firewallName), so on a healthy cluster
+    // the lookup finds it.
     this._firewallIdPromise = undefined;
 
     // Network id is resolved the same lazily-cached-per-cycle way as the
-    // firewall id above, but the failure contract is the OPPOSITE: an
-    // unresolvable firewall degrades to "create without a firewall" (best
-    // effort), while an unresolvable network must FAIL the create instead
-    // of proceeding without it — a worker not attached to the cluster's
-    // private network can never join k3s (worker-init.sh fatal-exits
-    // waiting for the private NIC) and is invisible to destroy's
-    // in-network sweep filter, i.e. a permanent orphan. See
-    // _lookupNetworkId/_createInBackground.
+    // firewall id above (_cachedLookup: a failed lookup is not cached
+    // either), and an unresolvable network must FAIL the create too: a
+    // worker not attached to the cluster's private network can never join
+    // k3s (worker-init.sh fatal-exits waiting for the private NIC) and is
+    // invisible to destroy's in-network sweep filter, i.e. a permanent
+    // orphan. See _lookupNetworkId/_createInBackground.
     this._networkIdPromise = undefined;
 
     this._groups = new Map();
@@ -237,20 +243,13 @@ export class GroupManager {
     try {
       const groupConfig = this.config.nodeGroups[groupId];
       if (!groupConfig) {
-        this.log(
-          `[carbon-autoscaler] createServer(${name}) skipped — group "${groupId}" is no longer ` +
-            'in config (dropped by reload)',
+        await this._failIntent(
+          groupId,
+          name,
+          'group-removed',
+          `node group "${groupId}" was removed from config before its create could run`,
+          `skipped — group "${groupId}" is no longer in config (dropped by reload)`,
         );
-        await this._runLocked(() => {
-          const entry = this._groups.get(groupId)?.creating.get(name);
-          if (entry) {
-            entry.errorInfo = {
-              errorCode: 'group-removed',
-              errorMessage: `node group "${groupId}" was removed from config before its create could run`,
-              instanceErrorClass: 3,
-            };
-          }
-        });
         return;
       }
 
@@ -258,24 +257,31 @@ export class GroupManager {
       try {
         networkId = await this._resolveNetworkId();
       } catch (err) {
-        this.log(
-          `[carbon-autoscaler] createServer(${name}) REFUSED, ${errMessage(err)} — a worker ` +
-            'not attached to the cluster network can never join k3s; not creating',
+        await this._failIntent(
+          groupId,
+          name,
+          'network-not-found',
+          errMessage(err),
+          `REFUSED, ${errMessage(err)} — a worker not attached to the cluster network can ` +
+            'never join k3s; not creating',
         );
-        await this._runLocked(() => {
-          const entry = this._groups.get(groupId)?.creating.get(name);
-          if (entry) {
-            entry.errorInfo = {
-              errorCode: 'network-not-found',
-              errorMessage: errMessage(err),
-              instanceErrorClass: 3,
-            };
-          }
-        });
         return;
       }
 
-      const firewallId = await this._resolveFirewallId();
+      let firewallId;
+      try {
+        firewallId = await this._resolveFirewallId();
+      } catch (err) {
+        await this._failIntent(
+          groupId,
+          name,
+          'firewall-not-found',
+          errMessage(err),
+          `REFUSED, ${errMessage(err)}: a node without the cluster's firewall would be open ` +
+            'to the internet; not creating',
+        );
+        return;
+      }
 
       const createConfig = {
         name,
@@ -286,8 +292,8 @@ export class GroupManager {
         labels: { ...groupConfig.serverLabels },
         sshKeys: [this.config.sshKeyName],
         networks: [networkId],
+        firewalls: [firewallId],
       };
-      if (firewallId) createConfig.firewalls = [firewallId];
 
       try {
         const { id } = await this.provider.createServer(createConfig);
@@ -296,17 +302,13 @@ export class GroupManager {
           if (entry) entry.resolvedId = String(id);
         });
       } catch (err) {
-        this.log(`[carbon-autoscaler] createServer(${name}) failed: ${errMessage(err)}`);
-        await this._runLocked(() => {
-          const entry = this._groups.get(groupId)?.creating.get(name);
-          if (entry) {
-            entry.errorInfo = {
-              errorCode: 'provider-error',
-              errorMessage: errMessage(err),
-              instanceErrorClass: 3,
-            };
-          }
-        });
+        await this._failIntent(
+          groupId,
+          name,
+          'provider-error',
+          errMessage(err),
+          `failed: ${errMessage(err)}`,
+        );
       }
     } catch (err) {
       // Genuinely last-resort: nothing above should throw once past its own
@@ -317,44 +319,91 @@ export class GroupManager {
     }
   }
 
-  async _resolveFirewallId() {
-    if (this._firewallIdPromise === undefined) {
-      this._firewallIdPromise = this._lookupFirewallId();
-    }
-    return this._firewallIdPromise;
+  /**
+   * Log a create that will not happen and record it on the intent, under the
+   * lock, as the errorInfo the cluster-autoscaler reads as a failed create
+   * (it backs off and retries). An intent already gone (a refresh or a
+   * scale-down dropped it) records nothing.
+   * @param {string} groupId
+   * @param {string} name - the intent's server name
+   * @param {string} errorCode
+   * @param {string} errorMessage - what the cluster-autoscaler is told
+   * @param {string} logLine - what the log says after `createServer(<name>) `
+   */
+  async _failIntent(groupId, name, errorCode, errorMessage, logLine) {
+    this.log(`[carbon-autoscaler] createServer(${name}) ${logLine}`);
+    await this._runLocked(() => {
+      const entry = this._groups.get(groupId)?.creating.get(name);
+      if (entry) entry.errorInfo = { errorCode, errorMessage, instanceErrorClass: 3 };
+    });
   }
 
+  /**
+   * `this[field]`, the in-flight or settled lookup `fn` started, shared by
+   * every create in the cycle; refresh() clears it. A lookup that rejects is
+   * dropped from the field when it settles, so the next create asks again
+   * instead of failing on the same answer until the next refresh; creates
+   * already waiting on it share its failure. Only the lookup that is still
+   * the field's is dropped: one a refresh replaced, settling late, must not
+   * clear the newer lookup.
+   * @param {'_firewallIdPromise'|'_networkIdPromise'} field
+   * @param {() => Promise<string|number>} fn
+   * @returns {Promise<string|number>}
+   */
+  _cachedLookup(field, fn) {
+    if (this[field] === undefined) {
+      const lookup = fn();
+      this[field] = lookup;
+      lookup.catch(() => {
+        if (this[field] === lookup) this[field] = undefined;
+      });
+    }
+    return this[field];
+  }
+
+  /** The cluster firewall's id (_cachedLookup over _lookupFirewallId). */
+  async _resolveFirewallId() {
+    return this._cachedLookup('_firewallIdPromise', () => this._lookupFirewallId());
+  }
+
+  /**
+   * Resolve config.firewallName to the provider's firewall id. Like
+   * _lookupNetworkId, it THROWS on failure (none returned, or a lookup that
+   * rejected), with a message naming the firewall: the create path refuses
+   * the create and records errorInfo, so the cluster-autoscaler sees a failed
+   * create and backs off (constructor, `_firewallIdPromise`).
+   *
+   * "Could not be found or read", never "not found": Hetzner's,
+   * DigitalOcean's and Vultr's findFirewallByName return null for a failed
+   * read (a 429 or a 5xx) as well as for a missing firewall, so a null here
+   * does not say which, and the message must not claim the firewall is gone.
+   */
   async _lookupFirewallId() {
     const firewallName = this.config.firewallName;
+    let firewall;
     try {
-      const firewall = await this.provider.findFirewallByName(firewallName);
-      if (!firewall?.id) {
-        this.log(
-          `[carbon-autoscaler] firewall "${firewallName}" not found — creating nodes without a firewall`,
-        );
-        return null;
-      }
-      return firewall.id;
+      firewall = await this.provider.findFirewallByName(firewallName);
     } catch (err) {
-      this.log(
-        `[carbon-autoscaler] firewall lookup for "${firewallName}" failed (${err.message}) — ` +
-          'creating nodes without a firewall',
-      );
-      return null;
+      throw new Error(`firewall "${firewallName}" could not be found or read: ${errMessage(err)}`);
     }
+    if (!firewall?.id) {
+      throw new Error(
+        `firewall "${firewallName}" could not be found or read: the provider returned none by ` +
+          'that name, which some providers also answer when the read fails',
+      );
+    }
+    return firewall.id;
   }
 
+  /** The cluster network's id (_cachedLookup over _lookupNetworkId). */
   async _resolveNetworkId() {
-    if (this._networkIdPromise === undefined) {
-      this._networkIdPromise = this._lookupNetworkId();
-    }
-    return this._networkIdPromise;
+    return this._cachedLookup('_networkIdPromise', () => this._lookupNetworkId());
   }
 
   /**
    * Resolve config.networkName to a provider network id via
    * provider.listNetworks() + find-by-name — the same approach destroy.js
-   * uses to locate the cluster network for its teardown sweep. UNLIKE
+   * uses to locate the cluster network for its teardown sweep. Like
    * _lookupFirewallId, this always THROWS on failure (not-found, or a
    * listNetworks() rejection) rather than degrading to a null fallback —
    * see the constructor's `_networkIdPromise` comment for why a

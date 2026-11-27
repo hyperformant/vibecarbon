@@ -15,7 +15,8 @@
  *     services/index.json names, `docker-compose.<addon>*.yml`) and the
  *     dev-only docker-compose.override.yml (local `up`, never on a server);
  *   - carbon/k8s/base/** /*.yaml, minus any add-on directory;
- *   - carbon/cloud-init/**;
+ *   - carbon/cloud-init/**, a committed CSI render as its master installs it
+ *     (sidecars on their mirrors, see EMBEDDED_REWRITES);
  *   - every string literal and template-literal chunk in src/** /*.js
  *     (vite's parseAst, so comments never count).
  *
@@ -42,6 +43,7 @@ import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   CARBON_AUTOSCALER_IMAGE,
+  csiInstallImageRewrites,
   csiSidecarSetImagePlan,
   csiUpstreamImagePins,
   DB_IMAGE,
@@ -59,12 +61,14 @@ import {
   NODE_RUNTIME_IMAGE,
   PRE_CHANNEL_KUBERNETES,
   renderManifestImages,
+  SCALEWAY_CSI_VERSION,
   socatImageRef,
   TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
 } from '../../../src/lib/images.js';
 import { walkAst } from '../../_shared/ast-walk.js';
+import { EMBEDDED_CSI_FILES } from '../../_shared/csi-install-rewrite.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const gitFiles = (...pathspecs: string[]) =>
@@ -93,6 +97,19 @@ const ALLOWLIST: Record<string, string> = {
   [BINFMT_IMAGE]: 'operator-local binfmt hint',
 };
 
+/**
+ * Refs allowed only at a site in a committed CSI render (EMBEDDED_CSI_FILES),
+ * each with its reason. Anywhere else, a k8s manifest or src, the same ref is
+ * a Docker Hub pull like any other.
+ */
+const EMBEDDED_ALLOWLIST: Record<string, string> = {
+  // A CSI driver's own container, in the render the Scaleway master carries.
+  // Every provider's driver image stays upstream by design (CSI_SIDECAR_MIRRORS,
+  // src/lib/images.js); the others are only unseen here because their
+  // manifests are fetched, not committed.
+  [`scaleway/scaleway-csi:${SCALEWAY_CSI_VERSION}`]: 'CSI driver image, upstream by design',
+};
+
 /** This repo's own images: published by our workflows, not mirrors. */
 const OWN_PACKAGES = new Set(
   [DB_IMAGE, DEV_DB_IMAGE, CARBON_AUTOSCALER_IMAGE, NODE_RUNTIME_IMAGE.split(/[:@]/)[0]].map((r) =>
@@ -117,6 +134,23 @@ const K8S_FILES = gitFiles('carbon/k8s/base').filter(
   (f) => /\.ya?ml$/.test(f) && !ADDONS.some((a) => f.startsWith(`carbon/k8s/base/${a}/`)),
 );
 const CLOUD_INIT_FILES = gitFiles('carbon/cloud-init');
+
+/**
+ * A committed CSI render (EMBEDDED_CSI_FILES) is upstream's YAML, as a
+ * fetched manifest is, and its master moves each sidecar onto its mirror
+ * before the apply (csi_fetch_mirrored), so its sites are judged as the master
+ * installs them: by repo path, each upstream ref to its mirror.
+ */
+const EMBEDDED_REWRITES = new Map(
+  Object.entries(EMBEDDED_CSI_FILES).map(([file, provider]) => [
+    file,
+    new Map(csiInstallImageRewrites(provider).map(({ from, to }) => [from, to])),
+  ]),
+);
+const cloudInitSites = (f: string) => {
+  const rewrites = EMBEDDED_REWRITES.get(f);
+  return textSites(f).map((s) => ({ ...s, ref: rewrites?.get(s.ref) ?? s.ref }));
+};
 const SRC_FILES = gitFiles('src').filter((f) => /\.m?js$/.test(f));
 
 /** `image:` values plus every digest-pinned token, comments skipped. */
@@ -156,13 +190,23 @@ function jsSites(rel: string, text = readRepoFile(rel)): Site[] {
   return out;
 }
 
-const fromMirrorOrIndirect = (ref: string) =>
-  ref.startsWith(MIRROR_PREFIX) || ref.startsWith('{{') || ref.startsWith('${') || ref in ALLOWLIST;
+/** The file a site is in: `where` is `<file>:<line>`, or a JS file alone. */
+const siteFile = (where: string) => where.replace(/:\d+$/, '');
+
+/** ALLOWLIST anywhere; EMBEDDED_ALLOWLIST only at a site in a committed render. */
+const allowedAt = ({ where, ref }: Site) =>
+  ref in ALLOWLIST || (ref in EMBEDDED_ALLOWLIST && siteFile(where) in EMBEDDED_CSI_FILES);
+
+const fromMirrorOrIndirect = (site: Site) =>
+  site.ref.startsWith(MIRROR_PREFIX) ||
+  site.ref.startsWith('{{') ||
+  site.ref.startsWith('${') ||
+  allowedAt(site);
 
 /** Rule (b). */
 function dockerHubOffenders(sites: Site[]): string[] {
   return sites
-    .filter(({ ref }) => !fromMirrorOrIndirect(ref))
+    .filter((site) => !fromMirrorOrIndirect(site))
     .map(
       ({ where, ref }) =>
         `${where}: core-path image ${ref} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
@@ -243,7 +287,7 @@ const ALL_SITES = [
   ...JS_EVALUATED,
   ...COMPOSE_FILES.flatMap(composeSites),
   ...K8S_FILES.flatMap((f) => textSites(f, fillImages(readRepoFile(f)))),
-  ...CLOUD_INIT_FILES.flatMap((f) => textSites(f)),
+  ...CLOUD_INIT_FILES.flatMap(cloudInitSites),
   ...SRC_FILES.flatMap((f) => jsSites(f)),
 ];
 
@@ -262,6 +306,7 @@ describe('core-path images come from our ghcr mirror', () => {
       ]),
     );
     expect(CLOUD_INIT_FILES.length).toBeGreaterThan(0);
+    expect(CLOUD_INIT_FILES).toEqual(expect.arrayContaining([...EMBEDDED_REWRITES.keys()]));
     expect(SRC_FILES).toContain('src/lib/deploy/compose/ha.js');
     expect(ALL_SITES.length).toBeGreaterThan(15);
   });
@@ -275,6 +320,47 @@ describe('core-path images come from our ghcr mirror', () => {
     expect(dockerHubOffenders(sites)).toEqual([
       `probe.yml:1: core-path image traefik:v3.6.11@sha256:${'a'.repeat(64)} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
     ]);
+  });
+
+  it('a committed CSI render is judged as its master installs it: sidecars on mirrors, the driver upstream', () => {
+    expect(EMBEDDED_REWRITES.size).toBeGreaterThan(0);
+    for (const [file, rewrites] of EMBEDDED_REWRITES) {
+      const raw = textSites(file);
+      const judged = cloudInitSites(file);
+      // Every rewrite has its site, and what is left upstream is the allowlist.
+      expect(new Set(raw.map((s) => s.ref))).toEqual(
+        new Set([
+          ...rewrites.keys(),
+          ...raw.map((s) => s.ref).filter((r) => r in EMBEDDED_ALLOWLIST),
+        ]),
+      );
+      expect(judged.filter((s) => !s.ref.startsWith(MIRROR_PREFIX)).map((s) => s.ref)).toEqual(
+        raw.filter((s) => s.ref in EMBEDDED_ALLOWLIST).map((s) => s.ref),
+      );
+      // Unmapped, the sidecars would be named: the mapping is what passes them.
+      expect(dockerHubOffenders(raw).length).toBeGreaterThan(0);
+      expect(dockerHubOffenders(judged)).toEqual([]);
+    }
+  });
+
+  it('bites: a ref allowed in a committed render is a Docker Hub pull anywhere else', () => {
+    const [file] = Object.keys(EMBEDDED_CSI_FILES);
+    for (const ref of Object.keys(EMBEDDED_ALLOWLIST)) {
+      expect(ref in ALLOWLIST, ref).toBe(false);
+      expect(dockerHubOffenders([{ where: `${file}:1`, ref }])).toEqual([]);
+      const named = (where: string) => [
+        `${where}: core-path image ${ref} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
+      ];
+      // The same line in a k8s base manifest, and in a JS template literal.
+      expect(
+        dockerHubOffenders(textSites('carbon/k8s/base/probe.yaml', `image: "${ref}"`)),
+      ).toEqual(named('carbon/k8s/base/probe.yaml:1'));
+      expect(
+        dockerHubOffenders(jsSites('src/lib/probe.js', `const x = \`image: ${ref}\`;`)),
+      ).toEqual(named('src/lib/probe.js'));
+      // A file whose name only starts like the render's is not it.
+      expect(dockerHubOffenders([{ where: `${file}.bak:1`, ref }])).toEqual(named(`${file}.bak:1`));
+    }
   });
 
   it('(c) every mirror ref names a MIRRORED_IMAGES entry on name, tag and digest', () => {
@@ -346,7 +432,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   const SNIPPET = 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml';
   // [label, script] for every provider's master, worker and db node. The db
   // node boots its provider's worker script loaded as the db role.
-  const ROLE_SCRIPTS = ['', 'do-', 'linode-', 'vultr-'].flatMap((p) => [
+  const ROLE_SCRIPTS = ['', 'do-', 'linode-', 'vultr-', 'scaleway-'].flatMap((p) => [
     [`${p}master-init.sh`, loadCloudInit(`${p}master-init.sh`)],
     [`${p}worker-init.sh`, loadCloudInit(`${p}worker-init.sh`)],
     [`${p}worker-init.sh as the db node`, loadCloudInit(`${p}worker-init.sh`, { role: 'db' })],
@@ -356,6 +442,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     'do-master-init.sh',
     'linode-master-init.sh',
     'vultr-master-init.sh',
+    'scaleway-master-init.sh',
   ];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {

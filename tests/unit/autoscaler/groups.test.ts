@@ -76,7 +76,9 @@ function createProvider(overrides: Record<string, unknown> = {}) {
     createServer: vi.fn(),
     deleteServer: vi.fn().mockResolvedValue(undefined),
     listServers: vi.fn().mockResolvedValue([]),
-    findFirewallByName: vi.fn().mockResolvedValue(null),
+    // The cluster's firewall exists, as it does on every healthy cluster:
+    // each k8s program declares `${clusterName}-firewall` unconditionally.
+    findFirewallByName: vi.fn().mockResolvedValue({ id: 777 }),
     listNetworks: vi.fn().mockResolvedValue([{ id: 999, name: 'acme-prod-network' }]),
     ...overrides,
   };
@@ -707,44 +709,158 @@ describe('GroupManager — firewall resolution', () => {
     expect(provider.findFirewallByName).toHaveBeenCalledTimes(2);
   });
 
-  it('creates without a firewall and logs loudly when the lookup returns null', async () => {
-    const log = vi.fn();
+  // RC12: a node created without the cluster's firewall is open to the
+  // internet on Hetzner and sits in the project's default security group on
+  // Scaleway. So the create is refused, as a network-less one is, and a
+  // failed lookup is not remembered: the next create asks again.
+  // "Could not be found or read": three providers' lookups return null for a
+  // failed read too, so no message says the firewall is missing.
+  const NONE =
+    'firewall "acme-prod-firewall" could not be found or read: the provider returned none by ' +
+    'that name, which some providers also answer when the read fails';
+  it.each([
+    ['returns null', () => vi.fn().mockResolvedValue(null), NONE],
+    ['returns a firewall with no id', () => vi.fn().mockResolvedValue({ name: 'x' }), NONE],
+    [
+      'rejects',
+      () => vi.fn().mockRejectedValue(new Error('HTTP 403')),
+      'firewall "acme-prod-firewall" could not be found or read: HTTP 403',
+    ],
+  ])(
+    'refuses the create when the lookup %s, and fails the intent naming the firewall',
+    async (_how, lookup, message) => {
+      const log = vi.fn();
+      const provider = createProvider({ findFirewallByName: lookup() });
+      const gm = new GroupManager({
+        config: baseConfig(),
+        provider,
+        providerIdPrefix: 'testprov://',
+        log,
+      });
+
+      await gm.increaseSize('worker-pool', 1);
+      await flush();
+
+      expect(provider.createServer).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('acme-prod-firewall'));
+      const nodes = gm.nodeGroupNodes('worker-pool');
+      expect(nodes).toHaveLength(1);
+      expect(nodes[0].status.instanceState).toBe('instanceCreating');
+      expect(nodes[0].status.errorInfo).toMatchObject({
+        errorCode: 'firewall-not-found',
+        instanceErrorClass: 3,
+      });
+      expect(nodes[0].status.errorInfo.errorMessage).toBe(message);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(message));
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('not found'));
+
+      // The next refresh drops the failed intent and desired snaps back.
+      provider.listServers.mockResolvedValueOnce([]);
+      await gm.refresh();
+      expect(gm.nodeGroupNodes('worker-pool')).toHaveLength(0);
+      expect(gm.targetSize('worker-pool')).toBe(0);
+    },
+  );
+
+  it('a failed lookup is not remembered: the next create in the same cycle asks again and succeeds', async () => {
+    const findFirewallByName = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('HTTP 503'))
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ id: 555 });
     const provider = createProvider({
-      findFirewallByName: vi.fn().mockResolvedValue(null),
+      findFirewallByName,
       createServer: vi.fn(() => new Promise(() => {})),
     });
     const gm = new GroupManager({
       config: baseConfig(),
       provider,
       providerIdPrefix: 'testprov://',
-      log,
+      log: vi.fn(),
     });
 
     await gm.increaseSize('worker-pool', 1);
     await flush();
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(provider.createServer).not.toHaveBeenCalled();
 
-    expect(provider.createServer.mock.calls[0][0].firewalls).toBeUndefined();
-    expect(log).toHaveBeenCalled();
+    // No refresh in between: only the success is cached.
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(findFirewallByName).toHaveBeenCalledTimes(3);
+    expect(provider.createServer).toHaveBeenCalledTimes(2);
+    for (const call of provider.createServer.mock.calls) {
+      expect(call[0].firewalls).toEqual([555]);
+    }
   });
 
-  it('creates without a firewall and logs loudly when the lookup rejects', async () => {
-    const log = vi.fn();
+  it('creates that share one failed lookup all fail, and none reaches createServer', async () => {
+    let reject: (err: Error) => void = () => {};
     const provider = createProvider({
-      findFirewallByName: vi.fn().mockRejectedValue(new Error('network down')),
-      createServer: vi.fn(() => new Promise(() => {})),
+      findFirewallByName: vi.fn(
+        () =>
+          new Promise((_resolve, rej) => {
+            reject = rej;
+          }),
+      ),
     });
     const gm = new GroupManager({
       config: baseConfig(),
       provider,
       providerIdPrefix: 'testprov://',
-      log,
+      log: vi.fn(),
     });
 
-    await gm.increaseSize('worker-pool', 1);
+    await gm.increaseSize('worker-pool', 3);
+    await flush();
+    expect(provider.findFirewallByName).toHaveBeenCalledTimes(1);
+    reject(new Error('socket hang up'));
     await flush();
 
-    expect(provider.createServer.mock.calls[0][0].firewalls).toBeUndefined();
-    expect(log).toHaveBeenCalled();
+    expect(provider.createServer).not.toHaveBeenCalled();
+    const nodes = gm.nodeGroupNodes('worker-pool');
+    expect(nodes).toHaveLength(3);
+    for (const n of nodes) {
+      expect(n.status.errorInfo).toMatchObject({ errorCode: 'firewall-not-found' });
+    }
+  });
+
+  it('no create ever reaches createServer without a firewall id', async () => {
+    // Every lookup outcome in turn, with a refresh between each so nothing
+    // is cached: only the outcomes that name an id create, and each of those
+    // creates carries it.
+    const outcomes = [
+      () => Promise.resolve(null),
+      () => Promise.resolve({ id: 0 }),
+      () => Promise.resolve({ id: '' }),
+      () => Promise.reject(new Error('HTTP 401')),
+      () => Promise.resolve({ id: 'sg-1' }),
+      () => Promise.resolve(undefined),
+      () => Promise.resolve({ id: 42 }),
+    ];
+    let next = 0;
+    const provider = createProvider({
+      findFirewallByName: vi.fn(() => outcomes[next++]()),
+      createServer: vi.fn(() => new Promise(() => {})),
+    });
+    const gm = new GroupManager({
+      config: baseConfig({ nodeGroups: { 'worker-pool': baseGroup({ maxSize: 20 }) } }),
+      provider,
+      providerIdPrefix: 'testprov://',
+      log: vi.fn(),
+    });
+
+    for (let i = 0; i < outcomes.length; i++) {
+      await gm.refresh();
+      await gm.increaseSize('worker-pool', 1);
+      await flush();
+    }
+
+    expect(provider.findFirewallByName).toHaveBeenCalledTimes(outcomes.length);
+    expect(provider.createServer.mock.calls.map((c) => c[0].firewalls)).toEqual([['sg-1'], [42]]);
   });
 });
 
@@ -791,8 +907,8 @@ describe('GroupManager — network resolution', () => {
     await gm.increaseSize('worker-pool', 1);
     await flush();
 
-    // Unlike a missing firewall (best-effort — create proceeds without
-    // one), a missing network must never reach createServer at all.
+    // A missing network, like a missing firewall, never reaches
+    // createServer at all.
     expect(provider.createServer).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalled();
 
@@ -834,6 +950,86 @@ describe('GroupManager — network resolution', () => {
     const nodes = gm.nodeGroupNodes('worker-pool');
     expect(nodes[0].status.errorInfo).toMatchObject({ errorCode: 'network-not-found' });
     expect(nodes[0].status.errorInfo.errorMessage).toContain('acme-prod-network');
+  });
+});
+
+describe('GroupManager — a lookup the cache drops is only ever its own', () => {
+  // Both lookups go through one cache (_cachedLookup): a lookup that rejects
+  // is dropped when it settles, but only while it is still the cached one. A
+  // refresh() clears the cache and the next create starts a newer lookup; the
+  // old one rejecting late must leave the newer one cached, or every create
+  // after it would start a lookup of its own.
+  it.each([
+    ['firewall', 'findFirewallByName', { id: 555 }, 'firewalls'],
+    ['network', 'listNetworks', [{ id: 555, name: 'acme-prod-network' }], 'networks'],
+  ] as const)(
+    'a %s lookup that rejects after a refresh and a newer lookup leaves the newer one cached',
+    async (_, method, found, field) => {
+      const pending: Array<{ resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
+      const lookup = vi.fn(
+        () =>
+          new Promise((resolve, reject) => {
+            pending.push({ resolve, reject });
+          }),
+      );
+      const provider = createProvider({
+        [method]: lookup,
+        createServer: vi.fn(() => new Promise(() => {})),
+      });
+      const gm = new GroupManager({
+        config: baseConfig(),
+        provider,
+        providerIdPrefix: 'testprov://',
+        log: vi.fn(),
+      });
+
+      await gm.increaseSize('worker-pool', 1); // waits on the first lookup
+      await flush();
+      await gm.refresh(); // clears the cache; the first lookup is still in flight
+      await gm.increaseSize('worker-pool', 1); // starts the second lookup
+      await flush();
+      expect(lookup).toHaveBeenCalledTimes(2);
+
+      pending[0].reject(new Error('socket hang up')); // the stale lookup settles late
+      await flush();
+      await gm.increaseSize('worker-pool', 1); // must share the second lookup
+      await flush();
+      expect(lookup).toHaveBeenCalledTimes(2);
+
+      pending[1].resolve(found);
+      await flush();
+      expect(provider.createServer.mock.calls.map((c) => c[0][field])).toEqual([[555], [555]]);
+    },
+  );
+
+  it('a failed network lookup is not remembered: the next create in the same cycle asks again', async () => {
+    const listNetworks = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('HTTP 503'))
+      .mockResolvedValue([{ id: 4242, name: 'acme-prod-network' }]);
+    const provider = createProvider({
+      listNetworks,
+      createServer: vi.fn(() => new Promise(() => {})),
+    });
+    const gm = new GroupManager({
+      config: baseConfig(),
+      provider,
+      providerIdPrefix: 'testprov://',
+      log: vi.fn(),
+    });
+
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(provider.createServer).not.toHaveBeenCalled();
+    expect(gm.nodeGroupNodes('worker-pool')[0].status.errorInfo).toMatchObject({
+      errorCode: 'network-not-found',
+    });
+
+    // No refresh in between.
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(listNetworks).toHaveBeenCalledTimes(2);
+    expect(provider.createServer.mock.calls.map((c) => c[0].networks)).toEqual([[4242]]);
   });
 });
 

@@ -581,6 +581,9 @@ class FakeHetznerProvider {
   static PROVIDER_ID_PREFIX = 'hcloud://';
   static K8S_IMAGE = 'ubuntu-26.04';
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
+  static k8sAutoscalerEnv(): Record<string, string> {
+    return {};
+  }
   static async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
     return renderScript(loadCloudInit('worker-init.sh'), vars);
@@ -1436,6 +1439,78 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets,cronjobs'))).toBe(
       false,
     );
+  });
+
+  // The provider's other autoscaler variables (k8sAutoscalerEnv) ride in the
+  // same Secret, and the pod reads them into its env at start, as the token.
+  describe("the provider's autoscaler env keys", () => {
+    class FakeEnvProvider extends FakeHetznerProvider {
+      static override k8sAutoscalerEnv() {
+        return { EXTRA_ID: 'id-2' };
+      }
+    }
+    const envArgs = () => ({ ...baseArgs(makeProjectDir()), ProviderClass: FakeEnvProvider });
+    const caSecretWith = (token: string, extra: Record<string, string>) =>
+      JSON.stringify({
+        kind: 'Secret',
+        metadata: { name: 'carbon-autoscaler-config', namespace: 'kube-system' },
+        data: Object.fromEntries(
+          Object.entries({ token, 'config.json': '{}', ...extra }).map(([k, v]) => [
+            k,
+            Buffer.from(v).toString('base64'),
+          ]),
+        ),
+      });
+    const token = () => baseArgs('').apiToken;
+
+    it('are written into the Secret, one line each', async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      caSecretOut = '';
+      await applyK3sManifests(envArgs());
+      const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+      expect(applied?.data.split('\n')).toContain('  EXTRA_ID: "id-2"');
+    });
+
+    it('a changed value restarts it, and the unchanged token is not read against the master', async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      caSecretOut = caSecretWith(token(), { EXTRA_ID: 'id-1' });
+      await applyK3sManifests(envArgs());
+      expect(restarts()).toEqual([
+        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/cluster-autoscaler'],
+      ]);
+      expect(serverReads).toEqual([]);
+    });
+
+    it('a Secret written before the key existed restarts it', async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      caSecretOut = caSecret(token());
+      await applyK3sManifests(envArgs());
+      expect(restarts()).toHaveLength(1);
+      expect(serverReads).toEqual([]);
+    });
+
+    it('the same token and the same values restart nothing', async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      caSecretOut = caSecretWith(token(), { EXTRA_ID: 'id-2' });
+      await applyK3sManifests(envArgs());
+      expect(restarts()).toEqual([]);
+    });
+
+    it('one that is unset stops the deploy before anything is applied', async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      class UnsetEnvProvider extends FakeHetznerProvider {
+        static override k8sAutoscalerEnv(): Record<string, string> {
+          throw new Error('EXTRA_ID is not set');
+        }
+      }
+      const err = await applyK3sManifests({
+        ...baseArgs(makeProjectDir()),
+        ProviderClass: UnsetEnvProvider,
+      }).catch((e: Error) => e);
+      expect((err as Error).message).toBe('EXTRA_ID is not set');
+      expect(cmdCalls.filter((a) => a[0] === 'kubectl' && a.includes('apply'))).toEqual([]);
+      expect(stdinCalls).toEqual([]);
+    });
   });
 
   /** The spawn options of every call, by its argv's position in cmdCalls. */

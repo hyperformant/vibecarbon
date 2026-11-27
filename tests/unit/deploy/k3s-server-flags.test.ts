@@ -150,6 +150,54 @@ describe('k3sServerFlags', () => {
     });
   });
 
+  describe('Scaleway scripts', () => {
+    const SCALEWAY_VARS = {
+      k3s_token: 'token',
+      k3s_version: 'v1',
+      master_ip: '10.130.5.3',
+      PUBLIC_IP: '203.0.113.10',
+      PRIVATE_IP: '10.130.5.3',
+      NODE_ID: '6a3b5f0e-1c2d-4e5f-8a9b-0c1d2e3f4a5b',
+    };
+    const scaleway = (role: Role) =>
+      loadBootScript(`scaleway-${role === 'master' ? 'master' : 'worker'}-init.sh`, role) ?? '';
+    const flagArg = (flags: string[], flag: string) => flags[flags.indexOf(flag) + 1];
+
+    it.each([
+      ['master', 'server'],
+      ['worker', 'agent'],
+      ['db', 'agent'],
+    ] as const)(
+      '%s runs k3s on the Private Network with a Scaleway provider-id and no cloud controller',
+      (role, kind) => {
+        // No PRIVATE_IFACE among the vars: an install line naming it would
+        // throw. The flannel interface comes from the drop-in's start-time
+        // script (_scaleway-metadata.sh), found again at every k3s start.
+        const flags = k3sServerFlags(scaleway(role), SCALEWAY_VARS, kind);
+        expect(flagArg(flags, '--node-ip')).toBe('10.130.5.3');
+        expect(flagArg(flags, '--node-external-ip')).toBe('203.0.113.10');
+        expect(flags).toContain(
+          '--kubelet-arg=provider-id=scaleway://6a3b5f0e-1c2d-4e5f-8a9b-0c1d2e3f4a5b',
+        );
+        expect(flags).not.toContain('--flannel-iface');
+        expect(flags).not.toContain('--disable-cloud-controller');
+        expect(flags).not.toContain('--kubelet-arg=cloud-provider=external');
+        expect(flags.some((flag) => flag.startsWith('--flannel-backend'))).toBe(false);
+      },
+    );
+
+    it('only the master advertises the private address and carries the mirror flags', () => {
+      const flags = k3sServerFlags(scaleway('master'), SCALEWAY_VARS);
+      expect(flagArg(flags, '--advertise-address')).toBe('10.130.5.3');
+      expect(flags).toContain('--write-kubeconfig-mode=600');
+      expect(flagArg(flags, '--system-default-registry')).toBe('vibecarbon-system.invalid');
+      for (const role of ['worker', 'db'] as const) {
+        const agent = k3sServerFlags(scaleway(role), SCALEWAY_VARS, 'agent');
+        expect(agent).not.toContain('--advertise-address');
+      }
+    });
+  });
+
   describe('the k3s token joins agents and nothing else', () => {
     // `--agent-token` lets a node join as an agent only. The server token,
     // which would let a machine join as another server and read the
@@ -167,12 +215,18 @@ describe('k3sServerFlags', () => {
       }
       expect(SERVER_SCRIPTS.filter((f) => AGENT_SCRIPTS.includes(f))).toEqual([]);
       expect([...SERVER_SCRIPTS, ...AGENT_SCRIPTS].sort()).toEqual(bootScriptFiles());
-      // Vultr is walked before its k8s tier is sold (K8S_BUILT_AHEAD).
       const vultr = BOOT.filter(({ provider }) => provider === 'vultr');
       expect(vultr.map(({ role, files }) => [role, files])).toEqual([
         ['master', ['vultr-master-init.sh']],
         ['worker', ['vultr-worker-init.sh']],
         ['db', ['vultr-worker-init.sh']],
+      ]);
+      // Scaleway is walked before its k8s tier is sold (K8S_BUILT_AHEAD, 'boot').
+      const scaleway = BOOT.filter(({ provider }) => provider === 'scaleway');
+      expect(scaleway.map(({ role, files }) => [role, files])).toEqual([
+        ['master', ['scaleway-master-init.sh']],
+        ['worker', ['scaleway-worker-init.sh']],
+        ['db', ['scaleway-worker-init.sh']],
       ]);
     });
 

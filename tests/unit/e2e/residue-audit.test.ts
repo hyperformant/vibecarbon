@@ -431,6 +431,37 @@ describe('inventory', () => {
     }
   });
 
+  it("Scaleway lists every region's VPCs as networks, and its default VPC is a fixture", async () => {
+    // scaleway-k8s.js makes a VPC per cluster beside its Private Network,
+    // both `<cluster>-network`; every project also has a VPC named default.
+    const urls: string[] = [];
+    const f = (async (u: string) => {
+      urls.push(String(u));
+      if (String(u).includes('/vpc/v2/regions/fr-par/vpcs')) {
+        return json({
+          vpcs: [
+            { name: 'default', created_at: '2026-01-01T00:00:00Z' },
+            { name: 'testapp-k8s-1731000000000-abc123-network', created_at: ago(9 * H) },
+          ],
+          total_count: 2,
+        });
+      }
+      return json({});
+    }) as unknown as typeof fetch;
+    const out = await inventory('scaleway', ENV, f, { s3: s3Empty, makeStore: okStore() });
+    expect(out.complete, out.incomplete.join('; ')).toBe(true);
+    for (const region of ['fr-par', 'nl-ams', 'pl-waw']) {
+      expect(urls.some((u) => u.includes(`/vpc/v2/regions/${region}/vpcs?project_id=p`))).toBe(
+        true,
+      );
+    }
+    const vpcs = out.rows.filter((r) => r.kind === 'network' && r.region === 'fr-par');
+    expect(vpcs.map((r) => [r.name, classify(r, NOW)])).toEqual([
+      ['default', 'fixture'],
+      ['testapp-k8s-1731000000000-abc123-network', 'residue'],
+    ]);
+  });
+
   it('a 403 on one kind is not covered, not incomplete', async () => {
     const f = (async (u: string) =>
       String(u).includes('/iam/v1alpha1/ssh-keys')

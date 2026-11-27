@@ -361,6 +361,14 @@ describe('budgets are keyed on provider + mode + class', () => {
       expect(row?.ownedS).toBeGreaterThan(0);
     }
   });
+
+  it('scaleway/k8s and scaleway/k8s-ha have a seeded budget until their first cold deploy passes', () => {
+    for (const mode of ['k8s', 'k8s-ha'] as const) {
+      const row = budgetFor(DEPLOY_BUDGET_TABLE, mode, { provider: 'scaleway', cpuClass: 'DEV1' });
+      expect(row?.row).toBe(`scaleway/${mode}/any`);
+      expect(row?.ownedS).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('deployCpuClass', () => {

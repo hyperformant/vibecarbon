@@ -31,6 +31,7 @@ describe('planK8sBackstopTargets', () => {
     expect(targets).toEqual([
       {
         stackEnv: 'e3',
+        clusterName: 'proj-e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: 'proj-e3-nyc3-key',
         reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],
@@ -64,6 +65,7 @@ describe('planK8sBackstopTargets', () => {
     expect(targets).toEqual([
       {
         stackEnv: 'e4-primary',
+        clusterName: 'proj-e4-primary',
         firewallName: 'proj-e4-primary-firewall',
         sshKeyName: null,
         reservedIps: [{ address: '203.0.113.10', stacks: ['e4-primary'] }],
@@ -71,6 +73,7 @@ describe('planK8sBackstopTargets', () => {
       },
       {
         stackEnv: 'e4-standby',
+        clusterName: 'proj-e4-standby',
         firewallName: 'proj-e4-standby-firewall',
         sshKeyName: null,
         reservedIps: [{ address: '203.0.113.20', stacks: ['e4-standby'] }],
@@ -236,13 +239,16 @@ describe('planK8sBackstopTargets on k8s-ha reads an environment-level address to
   });
 });
 
-// The Linode and Vultr k8s programs name their firewall, SSH key and VPC as
-// DigitalOcean's does (`${clusterName}-firewall`, `-${location}-key`,
-// `-network`; vultr-k8s.js describes its group and VPC with them), so the
-// backstop's targets are the same names on each.
+// The Linode, Vultr and Scaleway k8s programs name their firewall, SSH key
+// and VPC as DigitalOcean's does (`${clusterName}-firewall`,
+// `-${location}-key`, `-network`; vultr-k8s.js describes its group and VPC
+// with them, and scaleway-k8s.js names its security group, its VPC and the
+// VPC's Private Network with them), so the backstop's targets are the same
+// names on each.
 describe.each([
   ['Linode', 'linode', 'us-iad'],
   ['Vultr', 'vultr', 'ewr'],
+  ['Scaleway', 'scaleway', 'fr-par-1'],
 ])('planK8sBackstopTargets on %s', (name, provider, region) => {
   it(`gives ${name} the same target names as DigitalOcean, single and HA`, () => {
     const single = {
@@ -253,6 +259,7 @@ describe.each([
     expect(planK8sBackstopTargets(single)).toEqual([
       {
         stackEnv: 'e3',
+        clusterName: 'proj-e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: `proj-e3-${region}-key`,
         reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],

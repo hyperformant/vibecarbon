@@ -34,23 +34,30 @@
 import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { canonicalScalewayRule } from '../../../src/lib/providers/scaleway.js';
 import { buildProgramConfig } from '../../../src/lib/scale-plan.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { listedRule, SCALEWAY_SMTP_DROPS } from '../../_shared/scaleway-listed-rules.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { CODE, findCalls, functionRanges, lex, matchBracket } from '../helpers/js-call-scan.js';
 
 let counter = 0;
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
       counter += 1;
       registered.push({ type: args.type, name: args.name, inputs: args.inputs });
       const ip = `192.0.2.${counter % 250}`;
+      const id = String(8_000_000 + counter);
       return {
-        id: String(8_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -105,6 +112,11 @@ const present = (o: Rule): Rule =>
  * refresh and every REST writer see), and the firewall object that
  * provider's findFirewallByName returns around them. Nothing else: the REST
  * rules are always made by the provider's own writers.
+ *
+ * `canon`, where a provider has one, is how two rule lists compare: the API
+ * lists a rule in its own spelling, so what REST writes and what the API
+ * lists are equal when they mean the same rules, in the same order. Without
+ * one, they compare field for field.
  */
 const INLINE: Record<
   string,
@@ -112,6 +124,7 @@ const INLINE: Record<
     type: string;
     toWire: (inputs: Record<string, unknown>) => Rule[];
     wrap: (rules: Rule[]) => object;
+    canon?: (rules: Rule[]) => unknown[];
   }
 > = {
   // hcloud `rules[]` -> the Hetzner API's firewall `rules[]`. The API reads an
@@ -170,9 +183,28 @@ const INLINE: Record<
       rules: { inbound: rules, inbound_policy: 'DROP', outbound: [], outbound_policy: 'ACCEPT' },
     }),
   },
+  // scaleway `inboundRules[]` (one port, one ipRange each) -> the Instance
+  // API's security-group rules as it lists them: a host range bare, a single
+  // port with `dest_port_to: null`, after the six non-editable outbound SMTP
+  // drops every group lists first (terraform-provider-scaleway v2.92.1
+  // cassettes, internal/services/instance/testdata/security-group-basic and
+  // security-group-rules-ip-ranges; tests/_shared/scaleway-listed-rules.ts).
+  // Around them, the augmented group ScalewayProvider.findFirewallByName
+  // returns (`zone` and `rules` added). Compared through the provider's own
+  // canonical rule form, and only the editable rules: a PUT sets those, and
+  // the SMTP drops stay whatever it sends.
+  scaleway: {
+    type: 'scaleway:instance/securityGroup:SecurityGroup',
+    toWire: (inputs) =>
+      (inputs.inboundRules as Rule[]).map((r, i) =>
+        listedRule(r as Parameters<typeof listedRule>[0], i + 1),
+      ),
+    wrap: (rules) => ({ id: 'sg', zone: 'fr-par-1', rules: [...SCALEWAY_SMTP_DROPS, ...rules] }),
+    canon: (rules) => rules.filter((r) => r.editable !== false).map(canonicalScalewayRule),
+  },
 };
 
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const k8sProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 const inlineProviders = k8sProviders.filter(([, P]) => !P.K8S_OPERATOR_RULES_AFTER_UP);
 const restOnlyProviders = k8sProviders.filter(([, P]) => P.K8S_OPERATOR_RULES_AFTER_UP);
 
@@ -209,6 +241,10 @@ async function run(Provider: K8sProvider, extra: Record<string, unknown>): Promi
   return [...registered];
 }
 
+/** A rule list as its provider compares two (INLINE `canon`), or as given. */
+const canon = (id: string, rules: Rule[] | null) =>
+  rules === null ? null : (INLINE[id].canon ?? ((r: Rule[]) => r))(rules);
+
 /** The declared inbound rules in REST wire shape, in declared order. */
 async function declared(id: string, Provider: K8sProvider, extra: Record<string, unknown>) {
   const { type, toWire } = INLINE[id];
@@ -244,7 +280,7 @@ describe('k8s firewall round trip census', () => {
         INLINE[id].wrap(structuredClone(without)),
         PEER,
       );
-      expect(written).toEqual(withPeer);
+      expect(canon(id, written)).toEqual(canon(id, withPeer));
     });
 
     it('once declared, the REST opener has nothing to write', async () => {
@@ -256,8 +292,11 @@ describe('k8s firewall round trip census', () => {
       const old = await declared(id, Provider, { replicationPeerIp: PEER });
       const next = await declared(id, Provider, { replicationPeerIp: NEW_PEER });
       expect(
-        provider().buildReplicationFirewallRules(INLINE[id].wrap(structuredClone(old)), NEW_PEER),
-      ).toEqual(next);
+        canon(
+          id,
+          provider().buildReplicationFirewallRules(INLINE[id].wrap(structuredClone(old)), NEW_PEER),
+        ),
+      ).toEqual(canon(id, next));
     });
 
     it('the operator push with the saved CIDRs PUTs the declared list back unchanged', async () => {
@@ -271,7 +310,7 @@ describe('k8s firewall round trip census', () => {
         await p.applyOperatorCidrs({ firewallName: 'acme-prod-primary-firewall', cidrs: OPERATOR }),
       ).toBe(true);
       expect(set).toHaveBeenCalledTimes(1);
-      expect(set.mock.calls[0][1]).toEqual(withPeer);
+      expect(canon(id, set.mock.calls[0][1])).toEqual(canon(id, withPeer));
     });
 
     // `vibecarbon access` saves the new list, then pushes it (operator-ip.js):
@@ -299,7 +338,7 @@ describe('k8s firewall round trip census', () => {
           await p.applyOperatorCidrs({ firewallName: 'acme-prod-primary-firewall', cidrs }),
         ).toBe(true);
         expect(set).toHaveBeenCalledTimes(1);
-        expect(set.mock.calls[0][1]).toEqual(after);
+        expect(canon(id, set.mock.calls[0][1])).toEqual(canon(id, after));
       },
     );
   });

@@ -425,6 +425,8 @@ describe('renderUnifiedPerfTableMd', () => {
       ['', '`k8s`'],
       ['', '`k8s-ha`'],
       ['Scaleway', '`compose`'],
+      ['', '`k8s`'],
+      ['', '`k8s-ha`'],
     ]);
   });
 

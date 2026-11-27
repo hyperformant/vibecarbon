@@ -19,7 +19,9 @@
  * - vultr FirewallRule: the numeric rule id, the group from inputs/outputs
  *   (or an import id "<group>,<rule>"); a gone group means a gone rule.
  *   Vpc and ReservedIp: the API uuid (vpc.js, reservedIp.js import notes).
- * - scaleway instance resources: "<zone>/<uuid>"; iam SshKey: a bare uuid.
+ * - scaleway instance resources: "<zone>/<uuid>"; network Vpc and
+ *   PrivateNetwork: "<region>/<uuid>" (vpc.js, privateNetwork.js import
+ *   notes); iam SshKey: a bare uuid.
  *
  * The token comes from the caller; this module never reads an env file.
  */
@@ -71,6 +73,15 @@ const zoned = (path: string) =>
     const [zone, uuid, ...rest] = r.id.split('/');
     return zone && uuid && rest.length === 0
       ? `${SCW}/instance/v1/zones/${enc(zone)}/${path}/${enc(uuid)}`
+      : null;
+  });
+
+/** Scaleway "<region>/<uuid>" ids (the VPC API): unknown without a region. */
+const regional = (path: string) =>
+  byUrl((r) => {
+    const [region, uuid, ...rest] = r.id.split('/');
+    return region && uuid && rest.length === 0
+      ? `${SCW}/vpc/v2/regions/${enc(region)}/${path}/${enc(uuid)}`
       : null;
   });
 
@@ -139,6 +150,8 @@ const PROBES: Record<string, Record<string, TypeProbe>> = {
     [typeOf(scaleway.instance.Server)]: zoned('servers'),
     [typeOf(scaleway.instance.Ip)]: zoned('ips'),
     [typeOf(scaleway.instance.SecurityGroup)]: zoned('security_groups'),
+    [typeOf(scaleway.network.Vpc)]: regional('vpcs'),
+    [typeOf(scaleway.network.PrivateNetwork)]: regional('private-networks'),
     [typeOf(scaleway.iam.SshKey)]: plain(`${SCW}/iam/v1alpha1`, 'ssh-keys'),
   },
 };

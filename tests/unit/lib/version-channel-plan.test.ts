@@ -5,7 +5,7 @@
  * and through its own `write` command for the last check before a publish.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -23,6 +23,7 @@ import {
   CHANNEL_IMAGES,
   K3S_SYSTEM_IMAGE_MIRRORS,
   K3S_VERSION,
+  SCALEWAY_CSI_VERSION,
   TRAEFIK_MIRROR,
 } from '../../../src/lib/images.js';
 import { CHANNEL_SCHEMA, parseChannelFile, versionOf } from '../../../src/lib/version-channel.js';
@@ -171,6 +172,30 @@ describe('the driver support oracle', () => {
       'vultr/vultr-csi',
     ]);
     expect(driverPinsIn(scripts).every((d: { tag: string }) => /^v\d/.test(d.tag))).toBe(true);
+  });
+
+  it('finds a driver rendered into a committed manifest, from its header', () => {
+    // liveDrivers reads every file in the directory, a committed render too.
+    const dir = 'carbon/cloud-init/k3s';
+    const scripts = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'));
+    expect(driverPinsIn(scripts)).toContainEqual({ repo: 'scaleway/scaleway-csi', tag: 'v0.3.6' });
+    // One line, exactly: a header quoted in a comment or a URL is no pin.
+    expect(driverPinsIn(['#  Rendered from https://github.com/x/csi v1.0.0\n'])).toEqual([]);
+    expect(driverPinsIn(['# Rendered from https://github.com/x/csi v1.0.0 \n'])).toEqual([]);
+    expect(driverPinsIn(['# Rendered from https://github.com/x/csi v1.0.0\n'])).toEqual([
+      { repo: 'x/csi', tag: 'v1.0.0' },
+    ]);
+  });
+
+  it('the header tag equals every scaleway/scaleway-csi image tag in the render and SCALEWAY_CSI_VERSION', () => {
+    const render = readFileSync('carbon/cloud-init/k3s/_scaleway-csi.yaml', 'utf8');
+    const [pin] = driverPinsIn([render]);
+    expect(pin).toEqual({ repo: 'scaleway/scaleway-csi', tag: SCALEWAY_CSI_VERSION });
+    const tags = [
+      ...render.matchAll(/^\s*image:\s*"?scaleway\/scaleway-csi:(v[\d.]+)"?\s*$/gm),
+    ].map(([, tag]) => tag);
+    // The node plugin and the controller.
+    expect(tags).toEqual([SCALEWAY_CSI_VERSION, SCALEWAY_CSI_VERSION]);
   });
 
   it('a CRD-only URL is no driver: those CRDs follow a CSI sidecar, not Kubernetes', () => {

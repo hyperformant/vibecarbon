@@ -261,6 +261,7 @@ const PROVIDERS: Array<[string, string, boolean]> = [
   ['hetzner', 'Hetzner', false],
   ['linode', 'Linode', true],
   ['vultr', 'Vultr', true],
+  ['scaleway', 'Scaleway', true],
 ];
 
 // The rows stand for the real classes: every provider with k8s code, with its
@@ -269,7 +270,7 @@ const PROVIDERS: Array<[string, string, boolean]> = [
 it('the table is every k8s provider, with its backstop flag', async () => {
   const { k8sCensusProviders } = await import('../../_shared/k8s-built-ahead.js');
   const real = (
-    k8sCensusProviders() as unknown as Array<[string, { K8S_DESTROY_BACKSTOP?: boolean }]>
+    k8sCensusProviders('destroy') as unknown as Array<[string, { K8S_DESTROY_BACKSTOP?: boolean }]>
   ).map(([id, P]) => `${id} ${P.K8S_DESTROY_BACKSTOP === true}`);
   expect(PROVIDERS.map(([id, , backstop]) => `${id} ${backstop}`).sort()).toEqual(real.sort());
 });

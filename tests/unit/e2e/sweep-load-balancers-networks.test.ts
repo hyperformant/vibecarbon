@@ -14,6 +14,7 @@
  * sweep reads and the row shape that listing returns.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SCALEWAY_TEST_PROJECT } from '../../_shared/scaleway-project.js';
 import { sweepOrphanedDigitalOceanResources } from '../../e2e/utils/sweep-digitalocean.js';
 import { sweepOrphanedLinodeResources } from '../../e2e/utils/sweep-linode.js';
 import { sweepOrphanedScalewayResources } from '../../e2e/utils/sweep-scaleway.js';
@@ -156,16 +157,17 @@ const CLOUDS: Cloud[] = [
   {
     name: 'Scaleway',
     empty: {},
+    // The sweep keeps only the configured project's rows (scaleway-project.ts).
     lb: {
       path: '/lb/v1/zones/nl-ams-1/lbs',
       body: (rows) => ({ lbs: rows }),
-      row: (id, name) => ({ id, name }),
+      row: (id, name) => ({ id, name, project_id: SCALEWAY_TEST_PROJECT }),
       what: 'load-balancer list (nl-ams-1)',
     },
     net: {
       path: '/vpc/v2/regions/nl-ams/private-networks',
       body: (rows) => ({ private_networks: rows }),
-      row: (id, name) => ({ id, name }),
+      row: (id, name) => ({ id, name, project_id: SCALEWAY_TEST_PROJECT }),
       what: 'private-network list (nl-ams)',
     },
     netDeletePath: (id) => `/vpc/v2/regions/fr-par/private-networks/${id}`,
@@ -174,6 +176,7 @@ const CLOUDS: Cloud[] = [
         provider: provider as never,
         objectStorageByRegion: { 'fr-par': noBuckets, 'nl-ams': noBuckets },
         fetchImpl,
+        projectId: SCALEWAY_TEST_PROJECT,
       }),
   },
 ];

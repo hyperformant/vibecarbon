@@ -30,7 +30,7 @@ const inits = scripts.filter((s) => s.name.endsWith('-init.sh'));
 const code = (lines: string[]) => lines.filter((l) => !l.trim().startsWith('#'));
 
 describe('k3s cloud-init scripts', () => {
-  it('walk finds all eight init scripts, so the assertions below are not vacuous', () => {
+  it('walk finds all ten init scripts, so the assertions below are not vacuous', () => {
     // A master and a worker script per provider; each provider's db node
     // boots its worker script as the db role.
     expect(inits.map((s) => s.name).sort()).toEqual([
@@ -39,6 +39,8 @@ describe('k3s cloud-init scripts', () => {
       'linode-master-init.sh',
       'linode-worker-init.sh',
       'master-init.sh',
+      'scaleway-master-init.sh',
+      'scaleway-worker-init.sh',
       'vultr-master-init.sh',
       'vultr-worker-init.sh',
       'worker-init.sh',

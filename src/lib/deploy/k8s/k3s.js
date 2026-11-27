@@ -2770,18 +2770,22 @@ function assertTokenSeesThisCluster({
  * already passed for this cluster; applyK3sManifests reuses what this one
  * records, so a deploy reads the master once.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, tokenChecks?: Set<string>}} args
+ * `region` is the cluster's, as `REGIONS` keys it (a zone on Scaleway, whose
+ * CSI controller takes it as its default zone).
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, region?: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, tokenChecks?: Set<string>}} args
  */
 export async function applyCloudSecrets({
   env,
   ProviderClass,
   token,
+  region,
   masterId,
   environment,
   operatorEnv,
   tokenChecks,
 }) {
-  const secrets = ProviderClass.k8sCloudSecrets({ token });
+  const secrets = ProviderClass.k8sCloudSecrets({ token, region });
   if (secrets.length === 0) return;
   if (typeof token !== 'string' || token === '') {
     throw new Error(
@@ -4630,6 +4634,10 @@ export async function applyK3sManifests({
   if (!sshKeyPath) throw new Error('applyK3sManifests: sshKeyPath required');
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   const master = { ip: masterIp, sshKeyPath };
+  // What the autoscaler's provider reads besides the token, for its Secret
+  // (step 4b). Read before anything is applied: one that is unset throws,
+  // naming it, and the deploy stops with the cluster as it was.
+  const caEnv = ProviderClass.k8sAutoscalerEnv();
   // The schedule and retention this environment runs backups with, validated
   // before anything is created; rendered into the CronJob (renderK8sBase) and
   // the vibecarbon-backup-settings ConfigMap applied below
@@ -4808,6 +4816,9 @@ export async function applyK3sManifests({
       //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
       //       only ever goes through the one automatic decode — plain JSON is
       //       exactly what it expects.
+      //     - one key per operator variable the in-cluster provider reads
+      //       besides the token (ProviderClass.k8sAutoscalerEnv(): Scaleway's
+      //       project id), mapped into the sidecar's env by deployment.yaml.
       //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
       //     pattern at step 2b).
       const clusterName = `${projectName}-${environment}`;
@@ -4828,24 +4839,26 @@ export async function applyK3sManifests({
         caBoundsMin,
         sshKeyName: caSshKeyName,
       });
-      // The token as the autoscaler holds it now: it reads it only when it
-      // starts, so a replaced one restarts it once the apply below is done,
-      // and what reads it is found before that apply (findSecretReaders).
-      // Its last-applied annotation needs no removal (dropLastApplied): every
-      // writer of this Secret (this apply, `scale`) applies it client-side,
-      // which rewrites the record, so it holds the token just applied, never
-      // a replaced one. The read takes no stop signal (readSecretFingerprints
-      // says why); it is one short call.
-      const caTokenBefore = await readSecretFingerprints({
+      // The token and the env keys as the autoscaler holds them now: it reads
+      // them into its env only when it starts, so a replaced one restarts it
+      // once the apply below is done, and what reads it is found before that
+      // apply (findSecretReaders). Its last-applied annotation needs no
+      // removal (dropLastApplied): every writer of this Secret (this apply,
+      // `scale`) applies it client-side, which rewrites the record, so it
+      // holds the values just applied, never replaced ones. The read takes
+      // no stop signal (readSecretFingerprints says why); it is one short
+      // call.
+      const caBefore = await readSecretFingerprints({
         env,
         namespace: 'kube-system',
         name: 'carbon-autoscaler-config',
-        keys: ['token'],
+        keys: ['token', ...Object.keys(caEnv)],
       });
       // A token it doesn't hold yet is read against this cluster's master
       // first, so one that can't see it never reaches the autoscaler, which
-      // adds and removes servers with it.
-      if (caTokenBefore === null || secretDataChanged(caTokenBefore, { token: apiToken })) {
+      // adds and removes servers with it. Only the token: the env keys are
+      // not credentials.
+      if (caBefore === null || secretDataChanged(caBefore, { token: apiToken })) {
         await assertTokenSeesThisCluster({
           env,
           ProviderClass,
@@ -4857,7 +4870,7 @@ export async function applyK3sManifests({
           tokenChecks,
         });
       }
-      const caReaders = secretDataChanged(caTokenBefore, { token: apiToken })
+      const caReaders = secretDataChanged(caBefore, { token: apiToken, ...caEnv })
         ? await findSecretReaders({
             env,
             namespace: 'kube-system',
@@ -4871,6 +4884,7 @@ export async function applyK3sManifests({
         input: carbonAutoscalerSecretYaml({
           token: apiToken,
           configJson: carbonAutoscalerConfigJson,
+          env: caEnv,
         }),
         description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
       });
@@ -4922,10 +4936,11 @@ export async function applyK3sManifests({
           description: 'applyK3sManifests: kubectl set image deployment/cluster-autoscaler',
         },
       );
-      // A replaced token: the env var it reads it into is set at start, and
-      // config.json, the other key, is a file it reloads on its own. After
-      // the apply and the image pin, so the rollout wait below covers it.
-      // Its own rollout wait below, with the diagnostics, covers the restart.
+      // A replaced token or env key: the env vars it reads them into are set
+      // at start, and config.json, the other key, is a file it reloads on
+      // its own. After the apply and the image pin, so the rollout wait below
+      // covers it. Its own rollout wait below, with the diagnostics, covers
+      // the restart.
       if (caReaders) {
         await restartSecretReaders({ env, ...caReaders, signal: caStop.signal, wait: false });
       }
@@ -6692,6 +6707,7 @@ async function deployK3sSteps(options, inFlight) {
         env: kubeEnv,
         ProviderClass: Provider,
         token: options.apiToken,
+        region: options.region,
         masterId: infraOutputs.masterId,
         environment: options.environment,
         operatorEnv: options.operatorEnv ?? options.environment,

@@ -6,6 +6,7 @@ import {
   parseCsiPersistentVolumes,
 } from '../../../src/lib/csi-volumes.js';
 import { linodePv } from '../../_shared/linode-csi-pv.js';
+import { scalewayPv } from '../../_shared/scaleway-csi-pv.js';
 import { vultrPv } from '../../_shared/vultr-csi-pv.js';
 
 /**
@@ -404,6 +405,47 @@ describe('parseCsiPersistentVolumes — vultr-csi v0.19.1 fixtures', () => {
       expect(volumes, handle).toEqual([]);
       expect(unreadable, handle).toEqual([
         { pvName: PVC_A, driver: 'block.csi.vultr.com', volumeHandle: handle },
+      ]);
+    }
+  });
+});
+
+describe('parseCsiPersistentVolumes — scaleway-csi v0.3.6 fixtures', () => {
+  const UUID = '6d3a8f2e-1b4c-4e5f-9a7b-0c1d2e3f4a5b';
+
+  it('takes the volume uuid from a `<zone>/<uuid>` handle and the zone topology key', () => {
+    const { volumes, unreadable } = parseCsiPersistentVolumes({
+      items: [scalewayPv(PVC_A, `nl-ams-1/${UUID}`, 'nl-ams-1')],
+    });
+    expect(unreadable).toEqual([]);
+    expect(volumes).toEqual([
+      {
+        pvName: PVC_A,
+        driver: 'csi.scaleway.com',
+        providerId: 'scaleway',
+        volumeId: UUID,
+        regions: ['nl-ams-1'],
+        phase: 'Bound',
+        reclaimPolicy: 'Delete',
+      },
+    ]);
+  });
+
+  it('reports a handle that is not `<zone>/<uuid>` instead of guessing at an id', () => {
+    for (const handle of [
+      UUID,
+      'fr-par-1/x',
+      `fr-par-1/${UUID}/x`,
+      `/${UUID}`,
+      `fr-par-1/${UUID}-x`,
+      `FR-PAR-1/${UUID}`,
+    ]) {
+      const { volumes, unreadable } = parseCsiPersistentVolumes({
+        items: [scalewayPv(PVC_A, handle)],
+      });
+      expect(volumes, handle).toEqual([]);
+      expect(unreadable, handle).toEqual([
+        { pvName: PVC_A, driver: 'csi.scaleway.com', volumeHandle: handle },
       ]);
     }
   });

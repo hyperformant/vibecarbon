@@ -124,6 +124,7 @@ describe('worker nodes are picked by label', () => {
       'do-worker-init.sh',
       'linode-worker-init.sh',
       'vultr-worker-init.sh',
+      'scaleway-worker-init.sh',
     ]) {
       const text = loadCloudInit(script, { role: 'db' });
       expect(text, script).toContain('--node-label="dedicated=db"');

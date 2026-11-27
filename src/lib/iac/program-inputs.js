@@ -49,6 +49,28 @@ export function requireOperatorCidrs(config, { k8sApi = false } = {}) {
   }
 }
 
+/** Kubernetes node names are DNS labels: 63 characters at most. */
+const K8S_NODE_NAME_MAX = 63;
+
+/**
+ * Refuse, before any resource exists, a cluster whose nodes Kubernetes could
+ * not name, on a provider whose server name becomes each node's hostname and
+ * so its k8s node name (see the boot scripts). The longest is an autoscaler
+ * worker: `<cluster>-ca-` plus 8 random characters.
+ * @param {string} clusterName stackIdentity's name
+ * @param {string} providerName the provider's display name (Provider.NAME)
+ */
+export function requireK8sNodeNamesFit(clusterName, providerName) {
+  const longestNodeName = `${clusterName}-ca-xxxxxxxx`;
+  if (longestNodeName.length > K8S_NODE_NAME_MAX) {
+    throw new Error(
+      `Kubernetes on ${providerName} cannot give this cluster's nodes a node name: the longest, ` +
+        `"${clusterName}-ca-<8 characters>", is ${longestNodeName.length} characters and ` +
+        `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
+    );
+  }
+}
+
 /**
  * The k8s-ha replication peer of one cluster stack: the OTHER side's recorded
  * database node public IPv4, which the stack's program declares as its UDP

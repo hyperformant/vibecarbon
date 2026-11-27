@@ -61,7 +61,7 @@ const valueAfter = (args: string[], flag: string) => {
   return i === -1 ? undefined : args[i + 1];
 };
 
-const K8S_PROVIDERS = k8sCensusProviders() as unknown as Array<
+const K8S_PROVIDERS = k8sCensusProviders('csi') as unknown as Array<
   [string, { NAME: string; K8S_ASSETS: Record<string, string> }]
 >;
 
@@ -92,12 +92,26 @@ describe('diagnose skips a section whose provider asset is empty', () => {
     }
   });
 
-  it('Linode: no CCM log or env section', async () => {
-    const [id, P] = K8S_PROVIDERS.find(([pid]) => pid === 'linode') as (typeof K8S_PROVIDERS)[0];
-    const { subsections } = await runSections(P, id);
-    expect(subsections.some((s) => /CCM/.test(s))).toBe(false);
-    expect(subsections).toContain('Linode CSI controller logs');
+  // k3s's embedded cloud controller runs where the provider ships no CCM.
+  const NO_CCM = K8S_PROVIDERS.filter(([, P]) => P.K8S_ASSETS.ccmDeployment === '');
+
+  it('sees Linode, Vultr and Scaleway among the providers with no CCM', () => {
+    expect(NO_CCM.map(([id]) => id)).toEqual(
+      expect.arrayContaining(['linode', 'vultr', 'scaleway']),
+    );
   });
+
+  it.each(NO_CCM)(
+    '%s: no CCM log or env section, and the CSI controller logs by its selector',
+    async (id, P) => {
+      const { calls, subsections } = await runSections(P, id);
+      expect(subsections.some((s) => /CCM/.test(s))).toBe(false);
+      expect(subsections).toContain(`${P.NAME} CSI controller logs`);
+      expect(
+        calls.some(({ args }) => valueAfter(args, '-l') === P.K8S_ASSETS.csiControllerSelector),
+      ).toBe(true);
+    },
+  );
 
   it('Hetzner keeps its CCM log and env sections', async () => {
     const [id, P] = K8S_PROVIDERS.find(([pid]) => pid === 'hetzner') as (typeof K8S_PROVIDERS)[0];

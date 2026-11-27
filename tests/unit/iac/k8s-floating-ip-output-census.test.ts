@@ -14,10 +14,13 @@
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it } from 'vitest';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 
 let counter = 0;
 /** Every resource the current program run registered: type token and logical name. */
 const registered: { type: string; name: string }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
@@ -25,9 +28,11 @@ pulumi.runtime.setMocks(
       registered.push({ type: args.type, name: args.name });
       // Every address field any of the programs reads, on every resource.
       const ip = `203.0.113.${counter % 250}`;
+      const id = String(7_000_000 + counter);
       return {
-        id: String(7_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -58,7 +63,7 @@ type K8sProvider = {
 };
 
 /** The k8s sellers, and the programs built ahead of their tier. */
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const k8sProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 
 describe('k8s program outputs match K8S_FLOATING_IP', () => {
   it('there are k8s providers on both sides of the flag', () => {

@@ -110,6 +110,10 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     builder: 'buildScalewayComposeProgram',
     config: { ...base, location: 'fr-par-1' },
   },
+  'scaleway-k8s.js': {
+    builder: 'buildScalewayK8sProgram',
+    config: { ...k8s, location: 'fr-par-1' },
+  },
 };
 
 /** A value as the program set it, with any Pulumi output resolved. */
@@ -383,10 +387,16 @@ describe('server-class create timeouts (census)', () => {
   // minutes behind the master's resize (2026-11-08, scale 872 s). The trigger
   // keeps the value state already holds, so it replaces nothing and still
   // counts (proved on real Pulumi, 2026-11-08).
-  const K8S = ['hetzner-k8s.js', 'linode-k8s.js', 'digitalocean-k8s.js', 'vultr-k8s.js'];
-  // DigitalOcean and Vultr pin no private address, so on a deploy the db and
-  // workers are rendered from the master's own, and wait for it.
-  const WAIT_ON_MASTER_ADDRESS = ['digitalocean-k8s.js', 'vultr-k8s.js'];
+  const K8S = [
+    'hetzner-k8s.js',
+    'linode-k8s.js',
+    'digitalocean-k8s.js',
+    'vultr-k8s.js',
+    'scaleway-k8s.js',
+  ];
+  // DigitalOcean, Vultr and Scaleway pin no private address, so on a deploy
+  // the db and workers are rendered from the master's own, and wait for it.
+  const WAIT_ON_MASTER_ADDRESS = ['digitalocean-k8s.js', 'vultr-k8s.js', 'scaleway-k8s.js'];
 
   // A new k8s program lands in one of the two first-deploy rules, or this fails.
   it('every k8s program is in exactly one first-deploy list', () => {
@@ -433,7 +443,7 @@ describe('server-class create timeouts (census)', () => {
     return out.join('\n');
   }
   const MASTER_REF =
-    /\bmaster\.(id|urn|ipv4AddressPrivate|ipv4Address|ipAddress|internalIp|mainIp)\b/;
+    /\bmaster\.(id|urn|ipv4AddressPrivate|ipv4Address|ipAddress|internalIp|mainIp|privateIps)\b/;
 
   it.each(K8S)(
     '%s: a scale or failover resizes its db and workers alongside the master',
@@ -453,8 +463,8 @@ describe('server-class create timeouts (census)', () => {
       }
 
       // Non-vacuous: a deploy (no priorMaster) still builds every worker's
-      // trigger from the live master, and DO's and Vultr's db and workers its
-      // address.
+      // trigger from the live master, and DO's, Vultr's and Scaleway's db and
+      // workers its address.
       const deployed = nodesOf(await runProgram(file));
       for (const node of deployed) {
         if (node.name === 'db' && !WAIT_ON_MASTER_ADDRESS.includes(file)) continue;

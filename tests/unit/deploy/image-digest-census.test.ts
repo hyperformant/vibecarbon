@@ -50,6 +50,7 @@ import {
   registryImageRef,
   socatImageRef,
 } from '../../../src/lib/images.js';
+import { EMBEDDED_CSI_FILES } from '../../_shared/csi-install-rewrite.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
@@ -392,7 +393,13 @@ describe('every shipped image ref is pinned by digest', () => {
   });
 
   it('cloud-init', () => {
-    expect(offenders(CLOUD_INIT_FILES.flatMap(cloudInitSites))).toEqual([]);
+    // A committed CSI render is upstream's YAML (EMBEDDED_CSI_FILES): the
+    // master moves its sidecars onto digest-pinned mirrors as it installs it
+    // (the mirror census holds those to MIRRORED_IMAGES by digest), and its
+    // driver runs at upstream's tag, as every fetched driver manifest's does.
+    const templates = CLOUD_INIT_FILES.filter((f) => !(f in EMBEDDED_CSI_FILES));
+    expect(templates.length).toBeLessThan(CLOUD_INIT_FILES.length);
+    expect(offenders(templates.flatMap(cloudInitSites))).toEqual([]);
   });
 
   it('Dockerfiles', () => {

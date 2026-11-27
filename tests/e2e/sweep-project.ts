@@ -29,6 +29,13 @@ if (names.length === 0) {
 // storage half and a leaked bucket survives. Real env wins: a blank export
 // counts as unset and falls back to this file, never the other way around.
 const env = readE2EEnv(join(import.meta.dirname, '..', '.env.e2e'));
+// The Scaleway provider reads SCALEWAY_DEFAULT_PROJECT_ID from the process
+// environment, and lists and deletes nothing without it (configuredProjectId
+// in src/lib/providers/scaleway.js), so a value only in the file is exported
+// for it. The sweep's own walks get the same id (sweep-provider.ts).
+if (!process.env.SCALEWAY_DEFAULT_PROJECT_ID && env.SCALEWAY_DEFAULT_PROJECT_ID) {
+  process.env.SCALEWAY_DEFAULT_PROJECT_ID = env.SCALEWAY_DEFAULT_PROJECT_ID;
+}
 
 const providers = Object.entries(testConfig.e2e.providers)
   .map(([id, p]) => ({ id, token: env[p.computeTokenEnv] }))

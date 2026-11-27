@@ -39,41 +39,61 @@ export function deleteFailure(providerName, status) {
 }
 
 /**
+ * The rows of a network listing read whole, for a delete by name: a network
+ * missing from part of the list is not proven gone, so a listing that
+ * stopped early throws, and the caller reports that it could not confirm it
+ * (deleteBackstopNetwork).
+ * @template T
+ * @param {{items: T[], complete: boolean, status?: number}} listing
+ * @param {string} what - the listing, as the error names it ('VPC')
+ * @returns {T[]}
+ * @throws when the listing is not complete
+ */
+export function networkListingWhole({ items, complete, status }, what) {
+  if (complete) return items;
+  throw new Error(
+    `the ${what} listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
+  );
+}
+
+/**
+ * DELETE one listed network object, bare. A 2xx or 404 is gone (null). Any
+ * other answer is the provider refusing, most often because a server is
+ * still in the network: an ordering bug in the caller, never a not-found, so
+ * it comes back as the error for the caller to report as `apiError`.
+ * @param {{bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
+ * @param {string} endpoint - the object's path under API_BASE
+ * @returns {Promise<Error|null>}
+ */
+export async function deleteNetworkAt(provider, endpoint) {
+  try {
+    const res = await provider.bareRequest(endpoint, { method: 'DELETE' });
+    if (res.ok || res.status === 404) return null;
+    const body = await res.text().catch(() => '');
+    return new Error(`DELETE ${endpoint} failed: HTTP ${res.status} ${body}`.trim());
+  } catch (err) {
+    return err;
+  }
+}
+
+/**
  * The body of `deleteNetworkByName` on a provider whose VPCs each have a
  * `name` (listNetworksDetailed) and that deletes one at `DELETE /vpcs/{id}`
  * (DigitalOcean, Linode, Vultr). The VPC is the one whose name is exactly
- * `name`. A 2xx or 404 is deleted. Any other answer is the provider refusing,
- * most often because a server is still in the VPC: an ordering bug in the
- * caller, never a not-found, so it comes back as `apiError` for the caller
- * to report. A listing that cannot be read whole throws instead: a VPC
- * missing from part of the list is not proven gone, and the caller reports
- * that it could not confirm it (deleteBackstopNetwork).
+ * `name`. A 2xx or 404 is deleted; any other answer is `apiError`
+ * (deleteNetworkAt). A listing that cannot be read whole throws instead
+ * (networkListingWhole).
  * @param {{listNetworksDetailed: () => Promise<{items: Array<{id: string|number, name: string}>, complete: boolean, status?: number}>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
  * @param {string} name
  * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
  * @throws when the VPC listing cannot be read whole
  */
 export async function deleteVpcByName(provider, name) {
-  const { items: vpcs, complete, status } = await provider.listNetworksDetailed();
-  if (!complete) {
-    throw new Error(
-      `the VPC listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
-    );
-  }
+  const vpcs = networkListingWhole(await provider.listNetworksDetailed(), 'VPC');
   const vpc = vpcs.find((v) => v.name === name);
   if (!vpc) return { deleted: false, everExisted: false, apiError: null };
-  try {
-    const res = await provider.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
-    if (res.ok || res.status === 404) return { deleted: true, everExisted: true, apiError: null };
-    const body = await res.text().catch(() => '');
-    return {
-      deleted: false,
-      everExisted: true,
-      apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
-    };
-  } catch (err) {
-    return { deleted: false, everExisted: true, apiError: err };
-  }
+  const apiError = await deleteNetworkAt(provider, `/vpcs/${vpc.id}`);
+  return { deleted: apiError === null, everExisted: true, apiError };
 }
 
 /**
@@ -482,9 +502,10 @@ export class BaseProvider {
    * cleanupOrphanedVolumes, destroy.js). True keeps that backstop, which is
    * how a volume detached before a failed capture is still collected on
    * Hetzner, DigitalOcean and Linode. False makes such a match a reported
-   * deferral (`no-owner-signal`) that fails the destroy: Vultr's volumes
-   * carry no tags, so only a captured id proves one is this environment's,
-   * and a region-wide guess there could delete another cluster's disk.
+   * deferral (`no-owner-signal`) that fails the destroy: Vultr's and
+   * Scaleway's CSI volumes carry no tags, so only a captured id proves one is
+   * this environment's, and a region-wide guess there could delete another
+   * cluster's disk.
    * @type {boolean}
    */
   static ORPHAN_VOLUME_REGION_GUESS = true;
@@ -533,6 +554,18 @@ export class BaseProvider {
   static COMPOSE_FLOATING_IP = false;
 
   /**
+   * Whether this provider's createServer gives an autoscaled k8s worker a
+   * floating (or reserved) IP of its own. Scaleway's does (a flexible IP,
+   * tagged with the worker's labels: its cluster and environment, no
+   * project); no other provider's does. deleteServer releases it with the
+   * worker; where this is true, the k8s destroy backstop also looks for one
+   * by the stack's cluster name and environment, which finds one a failed
+   * release left (sweepK8sBackstopTargets).
+   * @type {boolean}
+   */
+  static K8S_AUTOSCALED_WORKER_IPS = false;
+
+  /**
    * What the provider calls a floating or reserved IP, in destroy's lines.
    * @type {string}
    */
@@ -548,11 +581,33 @@ export class BaseProvider {
    * another copy of the token
    * (tests/unit/deploy/k8s-cloud-secrets.test.ts holds them to a record of
    * those manifests). None on a provider without a k8s tier.
-   * @param {{token: string}} _values - the operator's provider API token
+   * @param {{token: string, region?: string}} _values - the operator's
+   *   provider API token, and the cluster's region as `REGIONS` keys it (a
+   *   zone on Scaleway, whose CSI controller reads it; the rest ignore it)
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */
   static k8sCloudSecrets(_values) {
     return [];
+  }
+
+  /**
+   * The operator variables the in-cluster provider reads besides its API
+   * token, with their values: what the carbon-autoscaler pod needs in its env
+   * for createServer to work. Each entry goes into the
+   * kube-system/carbon-autoscaler-config Secret under its own name, which
+   * deploy and scale's bounds re-patch both write (carbonAutoscalerSecretYaml),
+   * and carbon/k8s/base/cluster-autoscaler/deployment.yaml maps it into the
+   * carbon-autoscaler container as an optional secretKeyRef of the same name
+   * (tests/unit/autoscaler/autoscaler-env-census.test.ts holds the two to
+   * each other). Only what the autoscaler reaches: createServer,
+   * deleteServer, listServers, listNetworks and findFirewallByName. None
+   * here: every other provider's API takes the token alone. An override
+   * throws, naming the variable, when one is unset: applyK3sManifests reads
+   * it before anything is applied, so the deploy stops there.
+   * @returns {Record<string, string>}
+   */
+  static k8sAutoscalerEnv() {
+    return {};
   }
 
   /**
@@ -1031,10 +1086,20 @@ export class BaseProvider {
   /**
    * Look up a firewall by its exact name.
    * @param {string} name - Firewall name
-   * @returns {Promise<object|null>} The firewall, or null if not found
-   *   (also null on a non-2xx response — callers rely on this as a soft
-   *   "does this env's firewall exist yet?" check for a not-yet-deployed
-   *   environment, so it must swallow errors rather than throw).
+   * @returns {Promise<object|null>} The firewall, or null when no firewall
+   *   has the name: callers use that as the "does this env's firewall exist
+   *   yet?" check for a not-yet-deployed environment. A short rules listing
+   *   must never read as the firewall's whole rule set, since
+   *   applyOperatorCidrs and the replication write PUT back a list built
+   *   from it: Scaleway throws on one, and Vultr marks it
+   *   (`rulesComplete: false`) and its rule builders refuse it. A short
+   *   group listing is where providers differ. Scaleway's throws, so its
+   *   null means no such group. Hetzner's request and Vultr's group walk
+   *   still return null on an error status, so on those two null can also
+   *   mean the listing could not be read. Every caller catches the throw
+   *   (the autoscaler's _lookupFirewallId, both replication openers, and
+   *   deleteFirewallByName, which reports it as its apiError) or passes it
+   *   on (applyOperatorCidrs, to operator-ip.js).
    */
   async findFirewallByName(_name) {
     throw new Error('findFirewallByName() must be implemented by subclass');

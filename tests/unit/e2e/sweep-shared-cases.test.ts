@@ -135,6 +135,8 @@ const SWEEPS: Record<string, SweepRow> = {
         provider: emptyProvider() as never,
         objectStorageByRegion: { 'fr-par': s, 'nl-ams': store() },
         fetchImpl: emptyFetch({}),
+        // Every walk stays inside one project (sweep-scaleway.ts header).
+        projectId: 'proj-1',
       }),
     locateArgs: (name) => [name],
   },

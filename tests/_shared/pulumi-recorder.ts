@@ -66,6 +66,7 @@ export function recorderModule(prefix: string, created: Created) {
     'ReservedIpAssignment',
     'instance',
     'iam',
+    'network',
   ];
   return Object.fromEntries([['default', root], ...names.map((n) => [n, root[n]])]);
 }

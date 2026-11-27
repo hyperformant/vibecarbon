@@ -15,6 +15,7 @@ import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { bootScriptFiles, k8sBootScripts } from '../../_shared/k3s-boot-scripts.js';
 
@@ -50,6 +51,7 @@ describe('host reporter: k8s workers install it after the k3s install', () => {
     ['digitalocean', DigitalOceanProvider, 'nyc3', 's-2vcpu-4gb'],
     ['linode', LinodeProvider, 'us-ord', 'g6-standard-2'],
     ['vultr', VultrProvider, 'ewr', 'vc2-2c-4gb'],
+    ['scaleway', ScalewayProvider, 'fr-par-1', 'DEV1-M'],
   ])(
     '%s: autoscaler-created workers boot with it',
     async (providerId, ProviderClass, region, type) => {
@@ -106,6 +108,7 @@ describe('host reporter: the db node takes it over SSH, not from its user data',
     ['digitalocean', DigitalOceanProvider],
     ['linode', LinodeProvider],
     ['vultr', VultrProvider],
+    ['scaleway', ScalewayProvider],
   ])('%s: the db node boots without it, from the worker script', async (_id, P) => {
     expect(await P.getK8sWorkerUserData({})).toContain(MARK);
     expect(await P.getK8sDbUserData({})).not.toContain(MARK);

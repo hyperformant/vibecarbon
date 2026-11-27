@@ -12,8 +12,8 @@ import { testConfig } from '../../config.js';
 describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
   const scaleway = testConfig.e2e.providers.scaleway;
 
-  it('has exactly two scenarios — compose + compose-ha (tier-parity wave 1; ScalewayProvider.SUPPORTED_TIERS stops at compose-ha)', () => {
-    expect(scaleway.scenarios).toHaveLength(2);
+  it('has four scenarios, s1 to s4, and runs three by default', () => {
+    expect(scaleway.scenarios).toHaveLength(4);
     expect(scaleway.scenarios[0]).toEqual({
       mode: 'compose',
       dnsProvider: 'scaleway',
@@ -22,13 +22,23 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
     expect(scaleway.scenarios[1]).toEqual({
       mode: 'compose-ha',
       // Same-provider DNS so the s2 failover flip exercises the Scaleway
-      // backend's setupHA/upsertApexAndWildcard path — the self-contained
+      // backend's setupHA/upsertApexAndWildcard path, the self-contained
       // default, same reasoning as Hetzner's e2.
       dnsProvider: 'scaleway',
       envPrefix: 's2',
     });
+    expect(scaleway.scenarios[2]).toEqual({
+      mode: 'k8s',
+      dnsProvider: 'scaleway',
+      envPrefix: 's3',
+    });
+    expect(scaleway.scenarios[3]).toEqual({
+      mode: 'k8s-ha',
+      dnsProvider: 'scaleway',
+      envPrefix: 's4',
+    });
     // compose-ha runs only when named (2026-11-25).
-    expect(scaleway.defaultSelection).toEqual(['compose']);
+    expect(scaleway.defaultSelection).toEqual(['compose', 'k8s', 'k8s-ha']);
   });
 
   it('names its required credentials — the full triple, nothing else', () => {
@@ -59,12 +69,14 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
 });
 
 describe('capacityPreferences.scaleway', () => {
-  it('scales the default (DEV1-M) and the BASIC3 baseline one size up', () => {
+  it('scales the default (DEV1-M), the BASIC3 baseline and the db default (DEV1-S) one size up', () => {
     // The matrix deploys what a customer gets by default, and on 2026-10-22
-    // that is DEV1-M (the cheapest 4 GB compose candidate in every zone).
+    // that is DEV1-M (the cheapest 4 GB candidate in every zone) for compose,
+    // master and worker, and DEV1-S (the cheapest 2 GB one) for the db.
     expect(testConfig.e2e.capacityPreferences.scaleway.scaleTo).toEqual({
       'DEV1-M': 'DEV1-L',
       'BASIC3-X2C-4G': 'BASIC3-X4C-8G',
+      'DEV1-S': 'DEV1-M',
     });
   });
 

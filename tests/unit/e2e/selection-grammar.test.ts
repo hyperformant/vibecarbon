@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { testConfig } from '../../config.js';
 import { resolveSelection, SelectionError } from '../../e2e/selection.js';
 
 const modes = (sel: ReturnType<typeof resolveSelection>) =>
@@ -45,7 +46,7 @@ describe('resolveSelection — defaults', () => {
     ]);
   });
 
-  it('--provider all = every provider defaults, hetzner first (13 total, no compose-ha)', () => {
+  it('--provider all = every provider defaults, hetzner first (15 total, no compose-ha)', () => {
     expect(modes(resolveSelection({ providers: ['all'] }))).toEqual([
       'hetzner/compose',
       'hetzner/k8s',
@@ -60,8 +61,18 @@ describe('resolveSelection — defaults', () => {
       'vultr/k8s',
       'vultr/k8s-ha',
       'scaleway/compose',
+      'scaleway/k8s',
+      'scaleway/k8s-ha',
     ]);
-    expect(resolveSelection({ providers: ['all'] })).toHaveLength(13);
+    expect(resolveSelection({ providers: ['all'] })).toHaveLength(15);
+  });
+
+  it('--provider scaleway = Scaleway defaults (the same three)', () => {
+    expect(modes(resolveSelection({ providers: ['scaleway'] }))).toEqual([
+      'scaleway/compose',
+      'scaleway/k8s',
+      'scaleway/k8s-ha',
+    ]);
   });
 
   it('compose-ha runs on every provider when it is named', () => {
@@ -170,7 +181,7 @@ describe('resolveSelection — explicit tokens', () => {
 
   it('provider all + exclude', () => {
     const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/k8s'] });
-    expect(sel).toHaveLength(12);
+    expect(sel).toHaveLength(14);
     expect(modes(sel)).not.toContain('digitalocean/k8s');
   });
 });
@@ -190,10 +201,21 @@ describe('resolveSelection — loud failures (no legacy forms)', () => {
   });
 
   it('mode unsupported by provider throws naming supported modes', () => {
-    // scaleway carries the negative case now that DO, Linode and Vultr support all four tiers.
-    expect(() => resolveSelection({ include: ['scaleway/k8s'] })).toThrow(
-      /does not support k8s.*compose, compose-ha/,
-    );
+    // Every provider registers all four modes now, so a compose-only
+    // registry row stands in for one that does not.
+    const providers = testConfig.e2e.providers as unknown as Record<
+      string,
+      { scenarios: { mode: string }[] }
+    >;
+    const original = providers.scaleway;
+    providers.scaleway = { ...original, scenarios: original.scenarios.slice(0, 2) };
+    try {
+      expect(() => resolveSelection({ include: ['scaleway/k8s'] })).toThrow(
+        /does not support k8s.*compose, compose-ha/,
+      );
+    } finally {
+      providers.scaleway = original;
+    }
   });
 
   it('include token outside the --provider pool throws with pool message', () => {

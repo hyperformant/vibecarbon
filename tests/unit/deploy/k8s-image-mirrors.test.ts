@@ -37,7 +37,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
-import { load as loadYaml } from 'js-yaml';
+import { gunzipSync } from 'node:zlib';
+import { loadAll, load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
   holdFor,
@@ -46,6 +47,7 @@ import {
   readK3sVersion,
   renderReport,
 } from '../../../scripts/mirror-drift.mjs';
+import { EMBEDDED_CSI_MANIFESTS } from '../../../src/lib/iac/cloud-init.js';
 import {
   ALPINE_K8S_MIRROR,
   alpineImageRef,
@@ -74,6 +76,7 @@ import {
   pauseImageRef,
   REGISTRY_MIRROR,
   registryImageRef,
+  SCALEWAY_CSI_VERSION,
   socatImageRef,
   TRAEFIK_MIRROR,
   traefikImageRef,
@@ -83,6 +86,7 @@ import {
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
   csiManifest,
+  EMBEDDED_CSI_FILES,
   imagesByContainer,
   renderedCsiRewrites,
   runCsiInstallRewrite,
@@ -256,6 +260,8 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       /linode-blockstorage-csi-driver\/releases\/download\/(v[\d.]+)\//,
     ],
     ['vultr', 'carbon/cloud-init/k3s/vultr-master-init.sh', /vultr-csi\/(v[\d.]+)\//],
+    // The committed render, not the master: its image line is the driver's tag.
+    ['scaleway', 'carbon/cloud-init/k3s/_scaleway-csi.yaml', /scaleway\/scaleway-csi:(v[\d.]+)"?/],
   ] as const)(
     '%s: the version in cloud-init matches the version the tags were derived from',
     (provider, initScript, pattern) => {
@@ -270,6 +276,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
         digitalocean: DO_CSI_VERSION,
         linode: LINODE_CSI_VERSION,
         vultr: VULTR_CSI_VERSION,
+        scaleway: SCALEWAY_CSI_VERSION,
       }[provider];
       expect(pinned, `no CSI version found in ${initScript}`).toBeDefined();
       expect(pinned).toBe(expected);
@@ -337,7 +344,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     expect(initScript).toContain('deployment/hcloud-csi-controller');
   });
 
-  it.each(['hetzner', 'digitalocean', 'linode', 'vultr'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway'] as const)(
     '%s: re-pins EVERY registry.k8s.io container upstream ships, and no other',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<
@@ -357,7 +364,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     },
   );
 
-  it.each(['hetzner', 'digitalocean', 'linode', 'vultr'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway'] as const)(
     '%s: each re-pin carries upstream’s exact tag (same bits, different host)',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<
@@ -502,7 +509,17 @@ const CSI_REPO: Record<string, string> = {
   digitalocean: 'digitalocean/csi-digitalocean',
   linode: 'linode/linode-blockstorage-csi-driver',
   vultr: 'vultr/vultr-csi',
+  scaleway: 'scaleway/scaleway-csi',
 };
+
+/** A provider's committed CSI render, as committed (EMBEDDED_CSI_FILES). */
+const embeddedRender = (provider: string) => {
+  const files = Object.keys(EMBEDDED_CSI_FILES).filter((f) => EMBEDDED_CSI_FILES[f] === provider);
+  expect(files, `${provider}'s committed render`).toHaveLength(1);
+  return readRepoFile(files[0]);
+};
+/** A committed render's header: the comment lines before its first document. */
+const headerOf = (text: string) => text.slice(0, text.indexOf('\n---\n') + 1);
 
 describe('cloud-init starts every CSI container on the ref the deploy re-pin sets', () => {
   // The deploy's `kubectl set image` (csiSidecarSetImagePlan) used to be what
@@ -574,16 +591,62 @@ describe('cloud-init starts every CSI container on the ref the deploy re-pin set
       const rendered = await renderMaster(provider);
       const installs = [
         ...rendered.matchAll(
-          /csi_fetch_mirrored (https:\/\/\S+) (\S+) \\\n\s*&& kubectl apply -f (\S+?)(?:;| &&)/g,
+          /csi_fetch_mirrored ((?:https|file):\/\/\S+) (\S+) \\\n\s*&& kubectl apply (-n kube-system )?-f (\S+?)(?:;| &&)/g,
         ),
       ];
       expect(installs, 'one csi_fetch_mirrored install').toHaveLength(1);
-      const [, url, file, applied] = installs[0];
-      expect(url).toContain(CSI_REPO[provider]);
-      expect(url).toContain(
-        UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS].version,
-      );
+      const [, url, file, namespace, applied] = installs[0];
+      const { version } = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS];
       expect(applied).toBe(file);
+      const embedded = EMBEDDED_CSI_MANIFESTS[provider];
+      if (url.startsWith('file://')) {
+        // A manifest the master carries in its user data: decoded to the
+        // table's path, byte for byte the committed render, whose header
+        // names the driver's repo and the version it was rendered at.
+        expect(
+          embedded,
+          `${provider} installs ${url}, which no EMBEDDED_CSI_MANIFESTS entry holds`,
+        ).toBeDefined();
+        expect(url).toBe(`file://${embedded.path}`);
+        const decodes = [
+          ...rendered.matchAll(/printf '%s' "([A-Za-z0-9+/=]+)" \| base64 -d \| gunzip > (\S+)/g),
+        ];
+        expect(decodes, 'one embedded manifest decode').toHaveLength(1);
+        const [, carried, to] = decodes[0];
+        expect(to).toBe(embedded.path);
+        const committed = embeddedRender(provider);
+        expect(gunzipSync(Buffer.from(carried, 'base64')).toString('utf8')).toBe(committed);
+        expect(headerOf(committed)).toContain(
+          `\n# Rendered from https://github.com/${CSI_REPO[provider]} ${version}\n`,
+        );
+        // Helm names no namespace on a namespaced object, so the apply does,
+        // and the render names no other one: not on an object, and not on a
+        // binding's subject, which would grant a ServiceAccount elsewhere.
+        expect(namespace).toBe('-n kube-system ');
+        type Doc = {
+          kind?: string;
+          metadata?: { name?: string; namespace?: string };
+          subjects?: { namespace?: string }[];
+        };
+        const docs = loadAll(committed) as Doc[];
+        for (const doc of docs) {
+          const at = `${doc?.kind}/${doc?.metadata?.name}`;
+          expect([undefined, 'kube-system'], at).toContain(doc?.metadata?.namespace);
+          for (const subject of doc?.subjects ?? []) {
+            expect([undefined, 'kube-system'], `${at} subject`).toContain(subject.namespace);
+          }
+        }
+        // Not vacuous: the render binds its ServiceAccount.
+        expect(docs.some((doc) => (doc?.subjects ?? []).length > 0)).toBe(true);
+      } else {
+        expect(
+          embedded,
+          `${provider} fetches its manifest, yet has an embedded one`,
+        ).toBeUndefined();
+        expect(url).toContain(CSI_REPO[provider]);
+        expect(url).toContain(version);
+        expect(namespace).toBeUndefined();
+      }
       // A manifest of the driver applied straight from its URL would skip the
       // rewrite. DigitalOcean's crds.yaml is the one: CRDs run no pod, so it
       // names no image.
@@ -591,6 +654,36 @@ describe('cloud-init starts every CSI container on the ref the deploy re-pin set
         .map((m) => m[1])
         .filter((u) => u.includes(CSI_REPO[provider]));
       expect(direct.filter((u) => !u.endsWith('/crds.yaml'))).toEqual([]);
+    },
+  );
+
+  it.each(Object.keys(EMBEDDED_CSI_MANIFESTS))(
+    '%s: the committed render is what the fixture records, and the master’s rewrite of it installs the plan’s refs',
+    async (provider) => {
+      // A fetched manifest is recorded from its URL by hand; a committed one
+      // is here, so the record is held to it, and the master's own rewrite
+      // runs over it whole, not over a manifest built from the record.
+      const committed = embeddedRender(provider);
+      const upstream = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
+        .workloads as Record<string, Record<string, string>>;
+      expect(imagesByContainer(committed)).toEqual(imagesByContainer(csiManifest(upstream)));
+      const { status, stderr, installed } = runCsiInstallRewrite(
+        await renderMaster(provider),
+        committed,
+      );
+      expect(status, stderr).toBe(0);
+      const expected = imagesByContainer(committed);
+      for (const { workload, setImageArgs } of csiSidecarSetImagePlan(provider)) {
+        for (const arg of setImageArgs) {
+          expected[`${workload} ${arg.slice(0, arg.indexOf('='))}`] = arg.slice(
+            arg.indexOf('=') + 1,
+          );
+        }
+      }
+      expect(imagesByContainer(installed as string)).toEqual(expected);
+      // Only the image values moved: the rest of the render goes in as committed.
+      const strip = (text: string) => text.replace(/^(\s*image:\s*).*$/gm, '$1');
+      expect(strip(installed as string)).toBe(strip(committed));
     },
   );
 });
@@ -665,8 +758,14 @@ describe('every consuming reference resolves through the mirror', () => {
     expect(files).toContain(join('carbon', 'k8s', 'base', 'db', 'statefulset.yaml'));
     expect(files).toContain(join('src', 'lib', 'deploy', 'k8s', 'k3s.js'));
     expect(files.some((f) => f.split(sep).includes('node_modules'))).toBe(false);
+    // A committed CSI render is upstream's YAML, as a fetched manifest is: its
+    // master installs it only through csi_fetch_mirrored, whose rewrite stops
+    // the boot on a registry.k8s.io ref it does not move (run over the render
+    // whole above).
+    const embedded = Object.keys(EMBEDDED_CSI_FILES).map((f) => join(...f.split('/')));
+    expect(files).toEqual(expect.arrayContaining(embedded));
     for (const rel of files) {
-      if (rel === join('src', 'lib', 'images.js')) continue;
+      if (rel === join('src', 'lib', 'images.js') || embedded.includes(rel)) continue;
       readRepoFile(rel)
         .split('\n')
         .forEach((line, i) => {

@@ -96,6 +96,14 @@ const DRIVER_URL =
  */
 const CRD_ONLY_PATH = /^client\/config\/crd\//;
 
+/**
+ * The header line of a committed CSI render (a driver that ships only a Helm
+ * chart, carbon/cloud-init/k3s/_<provider>-csi.yaml): the driver's repo and
+ * the tag it was rendered at. The master carries that file and installs it
+ * from disk, so no URL in a script names the driver.
+ */
+const RENDERED_DRIVER = /^# Rendered from https:\/\/github\.com\/([\w.-]+\/[\w.-]+) (v\d[\d.]*)$/gm;
+
 const major = (version) => Number(version.replace(/^v/, '').split('.')[0]);
 const minor = (version) => Number(version.replace(/^v/, '').split('.')[1]);
 
@@ -132,17 +140,19 @@ export function k8sMinorOfGoMod(goMod) {
 
 /**
  * Every driver the cloud-init scripts install, at the tag they install. Read
- * from the scripts, so a bump or a new driver cannot miss this check. A
- * CRD-only manifest is no driver (CRD_ONLY_PATH).
+ * from the scripts and the committed renders beside them (RENDERED_DRIVER),
+ * so a bump or a new driver cannot miss this check. A CRD-only manifest is
+ * no driver (CRD_ONLY_PATH).
  * @param {string[]} scripts
  * @returns {Array<{ repo: string, tag: string }>}
  */
 export function driverPinsIn(scripts) {
-  const pins = scripts.flatMap((text) =>
-    [...text.matchAll(DRIVER_URL)]
+  const pins = scripts.flatMap((text) => [
+    ...[...text.matchAll(DRIVER_URL)]
       .filter((m) => !CRD_ONLY_PATH.test(m[3]))
       .map((m) => ({ repo: m[1], tag: m[2] })),
-  );
+    ...[...text.matchAll(RENDERED_DRIVER)].map((m) => ({ repo: m[1], tag: m[2] })),
+  ]);
   return [...new Map(pins.map((pin) => [`${pin.repo}@${pin.tag}`, pin])).values()];
 }
 

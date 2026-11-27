@@ -13,11 +13,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  assertTierSupported,
-  PROVIDERS,
-  ScalewayProvider,
-} from '../../../src/lib/providers/index.js';
+import { assertTierSupported, PROVIDERS } from '../../../src/lib/providers/index.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // User-facing surfaces — the "living docs" inventory, minus the
@@ -544,16 +540,21 @@ describe('terminology census', () => {
     }
   });
 
-  it('FEATURES.md quotes the real Scaleway k8s capability-gate error byte-identically', () => {
-    // Mirror-with-drift-guard: import the real provider + guard function
+  it('FEATURES.md quotes the real capability-gate error byte-identically', () => {
+    // Mirror-with-drift-guard: import the real guard function
     // (src/lib/providers/index.js) and trigger the actual thrown error,
-    // rather than duplicating its format string — so a future wording
+    // rather than duplicating its format string, so a future wording
     // change to assertTierSupported() fails this test instead of silently
-    // leaving FEATURES.md stale. (Scaleway/k8s carries the example since the
-    // Vultr lift removed Vultr's k8s gate.)
+    // leaving FEATURES.md stale. Every registered provider runs k8s now, so
+    // the example is a compose-only provider that does not exist: Acme Cloud.
+    // biome-ignore lint/complexity/noStaticOnlyClass: stands in for a provider class shape (statics only)
+    class AcmeCloud {
+      static NAME = 'Acme Cloud';
+      static SUPPORTED_TIERS = ['compose'];
+    }
     let message = '';
     try {
-      assertTierSupported(ScalewayProvider, 'k8s');
+      assertTierSupported(AcmeCloud as never, 'k8s');
     } catch (err) {
       message = (err as Error).message;
     }

@@ -1,12 +1,16 @@
 /**
- * Post-destroy orphan sweep for the Scaleway scenario (s1).
+ * Post-destroy orphan sweep for the Scaleway scenarios (s1 compose, s3 k8s,
+ * s4 k8s-ha).
  *
  * Counterpart to `sweepOrphanedVultrResources` (sweep-vultr.ts) — see that
  * module's header, and sweep-digitalocean.ts's, for the 2026-08-07
  * wrong-cloud-sweep RCA this family exists to prevent. Same structure:
- * deletion through the provider instance API wherever it exists;
- * enumeration of security groups and IAM ssh keys — which the provider
- * only exposes as exact-name lookups — walks the Scaleway API directly.
+ * deletion through the provider instance API wherever it exists, except
+ * security groups, deleted by the id and zone this sweep listed (the
+ * provider's name lookup refuses same-name twins, and leaked twins are
+ * what a sweep is for); enumeration of security groups and IAM ssh keys —
+ * which the provider only exposes as exact-name lookups — walks the
+ * Scaleway API directly.
  * All operations are best-effort: failures warn and flip `enumFailed`,
  * never propagate (teardown must complete).
  *
@@ -30,10 +34,16 @@
  *      region-scoped is unverified (audit), so the sweep walks every
  *      region rather than assuming one listing covers all. The SAME IAM
  *      pair as compute signs S3 — no separate storage credentials.
- *   4. SSH keys are PROJECT-scoped IAM resources (global API). The walk
- *      scopes to SCALEWAY_DEFAULT_PROJECT_ID when set — under the
- *      dedicated-Project doctrine that Project's keys are exactly this
- *      deployment's namespace.
+ *   4. EVERY LISTING STAYS INSIDE SCALEWAY_DEFAULT_PROJECT_ID. A key can
+ *      see every project in its organization, and this sweep deletes on a
+ *      name prefix, so another project's `testapp-*` group, load balancer,
+ *      network or key would match. The provider's listings are scoped by
+ *      the provider (projectScope in src/lib/providers/scaleway.js); this
+ *      sweep's own walks use the same projectScope, the project on the query
+ *      and only its rows kept. Without the id nothing is swept and the sweep
+ *      reads incomplete. SSH keys are PROJECT-scoped IAM resources (global
+ *      API): under the dedicated-Project doctrine that Project's keys are
+ *      exactly this deployment's namespace.
  *
  * The per-AZ auto-created default security group must NEVER be deleted:
  * ownership is prefix-on-`name`, and the default group's name is
@@ -78,7 +88,6 @@ interface ScalewaySweepProvider {
   volumeAttachedServerIds(volume: object): Array<unknown>;
   volumeLabels(volume: object): Record<string, string>;
   deleteVolume(id: string): Promise<unknown>;
-  deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
   /** Flexible IPs (zone-stamped items; tags carry ownership). */
   listFlexibleIPsDetailed(): Promise<{
@@ -116,7 +125,10 @@ export interface ScalewaySweepDeps {
   token?: string;
   /** SCALEWAY_ACCESS_KEY — the S3 pair's access half (same IAM key as compute). */
   storageKey?: string;
-  /** Dedicated-Project id (SCALEWAY_DEFAULT_PROJECT_ID) — scopes the ssh-key walk. */
+  /**
+   * Dedicated-Project id; SCALEWAY_DEFAULT_PROJECT_ID (configuredProjectId)
+   * unless given. Scopes every walk this sweep makes.
+   */
   projectId?: string;
 }
 
@@ -173,17 +185,52 @@ export async function sweepOrphanedScalewayResources(
   deps: ScalewaySweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
   // The guard, the opening line, the counts and the incomplete flag
-  // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks.
+  // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks and VPCs.
   const sweep = createSweep(tag, 'Scaleway', projectName, { loadBalancers: 0 });
   const { markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.SCALEWAY_SECRET_KEY;
-  const projectId = deps.projectId ?? process.env.SCALEWAY_DEFAULT_PROJECT_ID;
   const provider = deps.provider ?? (token ? await defaultProvider(token) : null);
   if (!provider) {
     markIncomplete('Scaleway (no SCALEWAY_SECRET_KEY)');
     return sweep.result();
   }
+  // One project for every walk below (header note 4), the provider's own
+  // rule: no id, no sweep, never an unscoped listing. The provider's
+  // listings read SCALEWAY_DEFAULT_PROJECT_ID themselves, so a caller that
+  // passes `projectId` passes that same id (sweep-project.ts exports a value
+  // found only in tests/.env.e2e); without it they refuse, and their passes
+  // read incomplete.
+  const { configuredProjectId, projectScope } = (await import(
+    '../../../src/lib/providers/scaleway.js'
+  )) as {
+    configuredProjectId: () => string;
+    projectScope: (
+      field: 'project' | 'project_id',
+      projectId?: string,
+    ) => { query: string; keep: <R>(rows: R[]) => R[] };
+  };
+  let projectId: string;
+  try {
+    projectId = deps.projectId || configuredProjectId();
+  } catch {
+    markIncomplete(
+      'Scaleway (no SCALEWAY_DEFAULT_PROJECT_ID, so nothing was swept: the key may see other ' +
+        'projects, and a name prefix would match their resources too)',
+    );
+    return sweep.result();
+  }
+  // The project on the query and only its rows kept. walkProviderPages ends
+  // on the page the API sent, so a page of another project's rows still
+  // reads on to the next.
+  const inProject = async <T>(
+    field: 'project' | 'project_id',
+    walk: (query: string) => Promise<{ items: T[]; complete: boolean }>,
+  ) => {
+    const scope = projectScope(field, projectId);
+    const listed = await walk(scope.query);
+    return { ...listed, items: scope.keep(listed.items) };
+  };
   const fetchImpl =
     deps.fetchImpl ??
     (((url: RequestInfo | URL, init?: RequestInit) =>
@@ -261,8 +308,10 @@ export async function sweepOrphanedScalewayResources(
     thrown: (volume) => `Volume ${volume.id} delete failed`,
   });
 
-  // 3. Security groups — per-zone enumeration (zone-scoped resources);
-  // deletion routes through the provider's name-based method. The per-AZ
+  // 3. Security groups — per-zone enumeration (zone-scoped resources),
+  // each deleted by the id and zone listed here. Not by name: the
+  // provider's lookup refuses two groups of one name (findFirewallByName),
+  // and leaked twins are exactly what this sweep is for. The per-AZ
   // auto-created default group can never be prefix-matched (Scaleway names
   // it itself) and is explicitly guarded regardless.
   for (const zone of SWEEP_ZONES) {
@@ -271,17 +320,29 @@ export async function sweepOrphanedScalewayResources(
       cleanupFailed: `Security-group cleanup failed (${zone})`,
       count: 'firewalls',
       list: () =>
-        walkZonePages<{ id: string; name?: string; project_default?: boolean }>(
-          zone,
-          '/security_groups',
-          'security_groups',
+        inProject('project', (query) =>
+          walkZonePages<{ id: string; name?: string; project_default?: boolean }>(
+            zone,
+            `/security_groups?${query}`,
+            'security_groups',
+          ),
         ),
       // Never touch the default group.
       owned: (sg) => !sg.project_default && !!sg.name?.startsWith(projectName),
-      announce: (sg) => `Deleting orphaned security group ${sg.name} (${zone})`,
-      remove: async (sg) =>
-        (await provider.deleteFirewallByName(sg.name ?? '')).deleted ||
-        `Security group ${sg.name} delete failed`,
+      announce: (sg) => `Deleting orphaned security group ${sg.id} (${sg.name}) in ${zone}`,
+      remove: async (sg) => {
+        const res = await fetchImpl(
+          `${API_BASE}/instance/v1/zones/${zone}/security_groups/${sg.id}`,
+          { method: 'DELETE' },
+        );
+        // A 404 is a group already gone.
+        return (
+          res.ok ||
+          res.status === 404 ||
+          `Security group ${sg.id} (${sg.name}) delete failed (HTTP ${res.status})`
+        );
+      },
+      thrown: (sg) => `Security group ${sg.id} (${sg.name}) delete failed`,
     });
   }
 
@@ -291,11 +352,13 @@ export async function sweepOrphanedScalewayResources(
     cleanupFailed: 'SSH-key cleanup failed',
     count: 'sshKeys',
     list: () =>
-      walkProviderPages<{ id: string; name?: string }>(
-        'scaleway-page-size',
-        `${API_BASE}/iam/v1alpha1/ssh-keys${projectId ? `?project_id=${projectId}` : ''}`,
-        // A fetch error ends the pass, which names it.
-        { key: 'ssh_keys', perPage: 100, fetchImpl, onThrow: 'throw' },
+      inProject('project_id', (query) =>
+        walkProviderPages<{ id: string; name?: string }>(
+          'scaleway-page-size',
+          `${API_BASE}/iam/v1alpha1/ssh-keys?${query}`,
+          // A fetch error ends the pass, which names it.
+          { key: 'ssh_keys', perPage: 100, fetchImpl, onThrow: 'throw' },
+        ),
       ),
     owned: (sshKey) => !!sshKey.name?.startsWith(projectName),
     announce: (sshKey) => `Deleting orphaned ssh key ${sshKey.name}`,
@@ -327,9 +390,8 @@ export async function sweepOrphanedScalewayResources(
       (await provider.releaseFlexibleIP(ip.id, ip.zone)) || `Flexible IP ${ip.id} release failed`,
   });
 
-  // 6. Load balancers + Private Networks — never provisioned by the
-  // compose tier, enumerated so a future tier's leak can't hide behind a
-  // stub (same reasoning as the sibling sweeps).
+  // 6. Load balancers, Private Networks and VPCs. The compose tier makes
+  // none; the k8s tiers make a Private Network and its VPC per cluster.
   // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
   // method answers [] when the API call fails (its contract for destroy), so
   // an unreadable listing read as "no load balancers" and the class went
@@ -340,7 +402,10 @@ export async function sweepOrphanedScalewayResources(
       listing: `load-balancer list (${zone})`,
       cleanupFailed: `Load-balancer cleanup failed (${zone})`,
       count: 'loadBalancers',
-      list: () => walkPageSize<{ id: string; name?: string }>(`/lb/v1/zones/${zone}/lbs`, 'lbs'),
+      list: () =>
+        inProject('project_id', (query) =>
+          walkPageSize<{ id: string; name?: string }>(`/lb/v1/zones/${zone}/lbs?${query}`, 'lbs'),
+        ),
       owned: (lb) => !!lb.name?.startsWith(projectName),
       announce: (lb) => `Deleting orphaned load balancer ${lb.id} (${lb.name})`,
       remove: async (lb) => {
@@ -364,9 +429,11 @@ export async function sweepOrphanedScalewayResources(
       cleanupFailed: `Private-Network cleanup failed (${region})`,
       count: 'networks',
       list: () =>
-        walkPageSize<{ id: string; name?: string }>(
-          `/vpc/v2/regions/${region}/private-networks`,
-          'private_networks',
+        inProject('project_id', (query) =>
+          walkPageSize<{ id: string; name?: string }>(
+            `/vpc/v2/regions/${region}/private-networks?${query}`,
+            'private_networks',
+          ),
         ),
       owned: (net) => (net.name ?? '').startsWith(projectName),
       announce: (net) => `Orphaned Private Network ${net.id} (${net.name ?? ''}) — deleting`,
@@ -384,6 +451,35 @@ export async function sweepOrphanedScalewayResources(
         return `Private Network ${net.id} delete failed`;
       },
       thrown: (net) => `Private Network ${net.id} delete failed`,
+    });
+  }
+
+  // VPCs, after the Private Networks they hold (a VPC holding one cannot
+  // go): scaleway-k8s.js makes one per cluster, named like its Private
+  // Network, and they count as networks too. Deleted in the region they are
+  // listed in. A project's default VPC (`is_default`, named `default`) is
+  // never deleted, whatever it is named.
+  for (const region of SWEEP_S3_REGIONS) {
+    await sweepClass(sweep, {
+      listing: `VPC list (${region})`,
+      cleanupFailed: `VPC cleanup failed (${region})`,
+      count: 'networks',
+      list: () =>
+        inProject('project_id', (query) =>
+          walkPageSize<{ id: string; name?: string; is_default?: boolean }>(
+            `/vpc/v2/regions/${region}/vpcs?${query}`,
+            'vpcs',
+          ),
+        ),
+      owned: (vpc) => vpc.is_default !== true && (vpc.name ?? '').startsWith(projectName),
+      announce: (vpc) => `Deleting orphaned VPC ${vpc.id} (${vpc.name ?? ''}) in ${region}`,
+      remove: async (vpc) => {
+        const res = await fetchImpl(`${API_BASE}/vpc/v2/regions/${region}/vpcs/${vpc.id}`, {
+          method: 'DELETE',
+        });
+        return res.ok || `VPC ${vpc.id} delete failed (HTTP ${res.status})`;
+      },
+      thrown: (vpc) => `VPC ${vpc.id} delete failed`,
     });
   }
 
@@ -425,7 +521,8 @@ export async function sweepOrphanedScalewayResources(
     ['security-groups', 'firewalls'],
     ['flexible-ips', 'floatingIps'],
     ['load-balancers', 'loadBalancers'],
-    ['private-networks', 'networks'],
+    // `networks` counts the Private Networks and the VPCs both.
+    ['private-networks-and-vpcs', 'networks'],
     ['buckets', 's3Buckets'],
     ['ssh-keys', 'sshKeys'],
   ]);

@@ -41,6 +41,16 @@ const listed = (names: string[], conjunction: 'and' | 'or') =>
     ? names.join('')
     : `${names.slice(0, -1).join(', ')} ${conjunction} ${names[names.length - 1]}`;
 
+/**
+ * Scaleway's credential is a triple: the secret key is the token, and the
+ * access key and project id ride beside it. Stubbed for every provider, which
+ * the others never read.
+ */
+function stubCompanionEnv() {
+  vi.stubEnv('SCALEWAY_ACCESS_KEY', 'SCWXXXXXXXXXXXXXXXXX');
+  vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '00000000-0000-4000-8000-000000000000');
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -60,6 +70,7 @@ describe("what each provider's deploy reads its token from", () => {
     '%s: the deploy takes TOKEN_ENV, whatever the Pulumi variable holds',
     async (_id, Provider) => {
       const token = 'vc-sentinel-token-env-0123456789abcdef';
+      stubCompanionEnv();
       vi.stubEnv(Provider.TOKEN_ENV, token);
       vi.stubEnv(Provider.CLI_TOKEN_ENV, 'vc-sentinel-token-pulumi-var');
       // The provider's check of a token found in the environment: it passes.
@@ -72,6 +83,7 @@ describe("what each provider's deploy reads its token from", () => {
   it.each(K8S_PROVIDERS)(
     '%s: the deploy sets the Pulumi variable from that token, so exporting it changes nothing',
     (id, Provider) => {
+      stubCompanionEnv();
       vi.stubEnv(Provider.CLI_TOKEN_ENV, 'vc-sentinel-token-exported');
       const env = buildEnv({ provider: id, providerToken: 'vc-sentinel-token-deploy' });
       expect(env[Provider.CLI_TOKEN_ENV]).toBe('vc-sentinel-token-deploy');

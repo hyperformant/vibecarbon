@@ -56,6 +56,7 @@ describe('every provider boots Ubuntu 26.04', () => {
   it('the k8s nodes boot the same release as compose', () => {
     expect(HetznerProvider.K8S_IMAGE).toBe(HetznerProvider.COMPOSE_IMAGE);
     expect(DigitalOceanProvider.K8S_IMAGE).toBe(DigitalOceanProvider.COMPOSE_IMAGE);
+    expect(ScalewayProvider.K8S_IMAGE).toBe(ScalewayProvider.COMPOSE_IMAGE);
     for (const line of program('hetzner-k8s.js').split('\n')) {
       if (/^\s*image: '/.test(line)) expect(line).toContain("image: 'ubuntu-26.04'");
     }

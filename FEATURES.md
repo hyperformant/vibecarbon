@@ -391,14 +391,14 @@
 - DigitalOcean fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner
   - Interactive region selection, guided API token + Spaces key setup
   - DigitalOcean Spaces object storage for backups
-  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Scaleway: `Scaleway does not support the 'k8s' deploy tier. Supported: compose. (k8s: Hetzner Cloud, DigitalOcean, Linode, Vultr only)`
+  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. for a compose-only provider: `Acme Cloud does not support the 'k8s' deploy tier. Supported: compose. (k8s: Hetzner Cloud, DigitalOcean, Linode, Vultr, Scaleway only)`
 - Linode fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner; the k8s modes run in every Linode region except us-east and us-southeast, which have no VPCs
   - Interactive region selection, guided API token + Object Storage key setup
   - Linode Object Storage for backups
 - Vultr fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner; the k8s modes run in every Vultr region except sjc (Silicon Valley), which sells no NVMe block storage
   - Interactive region selection, guided API token + Object Storage key setup
   - Vultr Object Storage for backups
-- Scaleway supported for compose, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s and k8s-ha are not supported on Scaleway
+- Scaleway fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner
   - Interactive region selection (Paris `fr-par-1`/`fr-par-2`, Amsterdam `nl-ams-1`/`nl-ams-2`)
   - Guided API secret key setup (`SCALEWAY_SECRET_KEY`)
   - Scaleway Object Storage for backups

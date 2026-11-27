@@ -30,6 +30,7 @@ import { describe, expect, it } from 'vitest';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const K3S_DIR = join(REPO_ROOT, 'carbon/cloud-init/k3s');
@@ -41,6 +42,8 @@ const K3S_SENTINEL = 'vc-sentinel-k3s-token-7a2c';
 let counter = 0;
 /** Every resource the current program run registered, with its inputs. */
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
@@ -48,9 +51,11 @@ pulumi.runtime.setMocks(
       registered.push({ type: args.type, name: args.name, inputs: args.inputs });
       // Every address field any of the programs reads, on every resource.
       const ip = `203.0.113.${counter % 250}`;
+      const id = String(8_000_000 + counter);
       return {
-        id: String(8_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -89,13 +94,18 @@ function sealed(value: unknown): boolean {
 
 /**
  * A server's user data as it boots with it, read through its secret wrapper:
- * `userData` (Hetzner, DigitalOcean) or Linode's base64
+ * `userData` (Hetzner, DigitalOcean), Scaleway's key-value `userData`, whose
+ * `cloud-init` key holds the boot script, or Linode's base64
  * `metadatas[].userData`, decoded. `sealed` is whether the program handed it
  * over as a secret. null for a resource that carries none.
  */
 function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: boolean } | null {
   const userData = unsealMockInput(inputs.userData);
   if (typeof userData === 'string') return { text: userData, sealed: sealed(inputs.userData) };
+  const cloudInit = unsealMockInput(
+    (userData as Record<string, unknown> | undefined)?.['cloud-init'],
+  );
+  if (typeof cloudInit === 'string') return { text: cloudInit, sealed: sealed(inputs.userData) };
   const metadatas = unsealMockInput<{ userData?: string }[] | undefined>(inputs.metadatas);
   const encoded = metadatas?.map((m) => m.userData).filter((u) => typeof u === 'string');
   if (!encoded?.length) return null;
@@ -106,10 +116,12 @@ function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: bo
 }
 
 /**
- * Whose boot scripts are walked and whose programs are run: the k8s providers
- * and those built ahead of their tier.
+ * Whose boot scripts are walked: the k8s providers and those whose boot
+ * scripts are built ahead of their tier.
  */
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const bootProviders = k8sCensusProviders('boot') as unknown as [string, K8sProvider][];
+/** Whose programs are run: the k8s providers and those whose program is built ahead. */
+const programProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 
 describe('the k3s boot scripts take no credential but the k3s join token', () => {
   const scripts = readdirSync(K3S_DIR)
@@ -120,8 +132,8 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
     // From the providers: what each renders is one of these templates, so
     // the walk below covers every node of every k8s provider.
     const boot = await k8sBootScripts();
-    expect(boot).toHaveLength(k8sProviders.length * ROLES.length);
-    expect(k8sProviders.length).toBeGreaterThan(0);
+    expect(boot).toHaveLength(bootProviders.length * ROLES.length);
+    expect(bootProviders.length).toBeGreaterThan(0);
     const names = scripts.map(([f]) => f);
     for (const { provider, role, files } of boot) {
       expect(files, `${provider}'s ${role}`).toHaveLength(1);
@@ -145,10 +157,10 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
 
 describe('the k8s programs record no provider API token', () => {
   it('there are k8s providers to check', () => {
-    expect(k8sProviders.length).toBeGreaterThan(0);
+    expect(programProviders.length).toBeGreaterThan(0);
   });
 
-  it.each(k8sProviders)('%s', async (_id, Provider) => {
+  it.each(programProviders)('%s', async (_id, Provider) => {
     registered.length = 0;
     const node = Provider.DEFAULT_K8S_NODE_TYPE;
     const program = await Provider.getK8sProgram({

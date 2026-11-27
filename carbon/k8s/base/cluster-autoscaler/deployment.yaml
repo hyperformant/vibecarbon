@@ -97,6 +97,15 @@ spec:
                 secretKeyRef:
                   name: carbon-autoscaler-config
                   key: token
+            # The operator variables a provider reads besides its token
+            # (k8sAutoscalerEnv). Optional: only that provider's deploy
+            # writes the key, and every other pod starts without it.
+            - name: SCALEWAY_DEFAULT_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: carbon-autoscaler-config
+                  key: SCALEWAY_DEFAULT_PROJECT_ID
+                  optional: true
             - name: CARBON_AUTOSCALER_CONFIG
               value: /config-ca/config.json
           securityContext:

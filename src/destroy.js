@@ -934,15 +934,15 @@ const idKey = (id) => String(id);
  *     is by definition not ours. Defer + report, never delete.
  *   - a `foreignRegions` entry => some server we do not own is still running
  *     in that region, so a live cluster may own this volume. Defer + report.
- *   - a provider with `ORPHAN_VOLUME_REGION_GUESS` false (Vultr, whose
- *     volumes carry no tags) => a `pvc-in-cluster-region` match is the only
- *     signal left, and it proves nothing about the environment. Defer +
- *     report.
+ *   - a provider with `ORPHAN_VOLUME_REGION_GUESS` false (Vultr and
+ *     Scaleway, whose CSI volumes carry no tags) => a
+ *     `pvc-in-cluster-region` match is the only signal left, and it proves
+ *     nothing about the environment. Defer + report.
  * Deferrals are loud and land in the destroy summary with the exact volume
  * names, and the operator deletes them in the provider's console once no
  * live cluster owns them (the hint says so). No later vibecarbon command
- * collects one: nothing new proves whose it is by then, and on Vultr, whose
- * volumes carry no tags, nothing ever can.
+ * collects one: nothing new proves whose it is by then, and on Vultr and
+ * Scaleway, whose CSI volumes carry no tags, nothing ever can.
  *
  * ATTACHMENT ORDERING (2026-07-30 — six detached, unlabeled `pvc-*` volumes
  * survived a fully green Hetzner k8s run's final destroy). A volume that still
@@ -1086,7 +1086,7 @@ async function cleanupOrphanedVolumes(
     ) {
       return {
         code: 'no-owner-signal',
-        why: `${provider.constructor.NAME} volumes carry no tags, so only a captured id proves one is this environment's`,
+        why: `${provider.constructor.NAME} CSI volumes carry no tags, so only a captured id proves one is this environment's`,
       };
     }
     return null;
@@ -3934,6 +3934,8 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  * that stack. Deriving these from the USER-FACING environment instead (the
  * pre-d4 shape) named a cluster that never existed on k8s-ha — both real
  * per-stack firewalls/VPCs and BOTH reserved IPs leaked every HA destroy.
+ * `clusterName` itself goes too: an autoscaled worker carries it as its
+ * `cluster` label (K8S_AUTOSCALED_WORKER_IPS).
  *
  * - `reservedIps` are recorded floating/reserved IPs only (`floatingIp`,
  *   never `ingressIp`), so the backstop never releases a master's own
@@ -3954,7 +3956,7 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  *   accepts each), and it is released once, by the first.
  *
  * @param {{plan: {tier: string, stackEnvs: string[]}, envConfig: object, projectConfig: {projectName: string}}} args
- * @returns {Array<{stackEnv: string, firewallName: string, sshKeyName: string|null, reservedIps: Array<{address: string, stacks: string[]}>, networkName: string}>}
+ * @returns {Array<{stackEnv: string, clusterName: string, firewallName: string, sshKeyName: string|null, reservedIps: Array<{address: string, stacks: string[]}>, networkName: string}>}
  */
 export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
   const isHA = isHATier(plan.tier);
@@ -3987,6 +3989,7 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
     const clusterName = `${projectConfig.projectName}-${stackEnv}`;
     return {
       stackEnv,
+      clusterName,
       firewallName: `${clusterName}-firewall`,
       sshKeyName: !isHA && envConfig.region ? `${clusterName}-${envConfig.region}-key` : null,
       reservedIps: [...stacksOf]
@@ -4003,7 +4006,8 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry the k8s program's labels (`reservedIpLabelMatch`:
  * Linode by its tags, Vultr by its one label and the tags of the instance
- * holding it) is asked, and only an IP carrying this project's labels and
+ * holding it, Scaleway by its tags and those of the server holding it) is
+ * asked, and only an IP carrying this project's labels and
  * those of one of `stackEnvs` counts as ours. One of ours that is still
  * assigned (to a Linode or a Vultr instance, or any entity) is `held`: this
  * runs after the teardown, so whatever holds it is something the teardown
@@ -4205,15 +4209,20 @@ async function releaseRecordedReservedIp({
  * pending create) and out of .vibecarbon.json, and it bills until released.
  *
  * Scoped to exactly this project and this stack, never the project alone:
- * another environment's IP, or another project's, is never touched.
+ * another environment's IP, or another project's, is never touched. `labels`
+ * replaces the two for an IP labelled otherwise: an autoscaled worker's
+ * carries its cluster and its stack's environment, and no project
+ * (sweepK8sBackstopTargets).
  * `except` names addresses the record already names, which the address path
  * (releaseRecordedReservedIp) handles. One found here that is not released is
  * kept on record like any other of ours, so the next destroy retries it.
  * Exported for unit testing.
  *
- * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
+ * @param {{provider: object, projectName: string, stackEnv: string, labels?: Object<string,string>, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
  *   `stackEnv`: the stack's environment label (k8s-ha: `<env>-primary` or
  *   `<env>-standby`; compose and single k8s: the environment).
+ *   `labels`: what the IP carries, `{ project, environment: stackEnv }`
+ *   unless given.
  *   `environment`: as the operator names it, and `args`, this destroy's
  *   flags, for the retry line (retryDestroyCommand).
  * @returns {Promise<boolean>} whether it released any
@@ -4222,6 +4231,7 @@ export async function sweepTaggedReservedIps({
   provider,
   projectName,
   stackEnv,
+  labels = { project: projectName, environment: stackEnv },
   except = [],
   results,
   s,
@@ -4230,13 +4240,12 @@ export async function sweepTaggedReservedIps({
 }) {
   const Provider = provider.constructor;
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
-  const scope = `project ${projectName}, environment ${stackEnv}`;
+  const scope = Object.entries(labels)
+    .map(([key, value]) => `${key} ${value}`)
+    .join(', ');
   s.start(`Looking for ${Provider.NAME} ${noun}s labelled ${scope}`);
   try {
-    const swept = await provider.deleteReservedIpsByLabels(
-      { project: projectName, environment: stackEnv },
-      { except },
-    );
+    const swept = await provider.deleteReservedIpsByLabels(labels, { except });
     s.stop(
       swept.deleted.length > 0
         ? `Released by label (backstop): ${swept.deleted.join(', ')}`
@@ -4293,13 +4302,20 @@ export async function sweepTaggedReservedIps({
  * that died before the cluster was ready (no kubeconfig) is swept just the
  * same.
  *
- * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr), whose
+ * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr, Scaleway), whose
  *   `pulumi destroy` has been seen to skip them: the firewall and SSH key by
  *   name, each recorded reserved IP by address (releaseRecordedReservedIp),
  *   then the VPC last.
  * - On every provider whose reserved IPs carry the program's labels
- *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr): the IPs labelled for the
+ *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr, Scaleway): the IPs labelled for the
  *   stack that no record names (sweepTaggedReservedIps), before the VPC.
+ * - On a provider with `K8S_AUTOSCALED_WORKER_IPS` (Scaleway), whose
+ *   autoscaled workers each get an IP labelled with the worker's labels (its
+ *   cluster and environment, no project): those too, by the stack's cluster
+ *   name and environment. deleteServer releases each with its worker; this
+ *   finds one whose release failed. The cluster name embeds the project, and
+ *   the environment tells apart two stacks whose names join to the same
+ *   cluster name. One still attached follows the same holder rule.
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
@@ -4341,19 +4357,21 @@ export async function sweepK8sBackstopTargets({
       for (const stackEnv of removedOf) swept.add(stackEnv);
     }
     if (byLabel) {
-      const released = await sweepTaggedReservedIps({
-        provider,
-        projectName,
-        stackEnv: target.stackEnv,
-        except: recorded,
-        results,
-        s,
-        environment,
-        args,
-      });
-      if (released) swept.add(target.stackEnv);
+      const byStack = { provider, projectName, stackEnv: target.stackEnv, except: recorded };
+      const rest = { results, s, environment, args };
+      if (await sweepTaggedReservedIps({ ...byStack, ...rest })) swept.add(target.stackEnv);
+      if (
+        Provider.K8S_AUTOSCALED_WORKER_IPS === true &&
+        (await sweepTaggedReservedIps({
+          ...byStack,
+          labels: { cluster: target.clusterName, environment: target.stackEnv },
+          ...rest,
+        }))
+      ) {
+        swept.add(target.stackEnv);
+      }
     }
-    if (byName && (await deleteBackstopNetwork({ provider, target, results, s }))) {
+    if (byName && (await deleteBackstopNetwork({ provider, target, results, s, projectName }))) {
       swept.add(target.stackEnv);
     }
   }
@@ -4464,15 +4482,31 @@ async function sweepByName({ provider, target, results, s, projectName, environm
  * By this point Pulumi + every sweep above should have cleared every member;
  * a refusal here is therefore a genuine ordering bug elsewhere, not a
  * not-found, so it is surfaced loudly rather than swallowed.
- * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}}} args
+ *
+ * The stack's project and environment go with the name: a provider whose
+ * networks carry them as tags deletes only one carrying both, and answers
+ * `foreign` for one by that name it left alone (Scaleway), which is
+ * reported and does not fail the exit code.
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string}} args
  * @returns {Promise<boolean>} whether this call deleted the VPC
  */
-async function deleteBackstopNetwork({ provider, target, results, s }) {
+async function deleteBackstopNetwork({ provider, target, results, s, projectName }) {
   const Provider = provider.constructor;
   const networkName = target.networkName;
   s.start(`Verifying ${Provider.NAME} VPC is gone: ${networkName}`);
   try {
-    const result = await provider.deleteNetworkByName(networkName);
+    const result = await provider.deleteNetworkByName(networkName, {
+      project: projectName,
+      environment: target.stackEnv,
+    });
+    if (result.foreign) {
+      results.leaks.foreign({
+        resourceClass: 'network',
+        resource: networkName,
+        reason: result.foreign,
+        hint: `If it is this cluster's after all, delete it in the ${Provider.NAME} console.`,
+      });
+    }
     if (result.deleted) {
       s.stop('VPC deleted (backstop)');
       return true;
@@ -4486,7 +4520,7 @@ async function deleteBackstopNetwork({ provider, target, results, s }) {
         hint: `Check the ${Provider.NAME} console for leftover servers, load balancers or managed databases in this VPC, delete them, then delete the VPC manually.`,
       });
     } else {
-      s.stop('VPC already gone (Pulumi)');
+      s.stop(result.foreign ? "VPC left alone: not this stack's" : 'VPC already gone (Pulumi)');
     }
   } catch (error) {
     s.stop(`VPC backstop check failed: ${error.message}`);

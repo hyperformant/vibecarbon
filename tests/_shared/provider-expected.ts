@@ -137,9 +137,9 @@ export const EXPECTED: Record<
     // multi-credential seam — not via a second token static.
     tokenEnv: 'SCALEWAY_SECRET_KEY',
     cliTokenEnv: 'SCW_SECRET_KEY',
-    // Scaleway's CCM builds `scaleway://instance/<zone>/<uuid>` — two path
-    // segments between prefix and UUID, unlike hcloud://<id> (k8s-tier
-    // caveat recorded in the audit; inert while compose-only).
+    // No Scaleway CCM runs: k3s takes the provider id `scaleway://<server
+    // uuid>` from the boot script's --kubelet-arg, the prefix plus the
+    // server id, as the shared parsers read it.
     providerIdPrefix: 'scaleway://',
     // A ZONE (3-part), not a region — Scaleway's Instance API is
     // zone-scoped and ScalewayProvider.REGIONS is keyed on zones.
@@ -151,19 +151,20 @@ export const EXPECTED: Record<
     s3RegionEnv: 'SCALEWAY_STORAGE_REGION',
     defaultComposeType: 'BASIC3-X2C-4G',
     defaultK8sNodeType: 'BASIC3-X2C-4G',
-    // Compose-only (2026-08 expansion PR 3): empty asset identity except
-    // the storage-class literal (scaleway-csi's default class,
-    // `sbs-default`), which the literal-guard census requires distinct +
-    // resident in scaleway.js.
+    // scaleway-csi v0.3.6, rendered from its Helm chart: a Deployment
+    // controller and a DaemonSet node plugin, each labelled with a bare
+    // `app=` key. No CCM: k3s's embedded cloud controller runs instead. The
+    // StorageClass is our own, which the master's boot script writes.
     k8sAssets: {
-      csiNodeDaemonSet: '',
-      csiControllerSelector: '',
+      csiNodeDaemonSet: 'daemonset/scaleway-csi-node',
+      csiControllerSelector: 'app=scaleway-csi-controller',
       ccmDeployment: '',
       ccmSelector: '',
       networkEnvVar: '',
     },
-    k8sStorageClass: 'sbs-default',
-    k8sImage: '',
+    k8sStorageClass: 'scaleway-block-vibecarbon',
+    // The compose image (scaleway-k8s.js reads K8S_IMAGE).
+    k8sImage: 'ubuntu_resolute',
   },
   digitalocean: {
     name: 'DigitalOcean',

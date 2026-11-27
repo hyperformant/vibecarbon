@@ -543,7 +543,7 @@ Kubernetes deployments additionally include:
 | DigitalOcean | `compose`, `compose-ha`, `k8s`, `k8s-ha` | [deploy-digitalocean.md](./deploy-digitalocean.md) |
 | Linode | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
 | Vultr | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
-| Scaleway | `compose`, `compose-ha` | No written guide yet |
+| Scaleway | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
 
 You do not need a written guide to deploy on any of the five. `vibecarbon configure` (Providers) and `vibecarbon deploy` both walk you through creating the API token and the object storage keys for the provider you pick, and the `.env.local.example` in your project lists every credential and its format.
 

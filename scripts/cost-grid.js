@@ -151,6 +151,17 @@ export const BILLING_EXTRAS = {
       verified: false,
       note: '€3.45/mo as SBS 5K (the price used); €3.80/mo if it bills as Low Latency 5K',
     },
+    // The db PVC, 10Gi, one per cluster. 10Gi is 10.74 GB.
+    volume: {
+      perGbHour: 0.000118,
+      gb: 11,
+      hoursPerMonth: 730,
+      source: 'https://www.scaleway.com/en/pricing/storage/',
+      // The SBS 5K rate the root volume reads on the same page, 2026-10-22.
+      checked: '2026-10-22',
+      verified: false,
+      note: 'the 10Gi db volume is 10.74 GB, billed as 11 if the API rounds up to whole GB; SBS 5K price, as the root volume',
+    },
     objectStorage: {
       text: 'usage-based (cents at this size)',
       source: 'https://www.scaleway.com/en/pricing/storage/',
@@ -236,7 +247,11 @@ export function extrasFor(Provider, live = {}) {
   }
   if (id === 'scaleway') {
     const root = table.rootVolume;
-    return { perCluster: () => 0, perServer: root.perGbHour * root.gb * root.hoursPerMonth };
+    const volume = table.volume;
+    return {
+      perCluster: () => volume.perGbHour * volume.gb * volume.hoursPerMonth,
+      perServer: root.perGbHour * root.gb * root.hoursPerMonth,
+    };
   }
   return { perCluster: () => 0, perServer: 0 };
 }

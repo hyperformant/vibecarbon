@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addSeeds,
   budgetFromSamples,
@@ -13,10 +13,27 @@ import {
   renderReport,
   seededRow,
 } from '../../../scripts/calibrate-deploy-budgets.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { checkDeployBudget } from '../../e2e/checks/deploy-budget.js';
 
 const s = (ownedS: number, tlsS = 5) => ({ ownedS, tlsS });
+
+// Every registered provider runs all four modes now, so the tests of what the
+// calibration skips for a mode a provider does not run register a stand-in,
+// Acme Cloud, which runs the two compose tiers only.
+// biome-ignore lint/complexity/noStaticOnlyClass: stands in for a provider class shape (statics only)
+class AcmeProvider {
+  static NAME = 'Acme Cloud';
+  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  static SERVER_RESOURCE_TYPE = 'acme:index/server:Server';
+}
+function registerAcme() {
+  (PROVIDERS as Record<string, unknown>).acme = AcmeProvider;
+  return () => {
+    delete (PROVIDERS as Record<string, unknown>).acme;
+  };
+}
 
 describe('the budget rule', () => {
   it('ceil5 rounds up to a multiple of 5', () => {
@@ -60,6 +77,12 @@ describe('the budget rule', () => {
 });
 
 describe('reading the results db', () => {
+  let unregisterAcme: () => void;
+  beforeAll(() => {
+    unregisterAcme = registerAcme();
+  });
+  afterAll(() => unregisterAcme());
+
   const dir = createTempDir('calibrate-');
   const dbPath = path.join(dir, 'e2e.db');
   const db = new Database(dbPath);
@@ -77,6 +100,7 @@ describe('reading the results db', () => {
     linode: 'Instance',
     vultr: 'Instance',
     scaleway: 'Server',
+    acme: 'Server',
   };
   const deploy = (o: {
     run: string;
@@ -141,7 +165,7 @@ describe('reading the results db', () => {
     ...base,
     run: 'r0',
     started: '2026-11-05T02:00:00Z',
-    provider: 'scaleway',
+    provider: 'acme',
     mode: 'k8s',
     totalS: 99,
   }); // a mode the provider does not run
@@ -181,7 +205,7 @@ describe('reading the results db', () => {
   it('lists only combinations the provider supports, with or without data', () => {
     const built = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
     const listed = built.noData.map((d) => `${d.provider}/${d.mode}`);
-    for (const unsupported of ['scaleway/k8s', 'scaleway/k8s-ha']) {
+    for (const unsupported of ['acme/k8s', 'acme/k8s-ha']) {
       expect(listed).not.toContain(unsupported);
     }
     // Linode runs all four modes, and no provider has a k8s row here, so
@@ -269,7 +293,7 @@ describe('reading the results db', () => {
 
   it('ignores a sample of an unsupported mode', () => {
     const { rows } = buildTable(readSamples(dbPath, '2026-11-05T00:00:00Z'), 'x');
-    expect(rows.some((r) => r.provider === 'scaleway' && r.mode === 'k8s')).toBe(false);
+    expect(rows.some((r) => r.provider === 'acme' && r.mode === 'k8s')).toBe(false);
   });
 
   it('pools several dbs and counts a step that is in two of them once', async () => {
@@ -557,16 +581,21 @@ describe('carrying over the rows the stock samples do not cover', () => {
     const prev = {
       since: OLD_SINCE,
       budgets: {
-        scaleway: { k8s: { BASIC3: row(300, 4) } },
+        acme: { k8s: { any: row(300, 4) } },
         hetzner: { compose: { zz9: row(300, 4) } },
         nope: { compose: { any: row(300, 4) } },
       },
     };
-    const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])], prev);
-    expect(carried).toEqual([]);
-    expect(table.budgets.scaleway?.k8s).toBeUndefined();
-    expect(table.budgets.hetzner.compose.zz9).toBeUndefined();
-    expect(table.budgets.nope).toBeUndefined();
+    const unregister = registerAcme();
+    try {
+      const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])], prev);
+      expect(carried).toEqual([]);
+      expect(table.budgets.acme?.k8s).toBeUndefined();
+      expect(table.budgets.hetzner.compose.zz9).toBeUndefined();
+      expect(table.budgets.nope).toBeUndefined();
+    } finally {
+      unregister();
+    }
   });
 
   it('carries nothing when there is no table to overwrite', () => {

@@ -43,7 +43,7 @@ const PACKAGE_JSON_PATH = join(REPO_ROOT, 'package.json');
 describe('carbon-autoscaler image ref', () => {
   it('is the pre-published amd64 tag (no project/sha/timestamp)', () => {
     expect(CARBON_AUTOSCALER_IMAGE).toBe('ghcr.io/hyperformant/carbon-autoscaler');
-    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.6');
+    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.7');
     expect(carbonAutoscalerImageRef()).toBe(`${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`);
   });
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { assertRegionSupportedForTier, regionsForTier } from '../../../src/lib/providers/index.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 
 afterEach(() => {
@@ -74,6 +75,18 @@ describe('Vultr k8s region rule', () => {
     for (const tier of ['compose', 'compose-ha']) {
       expect(Object.keys(regionsForTier(VultrProvider, tier, VultrProvider.REGIONS))).toContain(
         'sjc',
+      );
+    }
+  });
+});
+
+describe('Scaleway k8s region rule', () => {
+  it('the k8s region lists hold all four zones, the same as compose', () => {
+    const all = Object.keys(ScalewayProvider.REGIONS);
+    expect(all).toEqual(['fr-par-1', 'fr-par-2', 'nl-ams-1', 'nl-ams-2']);
+    for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha']) {
+      expect(Object.keys(regionsForTier(ScalewayProvider, tier, ScalewayProvider.REGIONS))).toEqual(
+        all,
       );
     }
   });

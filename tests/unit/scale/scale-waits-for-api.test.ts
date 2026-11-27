@@ -91,7 +91,10 @@ const ctx = {
   environment: 'prod',
   projectConfig: { projectName: 'proj' },
   apiToken: 'tok',
-  Provider: { K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' } },
+  Provider: {
+    K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' },
+    k8sAutoscalerEnv: () => ({}),
+  },
   infraChanges: ['workerType'],
   changes: ['workerType'],
   newValues: { workerType: 'cx33' },

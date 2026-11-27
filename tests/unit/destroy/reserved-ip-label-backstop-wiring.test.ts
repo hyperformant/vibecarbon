@@ -68,6 +68,7 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 
 /**
@@ -141,6 +142,40 @@ describe('k8s: every stack is asked by its own labels', () => {
     expect(labelCalls).toEqual([
       { project: 'proj', environment: 'prod-primary' },
       { project: 'proj', environment: 'prod-standby' },
+    ]);
+  });
+
+  // Scaleway's k8s program tags every node's flexible IP with the stack's
+  // project and environment, so its k8s destroy asks by them, beside the
+  // name sweeps its K8S_DESTROY_BACKSTOP runs. Its autoscaled workers' IPs
+  // carry the worker's labels instead, the cluster and the environment and
+  // no project (K8S_AUTOSCALED_WORKER_IPS), so each stack is asked by those
+  // too.
+  it('Scaleway: with the name sweeps and the method, each stack asked by its own labels, then by its cluster', async () => {
+    expect(ScalewayProvider.K8S_DESTROY_BACKSTOP).toBe(true);
+    expect(ScalewayProvider.K8S_AUTOSCALED_WORKER_IPS).toBe(true);
+    expect(typeof ScalewayProvider.prototype.deleteReservedIpsByLabels).toBe('function');
+    holder.Provider = fakeProvider(
+      {
+        K8S_DESTROY_BACKSTOP: ScalewayProvider.K8S_DESTROY_BACKSTOP,
+        K8S_AUTOSCALED_WORKER_IPS: ScalewayProvider.K8S_AUTOSCALED_WORKER_IPS,
+        COMPOSE_FLOATING_IP: ScalewayProvider.COMPOSE_FLOATING_IP,
+      },
+      true,
+    );
+    await run('destroyK8sInfra', makeCtx('k8s', ['prod']));
+    expect(labelCalls).toEqual([
+      { project: 'proj', environment: 'prod' },
+      { cluster: 'proj-prod', environment: 'prod' },
+    ]);
+
+    labelCalls.length = 0;
+    await run('destroyK8sInfra', makeCtx('k8s-ha', ['prod-primary', 'prod-standby']));
+    expect(labelCalls).toEqual([
+      { project: 'proj', environment: 'prod-primary' },
+      { cluster: 'proj-prod-primary', environment: 'prod-primary' },
+      { project: 'proj', environment: 'prod-standby' },
+      { cluster: 'proj-prod-standby', environment: 'prod-standby' },
     ]);
   });
 

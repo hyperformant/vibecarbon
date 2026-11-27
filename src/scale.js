@@ -2793,9 +2793,13 @@ async function waitForApiServer(kubeconfigPath, label) {
  * master, and the reads below would otherwise fail while it is down. A failure
  * after that is a warning, not an abort: the servers are already resized and
  * the scale still has to record them. The warning names the deploy that writes
- * the settings again (the k3s-apply gate keys on them).
+ * the settings again (the k3s-apply gate keys on them). `caEnv` is the
+ * provider's `k8sAutoscalerEnv()`, read once before the scale changed
+ * anything (scaleApplyK8sChanges): the Secret is written with those keys, as
+ * deploy writes it, since a client-side apply without one would delete it.
  */
 async function repatchClusterAutoscaler({
+  caEnv,
   clusterEnv,
   label,
   newMin,
@@ -2853,7 +2857,11 @@ async function repatchClusterAutoscaler({
     const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
     // The Secret applyK3sManifests writes, piped via stdin so neither the
     // token nor the JSON reaches argv.
-    const caSecretYaml = carbonAutoscalerSecretYaml({ token, configJson: mutatedConfigJson });
+    const caSecretYaml = carbonAutoscalerSecretYaml({
+      token,
+      configJson: mutatedConfigJson,
+      env: caEnv,
+    });
     runCommand(kubectlArgv(kubeconfigPath, ['apply', '-f', '-']), {
       silent: true,
       input: caSecretYaml,
@@ -2919,6 +2927,19 @@ async function scaleApplyK8sChanges(ctx) {
     infraChanges,
     Provider,
   } = ctx;
+
+  // The keys the autoscaler's Secret carries for this provider, read before
+  // anything changes. One it cannot read (Scaleway without
+  // SCALEWAY_DEFAULT_PROJECT_ID) refuses the scale here, as it refuses a
+  // deploy: found at the re-patch instead, the servers would already be
+  // resized and the scale would record bounds the autoscaler never got.
+  let caEnv;
+  try {
+    caEnv = Provider.k8sAutoscalerEnv();
+  } catch (err) {
+    p.log.error(err.message);
+    process.exit(1);
+  }
 
   /** @type {Array<{clusterEnv: string, label: string, newMin: number, newMax: number, newType: string}>} */
   const caRepatches = [];
@@ -3083,6 +3104,7 @@ async function scaleApplyK8sChanges(ctx) {
   for (const repatch of caRepatches) {
     await repatchClusterAutoscaler({
       ...repatch,
+      caEnv,
       environment,
       workerTypeChanged: changes.includes('workerType'),
     });

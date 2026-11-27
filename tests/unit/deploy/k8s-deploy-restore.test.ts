@@ -489,6 +489,9 @@ function args(restore: typeof RESTORE | null) {
       static PROVIDER_ID_PREFIX = 'hcloud://';
       static K8S_IMAGE = 'ubuntu-26.04';
       static K8S_STORAGE_CLASS = 'hcloud-volumes';
+      static k8sAutoscalerEnv() {
+        return {};
+      }
       static async getK8sWorkerUserData() {
         return '#cloud-config\n';
       }

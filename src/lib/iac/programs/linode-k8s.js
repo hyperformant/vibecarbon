@@ -41,7 +41,12 @@ import {
 } from '../../providers/linode.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
-import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
+import {
+  requireK8sNodeNamesFit,
+  requireOperatorCidrs,
+  sshKeyIdOutput,
+  stackIdentity,
+} from '../program-inputs.js';
 
 const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
@@ -57,9 +62,6 @@ const WORKER_IP_BASE = 10;
  * no tighter limit for VPCs and checks 64 for SSH keys.
  */
 const LINODE_LABEL_MAX = 64;
-
-/** Kubernetes node names are DNS labels here (the hostname): 63 at most. */
-const K8S_NODE_NAME_MAX = 63;
 
 /**
  * Refuse, before any resource exists, a label Linode would reject. These
@@ -138,16 +140,8 @@ export function buildLinodeK8sProgram(config) {
     ...(config.existingSshKeyId ? [] : [['SSH key', sshKeyLabel]]),
   ]);
   // Every node's Linode label becomes its hostname and k8s node name (see
-  // the boot scripts), which Kubernetes caps at 63. The longest is an
-  // autoscaler worker: `<cluster>-ca-` plus 8 random characters.
-  const longestNodeName = `${clusterName}-ca-xxxxxxxx`;
-  if (longestNodeName.length > K8S_NODE_NAME_MAX) {
-    throw new Error(
-      `Kubernetes on Linode cannot give this cluster's nodes a node name: the longest, ` +
-        `"${clusterName}-ca-<8 characters>", is ${longestNodeName.length} characters and ` +
-        `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
-    );
-  }
+  // the boot scripts).
+  requireK8sNodeNamesFit(clusterName, LinodeProvider.NAME);
   // Always the CLI's: the stack's recorded token or the one derived from the
   // state passphrase (lib/iac/k3s-token.js). Never made here.
   const k3sToken = requireK3sToken(config, 'buildLinodeK8sProgram');

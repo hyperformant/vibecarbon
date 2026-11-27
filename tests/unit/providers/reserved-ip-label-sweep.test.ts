@@ -25,9 +25,12 @@ import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel as linodeLabel } from '../../../src/lib/providers/linode.js';
 import { encodeLabel as scalewayLabel } from '../../../src/lib/providers/scaleway.js';
 import { reservedIpLabel as vultrLabel } from '../../../src/lib/providers/vultr.js';
+import { SCALEWAY_TEST_PROJECT, stubScalewayProject } from '../../_shared/scaleway-project.js';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
+  // Scaleway lists only the configured project (scaleway-project.ts).
+  stubScalewayProject();
 });
 
 /** One IP as the test describes it, before any provider's wire shape. */
@@ -153,25 +156,36 @@ const rows: Record<string, Row> = {
     },
   },
   scaleway: {
-    // Every zone is walked; the IPs live in the first one.
+    // Every zone is walked; the IPs live in the first one. The server an IP
+    // is attached to lives there too (every other zone answers 404) and
+    // carries the IP's own labels as tags, as one of the stack's servers
+    // does (scaleway-compose.js, scaleway-k8s.js).
     serve: (ips, { listStatus = 200, deleteStatus = 204 } = {}) =>
-      api(
-        (url) =>
-          json(
-            {
-              ips: url.includes('/zones/fr-par-1/')
-                ? ips.map((ip) => ({
-                    id: `ip-${idOf(ip.address)}`,
-                    address: ip.address,
-                    server: ip.server ? { id: `srv-${ip.server}`, name: 'web' } : null,
-                    tags: Object.entries(ip.labels).map(([k, v]) => scalewayLabel(k, v)),
-                  }))
-                : [],
-            },
-            listStatus,
-          ),
-        deleteStatus,
-      ),
+      api((url) => {
+        const tagsOf = (ip: Ip | undefined) =>
+          Object.entries(ip?.labels ?? {}).map(([k, v]) => scalewayLabel(k, v));
+        const server = /\/zones\/([^/]+)\/servers\/srv-(\d+)$/.exec(url);
+        if (server) {
+          const ip = ips.find((i) => i.server === Number(server[2]));
+          return server[1] === 'fr-par-1' && ip
+            ? json({ server: { id: `srv-${server[2]}`, tags: tagsOf(ip) } })
+            : json({ message: 'not found' }, 404);
+        }
+        return json(
+          {
+            ips: url.includes('/zones/fr-par-1/')
+              ? ips.map((ip) => ({
+                  id: `ip-${idOf(ip.address)}`,
+                  address: ip.address,
+                  server: ip.server ? { id: `srv-${ip.server}`, name: 'web' } : null,
+                  tags: tagsOf(ip),
+                  project: SCALEWAY_TEST_PROJECT,
+                }))
+              : [],
+          },
+          listStatus,
+        );
+      }, deleteStatus),
     deletedBy: (call, ips) => {
       const m = call.method === 'DELETE' && call.url.match(/\/ips\/ip-(\d+)$/);
       return m ? (ips.find((ip) => idOf(ip.address) === Number(m[1]))?.address ?? '?') : null;

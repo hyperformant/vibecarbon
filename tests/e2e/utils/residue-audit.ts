@@ -82,6 +82,12 @@ export const FIXTURES: readonly {
     why: 'default security group of the Scaleway project',
   },
   {
+    provider: 'scaleway',
+    kind: 'network',
+    name: 'default',
+    why: 'default VPC Scaleway makes for each region of the project',
+  },
+  {
     provider: '*',
     kind: 'state-object',
     name: '.pulumi/meta.yaml',
@@ -627,18 +633,21 @@ export async function inventory(
         });
       }
     }
+    // The k8s tiers make a Private Network and a VPC of the same name per
+    // cluster (scaleway-k8s.js); both are networks here.
     for (const r of regions) {
-      kinds.push({
-        label: `private-networks ${r}`,
-        run: async () =>
-          (
-            await scalewayPaged(
-              `${api}/vpc/v2/regions/${r}/private-networks?project_id=${pid}`,
-              'private_networks',
-              h,
-            )
-          ).map((n) => row('network', n.name, r, n.created_at)),
-      });
+      for (const [path, key] of [
+        ['private-networks', 'private_networks'],
+        ['vpcs', 'vpcs'],
+      ]) {
+        kinds.push({
+          label: `${path} ${r}`,
+          run: async () =>
+            (
+              await scalewayPaged(`${api}/vpc/v2/regions/${r}/${path}?project_id=${pid}`, key, h)
+            ).map((n) => row('network', n.name, r, n.created_at)),
+        });
+      }
     }
     kinds.push({
       label: 'ssh-key',

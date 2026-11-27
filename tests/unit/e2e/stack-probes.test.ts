@@ -203,6 +203,19 @@ const cases: Case[] = [
     id: '4444-dddd',
     url: 'https://api.scaleway.com/iam/v1alpha1/ssh-keys/4444-dddd',
   },
+  // Regional ids "<region>/<uuid>" (vpc.js, privateNetwork.js import notes)
+  {
+    provider: 'scaleway',
+    type: T('scaleway', 'Vpc'),
+    id: 'fr-par/5555-eeee',
+    url: 'https://api.scaleway.com/vpc/v2/regions/fr-par/vpcs/5555-eeee',
+  },
+  {
+    provider: 'scaleway',
+    type: T('scaleway', 'PrivateNetwork'),
+    id: 'nl-ams/6666-ffff',
+    url: 'https://api.scaleway.com/vpc/v2/regions/nl-ams/private-networks/6666-ffff',
+  },
 ];
 
 const res = (c: Case): RecordedResource => ({ type: c.type, id: c.id, ...c.extra });
@@ -276,6 +289,16 @@ describe('probeFor: edges', () => {
     const r = rig(404);
     const probe = probeFor('scaleway', opts(r.fetchImpl, 'scaleway'));
     expect(await probe({ type: T('scaleway', 'Server'), id: 'bare-uuid' })).toBe('unknown');
+    expect(r.seen).toEqual([]);
+  });
+
+  it('Scaleway network ids are never sent without their region', async () => {
+    const r = rig(404);
+    const probe = probeFor('scaleway', opts(r.fetchImpl, 'scaleway'));
+    expect(await probe({ type: T('scaleway', 'Vpc'), id: 'bare-uuid' })).toBe('unknown');
+    expect(await probe({ type: T('scaleway', 'PrivateNetwork'), id: 'fr-par/a/b' })).toBe(
+      'unknown',
+    );
     expect(r.seen).toEqual([]);
   });
 

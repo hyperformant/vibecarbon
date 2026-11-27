@@ -33,6 +33,12 @@ import {
   encodeLabels,
   ScalewayProvider,
 } from '../../../src/lib/providers/scaleway.js';
+import {
+  inTestProject,
+  SCALEWAY_OTHER_PROJECT,
+  SCALEWAY_TEST_PROJECT,
+  stubScalewayProject,
+} from '../../_shared/scaleway-project.js';
 
 const jsonResp = (body: unknown, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -55,7 +61,8 @@ describe('ScalewayProvider statics', () => {
     // Same operator-vs-plugin convention as every sibling
     // (HETZNER_API_TOKEN→HCLOUD_TOKEN, VULTR_API_TOKEN→VULTR_API_KEY): the
     // operator sets the spelled-out name; the Pulumi plugin reads SCW_*.
-    // buildIacEnv is the only place the SCW_* names appear (asserted below).
+    // buildIacEnv emits the SCW_* names for the plugin, k8sCloudSecrets for
+    // the cluster's CSI controller.
     expect(ScalewayProvider.TOKEN_ENV).toBe('SCALEWAY_SECRET_KEY');
     expect(ScalewayProvider.CLI_TOKEN_ENV).toBe('SCW_SECRET_KEY');
     expect(ScalewayProvider.TOKEN_ENV).not.toBe(ScalewayProvider.CLI_TOKEN_ENV);
@@ -98,6 +105,85 @@ describe('ScalewayProvider statics', () => {
   it('getDefaultStandbyRegion pairs cross-country with matching AZ ordinals', () => {
     expect(ScalewayProvider.getDefaultStandbyRegion('fr-par-1')).toBe('nl-ams-1');
     expect(ScalewayProvider.getDefaultStandbyRegion('nl-ams-2')).toBe('fr-par-2');
+  });
+
+  it('destroy never deletes a detached CSI volume on a region-wide guess: they carry no tags', () => {
+    // scaleway-csi creates Block volumes with a name and nothing else, so
+    // only a captured id says whose one is (BaseProvider.ORPHAN_VOLUME_REGION_GUESS).
+    expect(ScalewayProvider.ORPHAN_VOLUME_REGION_GUESS).toBe(false);
+  });
+});
+
+describe('getServer: a refusal carries its status, for the token check', () => {
+  // assertTokenSeesCluster reads a 401, 403 or 404 as a token that can't see
+  // the master, and anything else as a check that could not run. getServer
+  // finds the zone first, one probe per zone, so the probe's answer is the
+  // refusal's status.
+  const ZONES = Object.keys(ScalewayProvider.REGIONS);
+  const probe = (zone: string) => `/instance/v1/zones/${zone}/servers/srv-1`;
+  const answer = (byZone: Record<string, number>) =>
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const zone = ZONES.find((z) => url.endsWith(probe(z)));
+      const status = zone ? (byZone[zone] ?? 404) : 404;
+      return jsonResp(status === 200 ? { server: { id: 'srv-1' } } : { message: 'nope' }, status);
+    });
+  const urls = () => fetchWithRetryMock.mock.calls.map((c: unknown[]) => String(c[0]));
+
+  it('a master in no zone throws status 404, after every zone', async () => {
+    answer({});
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({
+      status: 404,
+      message: 'Failed to get server: server srv-1 not found in any zone',
+    });
+    expect(urls()).toEqual(ZONES.map((z) => `${ScalewayProvider.API_BASE}${probe(z)}`));
+  });
+
+  it('a zone that answered 403 makes it 403, worded as that refusal', async () => {
+    answer({ 'fr-par-2': 403, 'nl-ams-2': 403 });
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      message:
+        'Failed to get server: fr-par-2, nl-ams-2 refused the read of server srv-1 (HTTP 403), ' +
+        'and no other zone has it',
+    });
+    expect(urls()).toHaveLength(ZONES.length);
+  });
+
+  it('every zone answering 403 says so', async () => {
+    answer(Object.fromEntries(ZONES.map((z) => [z, 403])));
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      message: 'Failed to get server: every zone refused the read of server srv-1 (HTTP 403)',
+    });
+    expect(urls()).toHaveLength(ZONES.length);
+  });
+
+  it.each([401, 400, 500])(
+    'a %i from the probe throws with that status, at once',
+    async (status) => {
+      answer({ 'fr-par-1': status });
+      const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({ status });
+      expect((err as Error).message).toContain(`(${status})`);
+      expect(urls()).toEqual([`${ScalewayProvider.API_BASE}${probe('fr-par-1')}`]);
+    },
+  );
+
+  it('a master found in a zone is read there', async () => {
+    answer({ 'nl-ams-1': 200 });
+    const server = await new ScalewayProvider('tok').getServer('srv-1');
+    expect(server).toEqual({ zone: 'nl-ams-1', id: 'srv-1' });
+    // fr-par-1, fr-par-2, then the hit, then the read.
+    expect(urls().map((u) => u.slice(ScalewayProvider.API_BASE.length))).toEqual([
+      probe('fr-par-1'),
+      probe('fr-par-2'),
+      probe('nl-ams-1'),
+      probe('nl-ams-1'),
+    ]);
   });
 });
 
@@ -377,6 +463,11 @@ describe('setFirewallRules — TRUE atomic whole-ruleset replace', () => {
 });
 
 describe('applyOperatorCidrs — read-filter-rebuild into one atomic PUT', () => {
+  // Every listing is scoped to the configured project (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   it('rebuilds locked ports as one rule per CIDR, keeps other rules, single PUT', async () => {
     const provider = new ScalewayProvider('tok');
     const existingRules = [
@@ -405,7 +496,12 @@ describe('applyOperatorCidrs — read-filter-rebuild into one atomic PUT', () =>
     fetchWithRetryMock.mockImplementation(async (url: string, init?: RequestInit) => {
       calls.push({ url, method: init?.method, body: init?.body as string });
       if (url.includes('/security_groups?name=')) {
-        return jsonResp({ security_groups: [{ id: 'sg-1', name: 'proj-prod-firewall' }] });
+        const inZone = url.includes('/zones/fr-par-1/');
+        return jsonResp({
+          security_groups: inZone
+            ? inTestProject([{ id: 'sg-1', name: 'proj-prod-firewall' }])
+            : [],
+        });
       }
       if (url.includes('/security_groups/sg-1/rules') && init?.method === 'PUT') {
         return jsonResp({ rules: [] });
@@ -510,6 +606,11 @@ describe('createServer — the replacement holds a flexible IP, as the stack doe
 });
 
 describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volume)', () => {
+  // deleteServer deletes only the configured project's server (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   // Wire fixture: one server in fr-par-1 with an SBS root volume and a
   // flexible IP that survives deletion. The chain must: terminate → wait
   // for 404 → DELETE the block volume → probe + DELETE the surviving IP.
@@ -527,6 +628,7 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
               server: {
                 id: 'srv-1',
                 zone: 'fr-par-1',
+                project: SCALEWAY_TEST_PROJECT,
                 volumes: { '0': { id: 'vol-1', volume_type: 'sbs_volume' } },
                 public_ips: [{ id: 'flexip-1', family: 'inet', address: '203.0.113.9' }],
               },
@@ -606,11 +708,280 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
   });
 });
 
+describe("deleteServer deletes only the configured project's server", () => {
+  /** srv-1 lives in fr-par-1 in `project`; every other read 404s; writes are recorded. */
+  function serverIn(project: string) {
+    const writes: string[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method !== 'GET') writes.push(`${method} ${url}`);
+      if (url.endsWith('/instance/v1/zones/fr-par-1/servers/srv-1') && method === 'GET') {
+        return jsonResp({
+          server: {
+            id: 'srv-1',
+            name: 'proj-prod',
+            project,
+            volumes: { '0': { id: 'vol-1', volume_type: 'sbs_volume' } },
+            public_ips: [{ id: 'flexip-1' }],
+          },
+        });
+      }
+      return jsonResp({}, 404);
+    });
+    return writes;
+  }
+
+  it("refuses another project's server by id, before terminate, naming both projects", async () => {
+    stubScalewayProject();
+    const writes = serverIn(SCALEWAY_OTHER_PROJECT);
+    await expect(
+      new ScalewayProvider('tok').deleteServer('srv-1', { waitUntilGone: true }),
+    ).rejects.toThrow(
+      `proj-prod (srv-1) is in Scaleway project ${SCALEWAY_OTHER_PROJECT}, not ` +
+        `SCALEWAY_DEFAULT_PROJECT_ID's ${SCALEWAY_TEST_PROJECT}`,
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it.each([403, 500, 429])(
+    'a step-1 read that answers %i throws, naming the server, zone and status, and terminates nothing',
+    async (status) => {
+      stubScalewayProject();
+      // The zone probe finds srv-1 in fr-par-1; the read after it fails.
+      let reads = 0;
+      const writes: string[] = [];
+      fetchWithRetryMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (method !== 'GET') {
+          writes.push(`${method} ${url}`);
+          return jsonResp({}, 204);
+        }
+        if (url.endsWith('/instance/v1/zones/fr-par-1/servers/srv-1')) {
+          reads += 1;
+          return reads === 1
+            ? jsonResp({ server: { id: 'srv-1', project: SCALEWAY_TEST_PROJECT } })
+            : jsonResp({ message: 'refused' }, status);
+        }
+        return jsonResp({}, 404);
+      });
+      const err = await new ScalewayProvider('tok')
+        .deleteServer('srv-1', { waitUntilGone: true })
+        .catch((e: Error & { status?: number }) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe(
+        `Failed to delete server: reading server srv-1 in fr-par-1 answered HTTP ${status}: ` +
+          'refused, so vibecarbon could not confirm it is in ' +
+          `SCALEWAY_DEFAULT_PROJECT_ID's project ${SCALEWAY_TEST_PROJECT}. Nothing was ` +
+          'terminated or deleted; run this again once Scaleway answers',
+      );
+      expect((err as { status?: number }).status).toBe(status);
+      expect(reads).toBe(2);
+      expect(writes).toEqual([]);
+    },
+  );
+
+  it("a destroy sweep never lists another project's server with our name and labels", async () => {
+    stubScalewayProject();
+    const { sweepEnvironmentServers } = await import('../../../src/lib/destroy/server-sweep.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const tags = [encodeLabel('project', 'acme'), encodeLabel('environment', 'prod')];
+    const listed: URL[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      listed.push(u);
+      return jsonResp({
+        servers: u.pathname.endsWith('/zones/fr-par-1/servers')
+          ? [
+              { id: 'srv-ours', name: 'acme-prod', tags, project: SCALEWAY_TEST_PROJECT },
+              { id: 'srv-theirs', name: 'acme-prod', tags, project: SCALEWAY_OTHER_PROJECT },
+            ]
+          : [],
+      });
+    });
+    const provider = new ScalewayProvider('tok');
+    const deleteServer = vi.spyOn(provider, 'deleteServer').mockResolvedValue(true as never);
+    const out = await sweepEnvironmentServers({
+      provider,
+      leaks: createLeakLedger(),
+      projectName: 'acme',
+      environment: 'prod',
+    });
+    expect(out).toMatchObject({ deleted: ['acme-prod'] });
+    expect(deleteServer.mock.calls.map((c) => c[0])).toEqual(['srv-ours']);
+    for (const u of listed) expect(u.searchParams.get('project')).toBe(SCALEWAY_TEST_PROJECT);
+  });
+
+  it('without SCALEWAY_DEFAULT_PROJECT_ID it refuses, naming it, and sends nothing', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    serverIn(SCALEWAY_TEST_PROJECT);
+    await expect(new ScalewayProvider('tok').deleteServer('srv-1')).rejects.toThrow(
+      'SCALEWAY_DEFAULT_PROJECT_ID is not set',
+    );
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteServer keeps every volume but the root', () => {
+  // deleteServer deletes only the configured project's server (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
+  // An autoscaler scale-down deletes a worker that can still hold a PVC's
+  // volume (scaleway-csi names them pvc-<uuid>): the server's own delete
+  // removes the root volume only, as the Pulumi provider's does. Destroy reaps
+  // CSI volumes on its own, through the PV capture.
+  it('deleteServer deletes the root volume and never a pvc- volume still attached', async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    let serverGone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method });
+      if (/\/instance\/v1\/zones\/fr-par-1\/servers\/srv-1$/.test(url) && method === 'GET') {
+        return serverGone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: {
+                id: 'srv-1',
+                zone: 'fr-par-1',
+                project: SCALEWAY_TEST_PROJECT,
+                volumes: {
+                  '0': { id: 'root', volume_type: 'sbs_volume' },
+                  '1': {
+                    id: 'pvc-vol',
+                    volume_type: 'sbs_volume',
+                    name: 'pvc-4b1f0c2e-9d1a-4c55-8a3e-2f0d6c7b9e10',
+                  },
+                },
+                public_ips: [],
+              },
+            });
+      }
+      if (/\/servers\/srv-1$/.test(url) && method === 'GET') return jsonResp({}, 404);
+      if (url.endsWith('/servers/srv-1/action') && method === 'POST') {
+        serverGone = true;
+        return jsonResp({ task: { id: 't1' } });
+      }
+      if (url.includes('/block/v1/') && method === 'DELETE') return jsonResp({}, 204);
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+
+    await new ScalewayProvider('tok').deleteServer('srv-1', { waitUntilGone: true });
+
+    const blockDeletes = calls.filter((c) => c.method === 'DELETE' && c.url.includes('/block/v1/'));
+    expect(blockDeletes.map((c) => new URL(c.url).pathname)).toEqual([
+      '/block/v1/zones/fr-par-1/volumes/root',
+    ]);
+  });
+});
+
+// A zone that answers 403 is one the token may not read, so a server no zone
+// showed while one refused may be in it: never "already gone". The delete
+// throws the refusal, as a refused DELETE does on the other providers
+// (deleteServerAt), and destroy reports the server instead of moving on.
+describe('a server lookup a zone refused is never read as gone', () => {
+  // deleteServer deletes only the configured project's server (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
+  const ZONES = Object.keys(ScalewayProvider.REGIONS);
+  const answer = (byZone: Record<string, number>) =>
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const zone = ZONES.find((z) => url.endsWith(`/instance/v1/zones/${z}/servers/srv-x`));
+      return jsonResp({ message: 'nope' }, zone ? (byZone[zone] ?? 404) : 404);
+    });
+  const sent = (method: string) =>
+    fetchWithRetryMock.mock.calls.filter(
+      (c: unknown[]) => ((c[1] as RequestInit | undefined)?.method ?? 'GET') === method,
+    );
+  const everyZone403 = () => Object.fromEntries(ZONES.map((z) => [z, 403]));
+
+  it.each([
+    ['waitUntilGone', { waitUntilGone: true }],
+    ['the default mode', {}],
+  ])(
+    'deleteServer (%s): every zone refusing throws the refusal, and terminates nothing',
+    async (_, options) => {
+      answer(everyZone403());
+      const err = await new ScalewayProvider('tok')
+        .deleteServer('srv-x', options)
+        .catch((e: Error) => e);
+      expect(err).toMatchObject({
+        status: 403,
+        message: 'Failed to delete server: every zone refused the read of server srv-x (HTTP 403)',
+      });
+      expect(sent('POST')).toEqual([]);
+      expect(sent('DELETE')).toEqual([]);
+    },
+  );
+
+  it('deleteServer: one zone refusing and none having it throws, naming that zone', async () => {
+    answer({ 'fr-par-2': 403 });
+    await expect(
+      new ScalewayProvider('tok').deleteServer('srv-x', { waitUntilGone: true }),
+    ).rejects.toMatchObject({
+      status: 403,
+      message:
+        'Failed to delete server: fr-par-2 refused the read of server srv-x (HTTP 403), ' +
+        'and no other zone has it',
+    });
+    expect(sent('POST')).toEqual([]);
+  });
+
+  it('renameServer: a refusal is worded as one, a server in no zone as not found', async () => {
+    answer(everyZone403());
+    await expect(new ScalewayProvider('tok').renameServer('srv-x', 'n')).rejects.toMatchObject({
+      status: 403,
+      message: 'Failed to rename server: every zone refused the read of server srv-x (HTTP 403)',
+    });
+    answer({});
+    await expect(new ScalewayProvider('tok').renameServer('srv-x', 'n')).rejects.toMatchObject({
+      status: 404,
+      message: 'Failed to rename server: server srv-x not found in any zone',
+    });
+    expect(sent('PATCH')).toEqual([]);
+  });
+
+  it('a destroy sweep reports the refused server as a leak, never as deleted', async () => {
+    const { sweepEnvironmentServers } = await import('../../../src/lib/destroy/server-sweep.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const provider = new ScalewayProvider('tok');
+    vi.spyOn(provider, 'listServersDetailed').mockResolvedValue({
+      items: [{ id: 'srv-x', name: 'acme-prod', zone: 'fr-par-1', tags: [] }],
+      complete: true,
+    } as never);
+    answer(everyZone403());
+    const leaks = createLeakLedger();
+    const out = await sweepEnvironmentServers({
+      provider,
+      leaks,
+      projectName: 'acme',
+      environment: 'prod',
+    });
+    expect(out).toMatchObject({ deleted: [] });
+    expect(leaks.entries).toHaveLength(1);
+    expect(leaks.entries[0]).toMatchObject({ severity: 'leak', resourceClass: 'server' });
+    expect(leaks.entries[0].reason).toContain('every zone refused the read of server srv-x');
+  });
+});
+
 // terminate only DETACHES an SBS volume, and deleteServer deletes it after.
 // One it cannot delete in 60 s bills on, and nothing finds it again: a later
 // deleteServer finds the server gone (404) and reads no volumes. So it is a
 // ledger line for destroy (onLeftover), with the console delete as its step.
 describe('an SBS volume deleteServer cannot delete', () => {
+  // deleteServer deletes only the configured project's server (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   function wire() {
     let serverGone = false;
     const handler = async (url: string, init?: RequestInit) => {
@@ -621,6 +992,7 @@ describe('an SBS volume deleteServer cannot delete', () => {
           : jsonResp({
               server: {
                 id: 'srv-v',
+                project: SCALEWAY_TEST_PROJECT,
                 volumes: { '0': { id: 'vol-9', volume_type: 'sbs_volume' } },
                 public_ips: [],
               },
@@ -698,20 +1070,27 @@ describe('an SBS volume deleteServer cannot delete', () => {
 // not left alone: the line says it is still terminating, and that the next
 // destroy (which finds it gone) releases the IP.
 describe('a server still terminating when deleteServer stops waiting', () => {
+  // Every listing is scoped to the configured project (scaleway-project.ts).
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
   const PROJECT_TAGS = [encodeLabel('project', 'proj'), encodeLabel('environment', 'prod')];
   function wire(serverId: string) {
     const handler = async (url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET';
       if (url.endsWith(`/zones/fr-par-1/servers/${serverId}`) && method === 'GET') {
         // Never gone: the termination outlasts the wait.
-        return jsonResp({ server: { id: serverId, volumes: {}, public_ips: [] } });
+        return jsonResp({
+          server: { id: serverId, project: SCALEWAY_TEST_PROJECT, volumes: {}, public_ips: [] },
+        });
       }
       if (url.endsWith(`/servers/${serverId}/action`) && method === 'POST') {
         return jsonResp({ task: { id: 't1' } });
       }
       if (url.includes('/zones/fr-par-1/ips?') && method === 'GET') {
         return jsonResp({
-          ips: [
+          ips: inTestProject([
             {
               id: 'ip-1',
               address: '203.0.113.20',
@@ -724,7 +1103,7 @@ describe('a server still terminating when deleteServer stops waiting', () => {
               server: { id: 'srv-other', name: 'proj-prod-left' },
               tags: PROJECT_TAGS,
             },
-          ],
+          ]),
         });
       }
       if (method === 'DELETE') throw new Error(`unexpected delete: ${url}`);
@@ -781,5 +1160,120 @@ describe('a server still terminating when deleteServer stops waiting', () => {
     expect(left.hint).not.toContain('once the server is gone');
     // Kept on record either way, so the next destroy runs the sweep again.
     expect(results.unreleasedReservedIps).toEqual(['203.0.113.20', '203.0.113.21']);
+  });
+});
+
+// A walk ends on the page the API sent, never on the rows the project filter
+// kept: a full page that held another project's row is still a full page,
+// and the rows after it are ours.
+describe('a project-scoped walk ends on the raw page, not on the rows it kept', () => {
+  beforeEach(() => {
+    stubScalewayProject();
+  });
+
+  /** Page 1: a full page, one row of it another project's; page 2: ours. */
+  function twoPages(path: RegExp, key: string, field: 'project' | 'project_id') {
+    const pages: number[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (!path.test(u.pathname)) return jsonResp({ [key]: [] });
+      const page = Number(u.searchParams.get('page'));
+      pages.push(page);
+      const rows =
+        page === 1
+          ? [
+              { id: 'theirs', [field]: SCALEWAY_OTHER_PROJECT },
+              ...Array.from({ length: 99 }, (_, i) => ({
+                id: `ours-${i}`,
+                [field]: SCALEWAY_TEST_PROJECT,
+              })),
+            ]
+          : page === 2
+            ? [{ id: 'ours-on-page-2', [field]: SCALEWAY_TEST_PROJECT }]
+            : [];
+      return jsonResp({ [key]: rows });
+    });
+    return pages;
+  }
+
+  it('the zone walk (Instance API) reads page 2 and keeps its row', async () => {
+    const pages = twoPages(/^\/instance\/v1\/zones\/fr-par-1\/ips$/, 'ips', 'project');
+    const { items, complete } = await new ScalewayProvider('tok').listFlexibleIPsDetailed();
+    const ids = items.map((ip: { id: string }) => ip.id);
+    expect(pages).toEqual([1, 2]);
+    expect(complete).toBe(true);
+    expect(ids).toContain('ours-on-page-2');
+    expect(ids).not.toContain('theirs');
+    expect(ids).toHaveLength(100);
+  });
+
+  it('the page_size walk (VPC API) reads page 2 and keeps its row', async () => {
+    const pages = twoPages(
+      /^\/vpc\/v2\/regions\/fr-par\/private-networks$/,
+      'private_networks',
+      'project_id',
+    );
+    const { items, complete } = await new ScalewayProvider('tok').listNetworksDetailed();
+    const ids = items.map((pn: { id: string }) => pn.id);
+    expect(pages).toEqual([1, 2]);
+    expect(complete).toBe(true);
+    expect(ids).toContain('ours-on-page-2');
+    expect(ids).not.toContain('theirs');
+    expect(ids).toHaveLength(100);
+  });
+});
+
+// Guided setup accepts an uppercase Project ID (UUID_FORMAT), and the API
+// writes every UUID lowercase: the id is compared without case.
+describe('an uppercase SCALEWAY_DEFAULT_PROJECT_ID still matches its rows', () => {
+  const UPPER = SCALEWAY_TEST_PROJECT.toUpperCase();
+
+  it('keeps the lowercase rows of the project, and asks for it lowercase', async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', UPPER);
+    const queries: string[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      queries.push(u.searchParams.get('project') ?? '');
+      return jsonResp({
+        ips: u.pathname.endsWith('/zones/fr-par-1/ips')
+          ? [
+              { id: 'ours', project: SCALEWAY_TEST_PROJECT },
+              { id: 'theirs', project: SCALEWAY_OTHER_PROJECT },
+            ]
+          : [],
+      });
+    });
+    const { items } = await new ScalewayProvider('tok').listFlexibleIPsDetailed();
+    expect(items.map((ip: { id: string }) => ip.id)).toEqual(['ours']);
+    expect(new Set(queries)).toEqual(new Set([SCALEWAY_TEST_PROJECT]));
+  });
+
+  it("deleteServer reads the lowercase server as the project's own", async () => {
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', UPPER);
+    let gone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/zones/fr-par-1/servers/srv-1') && method === 'GET') {
+        return gone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: { id: 'srv-1', project: SCALEWAY_TEST_PROJECT, volumes: {}, public_ips: [] },
+            });
+      }
+      if (url.endsWith('/servers/srv-1/action') && method === 'POST') {
+        gone = true;
+        return jsonResp({ task: { id: 't' } });
+      }
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+    expect(await new ScalewayProvider('tok').deleteServer('srv-1', { waitUntilGone: true })).toBe(
+      true,
+    );
+    expect(gone).toBe(true);
   });
 });

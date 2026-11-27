@@ -205,9 +205,14 @@ export const CARBON_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/carbon-autoscaler';
 //   0.1.5 — Linode createServer joins a VPC with a legacy config interface and
 //           the cluster firewall; listNetworks items carry `name`.
 //   0.1.6 — Vultr createServer joins the cluster VPC (attach_vpc) and sets the hostname.
-export const CARBON_AUTOSCALER_TAG = '0.1.6';
+//   0.1.7: Scaleway createServer attaches the cluster's Private Network before power-on
+//          and cleans up after a failed attach, and deleteServer keeps attached PVC
+//          volumes. Its pod now gets SCALEWAY_DEFAULT_PROJECT_ID from the
+//          carbon-autoscaler-config Secret. On every provider, a create whose
+//          firewall lookup fails is refused, never made without the firewall.
+export const CARBON_AUTOSCALER_TAG = '0.1.7';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.6" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.7" */
 export function carbonAutoscalerImageRef() {
   return `${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`;
 }
@@ -369,11 +374,17 @@ export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
  *   vultr/vultr-csi v0.19.1  docs/releases/v0.19.1.yml
  *   (a file in the repo at the tag, not a release asset; applied by
  *   vultr-master-init.sh)
+ * Rendered 2026-11-26:
+ *   scaleway/scaleway-csi v0.3.6  Helm chart scaleway-csi 0.2.2
+ *   (the driver ships no release manifest; the chart's render is committed
+ *   as carbon/cloud-init/k3s/_scaleway-csi.yaml, whose header holds the
+ *   command, and scaleway-master-init.sh carries it in its user data)
  */
 export const HETZNER_CSI_VERSION = 'v2.24.1';
 export const DO_CSI_VERSION = 'v4.19.0';
 export const LINODE_CSI_VERSION = 'v1.1.5';
 export const VULTR_CSI_VERSION = 'v0.19.1';
+export const SCALEWAY_CSI_VERSION = 'v0.3.6';
 
 /**
  * Per-provider map of the CSI workloads cloud-init applies from upstream YAML,
@@ -563,6 +574,53 @@ export const CSI_SIDECAR_MIRRORS = {
           repo: 'sig-storage/csi-node-driver-registrar',
           tag: 'v2.7.0',
           digest: 'sha256:8e89f0ddbd0f8586b3803ca1084e5b2cb562f874dd990adff26f19ca0265e932',
+        },
+      },
+    },
+  ],
+  // scaleway/scaleway-csi v0.3.6, rendered from its chart with the sidecar
+  // tags set to Hetzner's (the render's header): the chart's own defaults
+  // are older tags, and these are already published mirrors, so Scaleway
+  // adds no package and no tag. The driver container
+  // (docker.io/scaleway/scaleway-csi) is not mirrored, as with the others.
+  scaleway: [
+    {
+      workload: 'daemonset/scaleway-csi-node',
+      containers: {
+        'csi-node-driver-registrar': {
+          repo: 'sig-storage/csi-node-driver-registrar',
+          tag: 'v2.18.0',
+          digest: 'sha256:692a30d9f27d32a25ea2784d01251b73e189e9d1156dd43c58f87ad2b70ec1e6',
+        },
+        'liveness-probe': {
+          repo: 'sig-storage/livenessprobe',
+          tag: 'v2.20.0',
+          digest: 'sha256:c3dc967a4d8b18655e14bab5553017f850fda96221b8b0d2abfd9f6213c30f35',
+        },
+      },
+    },
+    {
+      workload: 'deployment/scaleway-csi-controller',
+      containers: {
+        'csi-provisioner': {
+          repo: 'sig-storage/csi-provisioner',
+          tag: 'v6.3.0',
+          digest: 'sha256:54de28a6565647405647b34d092eefb4a51c7be14f29bdafc721773a5ec0600c',
+        },
+        'csi-attacher': {
+          repo: 'sig-storage/csi-attacher',
+          tag: 'v4.13.0',
+          digest: 'sha256:3998c70f02511068e879b2222d7d4943db86fe044dd311f7bbb90812f778ad82',
+        },
+        'csi-resizer': {
+          repo: 'sig-storage/csi-resizer',
+          tag: 'v2.2.1',
+          digest: 'sha256:da560f720351d2c5ed1d3f85ad5a03d3935967a0586810eb2c1ea4d3109493fa',
+        },
+        'liveness-probe': {
+          repo: 'sig-storage/livenessprobe',
+          tag: 'v2.20.0',
+          digest: 'sha256:c3dc967a4d8b18655e14bab5553017f850fda96221b8b0d2abfd9f6213c30f35',
         },
       },
     },

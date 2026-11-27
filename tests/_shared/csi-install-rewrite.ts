@@ -14,7 +14,24 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
+import { EMBEDDED_CSI_MANIFESTS } from '../../src/lib/iac/cloud-init.js';
 import { cleanupTempDir, createTempDir } from './temp-dir.js';
+
+/**
+ * The committed CSI renders a master carries (EMBEDDED_CSI_MANIFESTS), repo
+ * path to the provider whose master installs it. Each is upstream's YAML, as
+ * a fetched manifest is, not a template: it holds no token and is never
+ * edited, and its master installs it only through csi_fetch_mirrored. So a
+ * census of the images our templates name judges it as the master installs
+ * it, or leaves it to the CSI census (k8s-image-mirrors.test.ts), which runs
+ * that rewrite over it whole, as it would a fetched manifest.
+ */
+export const EMBEDDED_CSI_FILES: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(EMBEDDED_CSI_MANIFESTS).map(([provider, { file }]) => [
+    `carbon/cloud-init/k3s/${file}`,
+    provider,
+  ]),
+);
 
 /**
  * The images each pinned CSI release actually ships, captured from the
@@ -23,8 +40,10 @@ import { cleanupTempDir, createTempDir } from './temp-dir.js';
  *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml
  *   https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml
  *   https://raw.githubusercontent.com/vultr/vultr-csi/v0.19.1/docs/releases/v0.19.1.yml
+ *   carbon/cloud-init/k3s/_scaleway-csi.yaml (scaleway-csi v0.3.6, the
+ *   committed render of its Helm chart; the master carries it in its user data)
  * (hetzner and digitalocean fetched 2026-11-05, linode 2026-11-07; those three
- * re-checked 2026-11-19; vultr fetched 2026-11-26). Keyed workload ->
+ * re-checked 2026-11-19; vultr fetched and scaleway rendered 2026-11-26). Keyed workload ->
  * container -> image, exactly as upstream spells them, because both seams
  * address them that way: the install rewrite matches the `image:` value
  * verbatim, and `kubectl set image` addresses containers BY NAME. A rename or retag upstream turns
@@ -97,6 +116,24 @@ export const UPSTREAM_CSI_MANIFESTS = {
       'daemonset/csi-vultr-node': {
         'driver-registrar': 'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.7.0',
         'csi-vultr-plugin': 'vultr/vultr-csi:v0.19.1',
+      },
+    },
+  },
+  scaleway: {
+    version: 'v0.3.6',
+    workloads: {
+      'daemonset/scaleway-csi-node': {
+        'scaleway-csi-plugin': 'scaleway/scaleway-csi:v0.3.6',
+        'csi-node-driver-registrar':
+          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
+        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
+      },
+      'deployment/scaleway-csi-controller': {
+        'scaleway-csi-plugin': 'scaleway/scaleway-csi:v0.3.6',
+        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.3.0',
+        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.13.0',
+        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.2.1',
+        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
       },
     },
   },
