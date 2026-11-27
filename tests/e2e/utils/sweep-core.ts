@@ -62,7 +62,7 @@ export function hetznerServerSelectorQuery(projectName: string): string {
 }
 
 /** A server's own name: `label` on Linode and Vultr, `name` elsewhere. */
-export function serverName(server: { label?: string | null; name?: string | null }): string {
+function serverName(server: { label?: string | null; name?: string | null }): string {
   return String(server.label ?? server.name ?? '');
 }
 
