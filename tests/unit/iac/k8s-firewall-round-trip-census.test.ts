@@ -262,6 +262,23 @@ describe('k8s firewall round trip census', () => {
     expect(inlineProviders.map(([id]) => id).sort()).toEqual(Object.keys(INLINE).sort());
   });
 
+  // Where a refresh does not read the rules back in place, the first up after
+  // a REST insert rewrites the group to the declared list, and the e2e scale
+  // check takes the declared peer as its proof instead of the markers
+  // (tests/e2e/checks/scale-ha.ts). Scaleway's provider rebuilds a rule it
+  // finds at another index (ScalewayProvider.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE).
+  it('only Scaleway reads its inline rules back out of place', () => {
+    expect(
+      inlineProviders
+        .filter(
+          ([, P]) =>
+            !(P as unknown as { K8S_FIREWALL_RULES_READ_BACK_IN_PLACE: boolean })
+              .K8S_FIREWALL_RULES_READ_BACK_IN_PLACE,
+        )
+        .map(([id]) => id),
+    ).toEqual(['scaleway']);
+  });
+
   describe.each(inlineProviders)('%s: the declared list is what REST leaves', (id, Provider) => {
     const provider = () => new Provider('census-token');
 

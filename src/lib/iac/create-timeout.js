@@ -71,6 +71,14 @@ export const SERVER_OWNER_LABELS = Object.freeze({ 'managed-by': 'vibecarbon' })
  * compose servers from the `docker-ce` app image to plain Ubuntu (2026-11-04):
  * without this, the next deploy would have replaced each live server.
  *
+ * `attachedVolumesInput` is a server's list of attached data volumes, on a
+ * provider whose read fills it from the live server and whose update resets
+ * it to the program's value. Only Scaleway's: DigitalOcean's `volumeIds` and
+ * Linode's `config` are Computed, so a program that leaves them out keeps
+ * what the CSI driver attached, and Hetzner and Vultr attach a volume through
+ * the volume, never the server. Every server ignores it, since no program
+ * declares it (tests/unit/iac/server-create-timeouts-census.test.ts).
+ *
  * `nameInput` is the input the programs set the server's name in, the one its
  * provider's findServersByName matches: the seal looks a server up by it when
  * an earlier run left the server's create unfinished (lib/iac/state-pending.js).
@@ -124,6 +132,18 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
     locationInput: 'zone',
     userDataInput: 'userData',
     imageInput: 'image',
+    // The volumes attached beside the root volume. No program sets it: on a
+    // k8s cluster the Scaleway CSI driver attaches each PersistentVolume,
+    // the database's among them. The provider's read fills it from the live
+    // server, it is Optional and not Computed, so an up after a refresh
+    // diffed it back to empty, and the update sent the root volume alone:
+    // Scaleway detached the database's volume from its node. Kubernetes still
+    // held it attached until csi-attacher's 10-minute reconcile put it back,
+    // so the 2026-11-27 resize scales waited 8 to 10 minutes for the database
+    // (terraform-provider-scaleway internal/services/instance/server.go,
+    // instanceServerVolumesUpdate). Ignored, the up leaves the attached
+    // volumes to the driver that owns them.
+    attachedVolumesInput: 'additionalVolumeIds',
   },
 });
 
@@ -133,8 +153,10 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
  * and image inputs. Every provider replaces a server when either changes, and
  * a compose server's database (a k8s db node's too) lives on its disk, so an
  * edit to a cloud-init file or a new base image must reach new servers only,
- * never replace an existing one. tests/unit/iac/server-create-timeouts-census.test.ts runs
- * every program and fails on a server built without these.
+ * never replace an existing one. Its attached volumes too, where the type
+ * names them (`attachedVolumesInput`): the CSI driver owns those.
+ * tests/unit/iac/server-create-timeouts-census.test.ts runs every program and
+ * fails on a server built without these.
  *
  * @param {keyof typeof SERVER_RESOURCE_TYPES} type the server's Pulumi type token
  * @param {object} [extra] other resource options (dependsOn, ...)
@@ -150,6 +172,7 @@ export function serverResourceOptions(type, extra = {}) {
       serverClass.userDataInput,
       serverClass.imageInput,
       ...(serverClass.createOnlyInputs ?? []),
+      ...(serverClass.attachedVolumesInput ? [serverClass.attachedVolumesInput] : []),
     ],
   };
 }
@@ -209,6 +232,7 @@ export function workerResourceOptions(type, { joinTarget, omitJoinTrigger, ...ex
       serverClass.userDataInput,
       serverClass.imageInput,
       ...createOnly,
+      ...(serverClass.attachedVolumesInput ? [serverClass.attachedVolumesInput] : []),
     ],
     ...(!omitJoinTrigger && {
       replacementTrigger: pulumi

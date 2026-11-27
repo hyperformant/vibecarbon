@@ -2,16 +2,19 @@
  * The e2e k8s-ha checks on the replication firewall rule (checks/scale-ha.ts):
  *
  *   - verify-scale: replication, each side's firewall read, and (inline-rule
- *     providers) no firewall change in the scale's own per-resource markers;
+ *     providers) what the scale's ups kept: the peer each converge declared
+ *     the rule from, and, where a refresh reads the rules back in place, no
+ *     firewall change in the scale's own per-resource markers;
  *   - verify-failover and reconverge-deploy: each side's firewall read.
  *
  * k8s-ha runs them; k8s, compose and compose-ha run none. Every failure names
  * the stack and the expected peer address.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { replicationRuleNotice } from '../../../src/lib/iac/program-inputs.js';
 import {
   checkReplicationFirewalls,
-  checkScaleUpsLeftFirewalls,
+  checkScaleUpsKeptReplicationRule,
   runHaFirewallChecks,
   runScaleHaChecks,
 } from '../../e2e/checks/scale-ha.js';
@@ -24,7 +27,7 @@ describe('runScaleHaChecks', () => {
   const spies = () => ({
     replication: vi.fn(async () => [pass('replication_streaming')]),
     firewalls: vi.fn(async () => [pass('replication_firewall:e-primary')]),
-    scaleUps: vi.fn(() => [pass('scale_firewall_unchanged:e-primary')]),
+    scaleUps: vi.fn(() => [pass('scale_up_kept_replication_rule:e-primary')]),
   });
 
   it('runs replication, the firewall read and the scale markers for k8s-ha on an inline-rule provider', async () => {
@@ -36,7 +39,7 @@ describe('runScaleHaChecks', () => {
     expect(out.map((r) => r.checkName)).toEqual([
       'replication_streaming',
       'replication_firewall:e-primary',
-      'scale_firewall_unchanged:e-primary',
+      'scale_up_kept_replication_rule:e-primary',
     ]);
   });
 
@@ -154,45 +157,50 @@ describe('checkReplicationFirewalls', () => {
   });
 });
 
-describe('checkScaleUpsLeftFirewalls', () => {
+describe('checkScaleUpsKeptReplicationRule', () => {
   const unswapped = {
     ha: {
       primary: { stack: 'e-primary', dbIp: '203.0.113.10' },
       standby: { stack: 'e-standby', dbIp: '203.0.113.20' },
     },
   };
-  // What a k8s-ha scale's ups print with VIBECARBON_PERF=1: each side's up
-  // timer, its first engine event, and one line per resource it changed.
-  const scaleOutput = (extra: string[] = []) =>
+  // What a k8s-ha scale prints with VIBECARBON_PERF=1: each side's converge
+  // naming the peer its program declares the rule from, its up timer, its
+  // first engine event, and one line per resource it changed.
+  const notices = [
+    `●  ${replicationRuleNotice('e-primary', '203.0.113.20')}`,
+    `●  ${replicationRuleNotice('e-standby', '203.0.113.10')}`,
+  ];
+  const scaleOutput = (extra: string[] = [], said: string[] = notices) =>
     [
+      ...said.slice(0, 1),
       'Applying infra changes via Pulumi (primary: nbg1)...',
       '[perf] scale.k8s.e-primary.upStack.resource.firstEvent 812ms',
       '[perf] scale.k8s.e-primary.upStack.resource.Server.master 64012ms',
       '[perf] scale.k8s.e-primary.upStack.resource.Server.db 70331ms',
       '[perf] scale.k8s.e-primary.upStack 98000ms',
+      ...said.slice(1),
       '[perf] scale.k8s.e-standby.upStack.resource.Droplet.db 51000ms',
       '[perf] scale.k8s.e-standby.upStack 77000ms',
       ...extra,
     ].join('\n');
+  const check = (
+    output: string,
+    rulesReadBackInPlace = true,
+    envConfig: Parameters<typeof checkScaleUpsKeptReplicationRule>[0]['envConfig'] = unswapped,
+  ) => checkScaleUpsKeptReplicationRule({ output, envName: 'e', envConfig, rulesReadBackInPlace });
 
-  it('passes both sides when their ups changed servers only', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: scaleOutput(),
-      envName: 'e',
-      envConfig: unswapped,
-    });
-    expect(out.map((r) => [r.checkName, r.status])).toEqual([
-      ['scale_firewall_unchanged:e-primary', 'pass'],
-      ['scale_firewall_unchanged:e-standby', 'pass'],
+  it('passes both sides when they declared their peers and their ups changed servers only', () => {
+    expect(check(scaleOutput()).map((r) => [r.checkName, r.status])).toEqual([
+      ['scale_up_kept_replication_rule:e-primary', 'pass'],
+      ['scale_up_kept_replication_rule:e-standby', 'pass'],
     ]);
   });
 
   it('fails the side whose up changed its firewall, naming the stack and the peer it should declare', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: scaleOutput(['[perf] scale.k8s.e-standby.upStack.resource.Firewall.firewall 2210ms']),
-      envName: 'e',
-      envConfig: unswapped,
-    });
+    const out = check(
+      scaleOutput(['[perf] scale.k8s.e-standby.upStack.resource.Firewall.firewall 2210ms']),
+    );
     expect(out.map((r) => r.status)).toEqual(['pass', 'fail']);
     expect(out[1].errorMessage).toContain('e-standby');
     expect(out[1].errorMessage).toContain('203.0.113.10');
@@ -200,51 +208,68 @@ describe('checkScaleUpsLeftFirewalls', () => {
   });
 
   it('a security group counts as a firewall resource too', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: scaleOutput([
-        '[perf] scale.k8s.e-primary.upStack.resource.SecurityGroup.firewall 900ms',
-      ]),
-      envName: 'e',
-      envConfig: unswapped,
-    });
+    const out = check(
+      scaleOutput(['[perf] scale.k8s.e-primary.upStack.resource.SecurityGroup.firewall 900ms']),
+    );
     expect(out.map((r) => r.status)).toEqual(['fail', 'pass']);
     expect(out[0].errorMessage).toContain('203.0.113.20');
   });
 
+  // Scaleway: the first up after a REST insert rewrites the group to the
+  // rules its program declares, so the change is expected there and the
+  // declared peer is the proof.
+  it('where a refresh does not read the rules back in place, a firewall change passes when the peer was declared', () => {
+    const out = check(
+      scaleOutput([
+        '[perf] scale.k8s.e-primary.upStack.resource.SecurityGroup.firewall 900ms',
+        '[perf] scale.k8s.e-standby.upStack.resource.SecurityGroup.firewall 800ms',
+      ]),
+      false,
+    );
+    expect(out.map((r) => r.status)).toEqual(['pass', 'pass']);
+    expect(out[0].details).toMatchObject({ rewrote: ['SecurityGroup.firewall'] });
+  });
+
+  it('fails a side whose converge declared no rule, or another peer, whichever the markers say', () => {
+    for (const readBack of [true, false]) {
+      const out = check(
+        scaleOutput([], [notices[0].replace('203.0.113.20', '203.0.113.99')]),
+        readBack,
+      );
+      expect(out.map((r) => r.status)).toEqual(['fail', 'fail']);
+      expect(out[0].errorMessage).toContain('declared the rule from 203.0.113.99');
+      expect(out[0].errorMessage).toContain('203.0.113.20');
+      expect(out[1].errorMessage).toContain('declared no replication rule');
+      expect(out[1].errorMessage).toContain('203.0.113.10');
+    }
+  });
+
   it('reads the stacks from the record after a failover swapped the roles', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: scaleOutput(['[perf] scale.k8s.e-primary.upStack.resource.Firewall.firewall 1ms']),
-      envName: 'e',
-      envConfig: swapped,
-    });
+    const out = check(
+      scaleOutput(['[perf] scale.k8s.e-primary.upStack.resource.Firewall.firewall 1ms']),
+      true,
+      swapped,
+    );
     // ha.primary is the e-standby stack now; its peer is e-primary's node.
     expect(out.map((r) => [r.checkName, r.status])).toEqual([
-      ['scale_firewall_unchanged:e-standby', 'pass'],
-      ['scale_firewall_unchanged:e-primary', 'fail'],
+      ['scale_up_kept_replication_rule:e-standby', 'pass'],
+      ['scale_up_kept_replication_rule:e-primary', 'fail'],
     ]);
     expect(out[1].errorMessage).toContain('203.0.113.20');
   });
 
   it('fails a side whose up left no marker: perf off, or no up ran, so nothing was read', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: '[perf] scale.k8s.e-primary.upStack 98000ms',
-      envName: 'e',
-      envConfig: unswapped,
-    });
+    const out = check(`${notices.join('\n')}\n[perf] scale.k8s.e-primary.upStack 98000ms`);
     expect(out.map((r) => r.status)).toEqual(['pass', 'fail']);
     expect(out[1].errorMessage).toContain('scale.k8s.e-standby.upStack');
     expect(out[1].errorMessage).toContain('203.0.113.10');
   });
 
   it('fails a side whose peer has no recorded address, or a bad one', () => {
-    const out = checkScaleUpsLeftFirewalls({
-      output: scaleOutput(),
-      envName: 'e',
-      envConfig: {
-        ha: {
-          primary: { stack: 'e-primary', dbIp: 'not-an-ip' },
-          standby: { stack: 'e-standby' },
-        },
+    const out = check(scaleOutput(), true, {
+      ha: {
+        primary: { stack: 'e-primary', dbIp: 'not-an-ip' },
+        standby: { stack: 'e-standby' },
       },
     });
     expect(out.map((r) => r.status)).toEqual(['fail', 'fail']);
@@ -277,10 +302,13 @@ describe('lifecycle wiring', () => {
     expect(step).toContain('runScaleHaChecks(');
     expect(step).toContain('runReplicationChecks(');
     expect(step).toContain('firewalls: readReplicationFirewalls');
-    expect(step).toContain('checkScaleUpsLeftFirewalls(');
-    // Inline rules: the provider's program declares them, so its ups are read.
+    expect(step).toContain('checkScaleUpsKeptReplicationRule(');
+    // Inline rules: the provider's program declares them, so its ups are read,
+    // the markers counting where a refresh reads the rules back in place.
+    expect(step).toMatch(/const scaleProvider = getProviderClass\(/);
+    expect(step).toMatch(/inlineFirewallRules:\s*!scaleProvider\.K8S_OPERATOR_RULES_AFTER_UP,/);
     expect(step).toMatch(
-      /inlineFirewallRules:\s*!getProviderClass\([^)]*\)\s*\.K8S_OPERATOR_RULES_AFTER_UP,/,
+      /rulesReadBackInPlace:\s*scaleProvider\.K8S_FIREWALL_RULES_READ_BACK_IN_PLACE,/,
     );
   });
 

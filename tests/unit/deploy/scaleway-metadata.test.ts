@@ -55,7 +55,12 @@ function run(metadata: object | string | null, nics: Nic[]) {
   );
 }
 
-describe('_scaleway-metadata.sh (executed)', () => {
+// Several cases run a wait to the end: 90 passes of the NIC finder, 15 of the
+// metadata read, 30 of the start-time script, each pass spawning ip, awk and
+// grep (the harness's sleep returns at once). About half a second alone, but
+// past vitest's 5 s default under a full parallel run (one timed out
+// 2026-11-27), so the suite gets room for that work.
+describe('_scaleway-metadata.sh (executed)', { timeout: 30_000 }, () => {
   it('the sandbox moves every system root the include writes', () => {
     for (const root of SCALEWAY_SYSTEM_ROOTS) {
       expect(INCLUDE).toContain(root);

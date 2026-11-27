@@ -27,20 +27,31 @@
  *     sides' ups. The read proves the opener paired each firewall with the
  *     right peer after the roles swapped.
  *
- * What the scale's ups did is read from their own per-resource markers
- * (checkScaleUpsLeftFirewalls): `[perf] scale.k8s.<stack>.upStack.resource.
- * <Type>.<name>`, one per resource an up created, updated or replaced
- * (src/lib/iac/resource-timing.js). On an inline-rule provider no firewall
- * resource may appear: an up that planned a firewall change declared
- * something other than what REST wrote. That holds for an environment this
- * run deployed. The first up after a CLI upgrade, on an environment an older
- * CLI deployed, is not an e2e case.
+ * What the scale's ups did is read from the scale's own output
+ * (checkScaleUpsKeptReplicationRule). Each converge says the peer its program
+ * declares the rule from (replicationRuleNotice, iac/program-inputs.js), and
+ * that must be the peer the record names. Its per-resource markers,
+ * `[perf] scale.k8s.<stack>.upStack.resource.<Type>.<name>`, one per resource
+ * an up created, updated or replaced (src/lib/iac/resource-timing.js), add
+ * the end-to-end proof where a refresh reads the rules back in place
+ * (K8S_FIREWALL_RULES_READ_BACK_IN_PLACE): there no firewall resource may
+ * appear, since an up that planned a firewall change declared something
+ * other than what REST wrote. Scaleway's provider plans the first up after a
+ * REST insert as a change however the rules were declared, so there the
+ * declared peer is the proof, and the program census
+ * (tests/unit/iac/k8s-firewall-round-trip-census.test.ts) that the rule it
+ * declares is the one REST writes. That holds for an environment this run
+ * deployed. The first up after a CLI upgrade, on an environment an older CLI
+ * deployed, is not an e2e case.
  *
  * Firewalls and markers are named by STACK (`<project>-<stack>-firewall`,
  * `scale.k8s.<stack>`): a failover swaps the roles, never the stacks. Modes
  * other than k8s-ha run none of these checks.
  */
-import { replicationPeerIpFor } from '../../../src/lib/iac/program-inputs.js';
+import {
+  parseReplicationRuleNotices,
+  replicationPeerIpFor,
+} from '../../../src/lib/iac/program-inputs.js';
 import { parsePerfLines } from '../metrics/reporter.js';
 import type { VerificationResult } from '../scenarios/types.js';
 
@@ -137,21 +148,26 @@ export async function checkReplicationFirewalls(opts: {
 const FIREWALL_TYPE = /Firewall|SecurityGroup/;
 
 /**
- * Check the scale's ups changed no firewall resource on either side, from the
- * per-resource markers in the scale CLI's output. A side whose up left no
- * `scale.k8s.<stack>.upStack` marker fails too: with perf tracing off, or no
- * up run, an absent firewall marker would prove nothing.
+ * Check each side's scale up kept the replication rule, from the scale CLI's
+ * output. Its converge must say it declares the rule from the peer the record
+ * names. Where `rulesReadBackInPlace`, its up must also have changed no
+ * firewall resource. A side whose up left no `scale.k8s.<stack>.upStack`
+ * marker fails too: with perf tracing off, or no up run, an absent firewall
+ * marker would prove nothing.
  */
-export function checkScaleUpsLeftFirewalls(opts: {
+export function checkScaleUpsKeptReplicationRule(opts: {
   /** The scale CLI's stdout and stderr. */
   output: string;
   envName: string;
   envConfig: HaEnvRecord;
+  /** The provider's K8S_FIREWALL_RULES_READ_BACK_IN_PLACE. */
+  rulesReadBackInPlace: boolean;
 }): VerificationResult[] {
   const perf = parsePerfLines(opts.output).map((e) => e.name);
+  const declared = parseReplicationRuleNotices(opts.output);
   return sidesOf(opts.envName, opts.envConfig).map((side) => {
     const { stack } = side;
-    const checkName = `scale_firewall_unchanged:${stack}`;
+    const checkName = `scale_up_kept_replication_rule:${stack}`;
     const fail = (errorMessage: string): VerificationResult => ({
       checkName,
       status: 'fail',
@@ -167,6 +183,13 @@ export function checkScaleUpsLeftFirewalls(opts: {
           `firewall change (expected peer database node ${peerIp})`,
       );
     }
+    const said = declared.get(stack);
+    if (said !== peerIp) {
+      return fail(
+        `stack ${stack}: the scale's converge ${said ? `declared the rule from ${said}` : 'declared no replication rule'}, ` +
+          `not from the peer database node ${peerIp}, so its up reset the firewall without it`,
+      );
+    }
     const changed = perf
       .filter((name) => name.startsWith(`${stem}.resource.`))
       .map((name) => name.slice(`${stem}.resource.`.length))
@@ -174,19 +197,24 @@ export function checkScaleUpsLeftFirewalls(opts: {
         const [type, name] = resource.split('.');
         return name !== undefined && FIREWALL_TYPE.test(type);
       });
-    return changed.length > 0
-      ? fail(
-          `stack ${stack}: the scale's up changed ${changed.join(', ')}, so its program did not ` +
-            `declare the rules REST wrote (UDP 51821 from the peer database node ${peerIp} among them)`,
-        )
-      : { checkName, status: 'pass', details: { stack, peerIp } };
+    if (changed.length > 0 && opts.rulesReadBackInPlace) {
+      return fail(
+        `stack ${stack}: the scale's up changed ${changed.join(', ')}, so its program did not ` +
+          `declare the rules REST wrote (UDP 51821 from the peer database node ${peerIp} among them)`,
+      );
+    }
+    return {
+      checkName,
+      status: 'pass',
+      details: { stack, peerIp, ...(changed.length > 0 && { rewrote: changed }) },
+    };
   });
 }
 
 /**
  * The checks verify-scale adds for `mode`: replication, the firewall read
  * and, on a provider whose program declares its rules inline
- * (`K8S_OPERATOR_RULES_AFTER_UP === false`), the scale's markers. All for
+ * (`K8S_OPERATOR_RULES_AFTER_UP === false`), what the scale's ups kept. All for
  * k8s-ha, none otherwise. The checks are injected so the gating is testable
  * without SSH or a cloud.
  */
